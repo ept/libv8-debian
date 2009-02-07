@@ -1,0 +1,21 @@
+Source: libv8
+Priority: extra
+Maintainer: Antonio Radici <antonio@dyne.org>
+Build-Depends: debhelper (>= 7)
+Standards-Version: 3.8.0
+Section: libs
+Homepage: <insert the upstream URL, if relevant>
+
+Package: libv8-dev
+Section: libdevel
+Architecture: any
+Depends: libv8BROKEN (= ${binary:Version})
+Description: <insert up to 60 chars description>
+ <insert long description, indented with spaces>
+
+Package: libv8BROKEN
+Section: libs
+Architecture: any
+Depends: ${shlibs:Depends}, ${misc:Depends}
+Description: <insert up to 60 chars description>
+ <insert long description, indented with spaces>

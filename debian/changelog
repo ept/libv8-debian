@@ -1,0 +1,5 @@
+libv8 (0.3-1) unstable; urgency=low
+
+  * Initial release (Closes: #nnnn)  <nnnn is the bug number of your ITP>
+
+ -- Antonio Radici <antonio@dyne.org>  Sat, 07 Feb 2009 01:38:09 +0100
