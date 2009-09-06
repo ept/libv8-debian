@@ -28,10 +28,13 @@
 // Flags: --expose-debug-as debug
 // Test the mirror object for string values
 
+const kMaxProtocolStringLength = 80; // Constant from mirror-delay.js
+
 function testStringMirror(s) {
   // Create mirror and JSON representation.
   var mirror = debug.MakeMirror(s);
-  var json = mirror.toJSONProtocol(true);
+  var serializer = debug.MakeMirrorSerializer();
+  var json = JSON.stringify(serializer.serializeValue(mirror));
 
   // Check the mirror hierachy.
   assertTrue(mirror instanceof debug.Mirror);
@@ -44,15 +47,25 @@ function testStringMirror(s) {
   assertTrue(mirror.isPrimitive());
 
   // Test text representation
-  assertEquals(s, mirror.toText());
+  if (s.length <= kMaxProtocolStringLength) {
+    assertEquals(s, mirror.toText());
+  } else {
+    assertEquals(s.substring(0, kMaxProtocolStringLength),
+                 mirror.toText().substring(0, kMaxProtocolStringLength));
+  }
 
   // Parse JSON representation and check.
   var fromJSON = eval('(' + json + ')');
   assertEquals('string', fromJSON.type);
-  assertEquals(s, fromJSON.value);
+  if (s.length <= kMaxProtocolStringLength) {
+    assertEquals(s, fromJSON.value);
+  } else {
+    assertEquals(s.substring(0, kMaxProtocolStringLength),
+                 fromJSON.value.substring(0, kMaxProtocolStringLength));
+    assertEquals(fromJSON.fromIndex, 0);
+    assertEquals(fromJSON.toIndex, kMaxProtocolStringLength);
+  }
 }
-
-Number =2;
 
 // Test a number of different strings.
 testStringMirror('');
@@ -67,3 +80,10 @@ testStringMirror('\\');
 testStringMirror('\b\t\n\f\r');
 testStringMirror('\u0001\u0002\u001E\u001F');
 testStringMirror('"a":1,"b":2');
+
+var s = "1234567890"
+s = s + s + s + s + s + s + s + s;
+assertEquals(kMaxProtocolStringLength, s.length);
+testStringMirror(s);
+s = s + 'X';
+testStringMirror(s);

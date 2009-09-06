@@ -28,18 +28,30 @@
 #include "v8.h"
 
 #include "api.h"
+#include "bootstrapper.h"
 #include "debug.h"
 #include "execution.h"
 #include "v8threads.h"
+#include "regexp-stack.h"
 
 namespace v8 {
 
 static internal::Thread::LocalStorageKey thread_state_key =
     internal::Thread::CreateThreadLocalKey();
+static internal::Thread::LocalStorageKey thread_id_key =
+    internal::Thread::CreateThreadLocalKey();
+
+
+// Track whether this V8 instance has ever called v8::Locker. This allows the
+// API code to verify that the lock is always held when V8 is being entered.
+bool Locker::active_ = false;
+
 
 // Constructor for the Locker object.  Once the Locker is constructed the
 // current thread will be guaranteed to have the big V8 lock.
 Locker::Locker() : has_lock_(false), top_level_(true) {
+  // Record that the Locker has been used at least once.
+  active_ = true;
   // Get the big lock if necessary.
   if (!internal::ThreadManager::IsLockedByCurrentThread()) {
     internal::ThreadManager::Lock();
@@ -51,6 +63,9 @@ Locker::Locker() : has_lock_(false), top_level_(true) {
     }
   }
   ASSERT(internal::ThreadManager::IsLockedByCurrentThread());
+
+  // Make sure this thread is assigned a thread id.
+  internal::ThreadManager::AssignId();
 }
 
 
@@ -105,11 +120,17 @@ bool ThreadManager::RestoreThread() {
     lazily_archived_thread_.Initialize(ThreadHandle::INVALID);
     ASSERT(Thread::GetThreadLocal(thread_state_key) ==
            lazily_archived_thread_state_);
+    lazily_archived_thread_state_->set_id(kInvalidId);
     lazily_archived_thread_state_->LinkInto(ThreadState::FREE_LIST);
     lazily_archived_thread_state_ = NULL;
     Thread::SetThreadLocal(thread_state_key, NULL);
     return true;
   }
+
+  // Make sure that the preemption thread cannot modify the thread state while
+  // it is being archived or restored.
+  ExecutionAccess access;
+
   // If there is another thread that was lazily archived then we have to really
   // archive it now.
   if (lazily_archived_thread_.IsValid()) {
@@ -123,9 +144,18 @@ bool ThreadManager::RestoreThread() {
   char* from = state->data();
   from = HandleScopeImplementer::RestoreThread(from);
   from = Top::RestoreThread(from);
+#ifdef ENABLE_DEBUGGER_SUPPORT
   from = Debug::RestoreDebug(from);
+#endif
   from = StackGuard::RestoreStackGuard(from);
+  from = RegExpStack::RestoreStack(from);
+  from = Bootstrapper::RestoreState(from);
   Thread::SetThreadLocal(thread_state_key, NULL);
+  if (state->terminate_on_restore()) {
+    StackGuard::TerminateExecution();
+    state->set_terminate_on_restore(false);
+  }
+  state->set_id(kInvalidId);
   state->Unlink();
   state->LinkInto(ThreadState::FREE_LIST);
   return true;
@@ -148,8 +178,12 @@ void ThreadManager::Unlock() {
 static int ArchiveSpacePerThread() {
   return HandleScopeImplementer::ArchiveSpacePerThread() +
                             Top::ArchiveSpacePerThread() +
+#ifdef ENABLE_DEBUGGER_SUPPORT
                           Debug::ArchiveSpacePerThread() +
-                     StackGuard::ArchiveSpacePerThread();
+#endif
+                     StackGuard::ArchiveSpacePerThread() +
+                    RegExpStack::ArchiveSpacePerThread() +
+                   Bootstrapper::ArchiveSpacePerThread();
 }
 
 
@@ -157,7 +191,9 @@ ThreadState* ThreadState::free_anchor_ = new ThreadState();
 ThreadState* ThreadState::in_use_anchor_ = new ThreadState();
 
 
-ThreadState::ThreadState() : next_(this), previous_(this) {
+ThreadState::ThreadState() : id_(ThreadManager::kInvalidId),
+                             terminate_on_restore_(false),
+                             next_(this), previous_(this) {
 }
 
 
@@ -205,6 +241,7 @@ ThreadState* ThreadState::Next() {
 }
 
 
+int ThreadManager::next_id_ = 0;
 Mutex* ThreadManager::mutex_ = OS::CreateMutex();
 ThreadHandle ThreadManager::mutex_owner_(ThreadHandle::INVALID);
 ThreadHandle ThreadManager::lazily_archived_thread_(ThreadHandle::INVALID);
@@ -219,6 +256,9 @@ void ThreadManager::ArchiveThread() {
   Thread::SetThreadLocal(thread_state_key, reinterpret_cast<void*>(state));
   lazily_archived_thread_.Initialize(ThreadHandle::SELF);
   lazily_archived_thread_state_ = state;
+  ASSERT(state->id() == kInvalidId);
+  state->set_id(CurrentId());
+  ASSERT(state->id() != kInvalidId);
 }
 
 
@@ -226,10 +266,16 @@ void ThreadManager::EagerlyArchiveThread() {
   ThreadState* state = lazily_archived_thread_state_;
   state->LinkInto(ThreadState::IN_USE_LIST);
   char* to = state->data();
+  // Ensure that data containing GC roots are archived first, and handle them
+  // in ThreadManager::Iterate(ObjectVisitor*).
   to = HandleScopeImplementer::ArchiveThread(to);
   to = Top::ArchiveThread(to);
+#ifdef ENABLE_DEBUGGER_SUPPORT
   to = Debug::ArchiveDebug(to);
+#endif
   to = StackGuard::ArchiveStackGuard(to);
+  to = RegExpStack::ArchiveStack(to);
+  to = Bootstrapper::ArchiveState(to);
   lazily_archived_thread_.Initialize(ThreadHandle::INVALID);
   lazily_archived_thread_state_ = NULL;
 }
@@ -247,84 +293,112 @@ void ThreadManager::Iterate(ObjectVisitor* v) {
 }
 
 
-void ThreadManager::MarkCompactPrologue() {
+void ThreadManager::MarkCompactPrologue(bool is_compacting) {
   for (ThreadState* state = ThreadState::FirstInUse();
        state != NULL;
        state = state->Next()) {
     char* data = state->data();
     data += HandleScopeImplementer::ArchiveSpacePerThread();
-    Top::MarkCompactPrologue(data);
+    Top::MarkCompactPrologue(is_compacting, data);
   }
 }
 
 
-void ThreadManager::MarkCompactEpilogue() {
+void ThreadManager::MarkCompactEpilogue(bool is_compacting) {
   for (ThreadState* state = ThreadState::FirstInUse();
        state != NULL;
        state = state->Next()) {
     char* data = state->data();
     data += HandleScopeImplementer::ArchiveSpacePerThread();
-    Top::MarkCompactEpilogue(data);
+    Top::MarkCompactEpilogue(is_compacting, data);
   }
 }
+
+
+int ThreadManager::CurrentId() {
+  return Thread::GetThreadLocalInt(thread_id_key);
+}
+
+
+void ThreadManager::AssignId() {
+  if (!Thread::HasThreadLocal(thread_id_key)) {
+    ASSERT(Locker::IsLocked());
+    int thread_id = next_id_++;
+    Thread::SetThreadLocalInt(thread_id_key, thread_id);
+    Top::set_thread_id(thread_id);
+  }
+}
+
+
+void ThreadManager::TerminateExecution(int thread_id) {
+  for (ThreadState* state = ThreadState::FirstInUse();
+       state != NULL;
+       state = state->Next()) {
+    if (thread_id == state->id()) {
+      state->set_terminate_on_restore(true);
+    }
+  }
+}
+
+
+// This is the ContextSwitcher singleton. There is at most a single thread
+// running which delivers preemption events to V8 threads.
+ContextSwitcher* ContextSwitcher::singleton_ = NULL;
 
 
 ContextSwitcher::ContextSwitcher(int every_n_ms)
-  : preemption_semaphore_(OS::CreateSemaphore(0)),
-    keep_going_(true),
+  : keep_going_(true),
     sleep_ms_(every_n_ms) {
 }
 
 
-static v8::internal::ContextSwitcher* switcher;
-
-
+// Set the scheduling interval of V8 threads. This function starts the
+// ContextSwitcher thread if needed.
 void ContextSwitcher::StartPreemption(int every_n_ms) {
   ASSERT(Locker::IsLocked());
-  if (switcher == NULL) {
-    switcher = new ContextSwitcher(every_n_ms);
-    switcher->Start();
+  if (singleton_ == NULL) {
+    // If the ContextSwitcher thread is not running at the moment start it now.
+    singleton_ = new ContextSwitcher(every_n_ms);
+    singleton_->Start();
   } else {
-    switcher->sleep_ms_ = every_n_ms;
+    // ContextSwitcher thread is already running, so we just change the
+    // scheduling interval.
+    singleton_->sleep_ms_ = every_n_ms;
   }
 }
 
 
+// Disable preemption of V8 threads. If multiple threads want to use V8 they
+// must cooperatively schedule amongst them from this point on.
 void ContextSwitcher::StopPreemption() {
   ASSERT(Locker::IsLocked());
-  if (switcher != NULL) {
-    switcher->Stop();
-    delete(switcher);
-    switcher = NULL;
+  if (singleton_ != NULL) {
+    // The ContextSwitcher thread is running. We need to stop it and release
+    // its resources.
+    singleton_->keep_going_ = false;
+    singleton_->Join();  // Wait for the ContextSwitcher thread to exit.
+    // Thread has exited, now we can delete it.
+    delete(singleton_);
+    singleton_ = NULL;
   }
 }
 
 
+// Main loop of the ContextSwitcher thread: Preempt the currently running V8
+// thread at regular intervals.
 void ContextSwitcher::Run() {
   while (keep_going_) {
     OS::Sleep(sleep_ms_);
     StackGuard::Preempt();
-    WaitForPreemption();
   }
 }
 
 
-void ContextSwitcher::Stop() {
-  ASSERT(Locker::IsLocked());
-  keep_going_ = false;
-  preemption_semaphore_->Signal();
-  Join();
-}
-
-
-void ContextSwitcher::WaitForPreemption() {
-  preemption_semaphore_->Wait();
-}
-
-
+// Acknowledge the preemption by the receiving thread.
 void ContextSwitcher::PreemptionReceived() {
   ASSERT(Locker::IsLocked());
-  switcher->preemption_semaphore_->Signal();
+  // There is currently no accounting being done for this. But could be in the
+  // future, which is why we leave this in.
 }
 
 

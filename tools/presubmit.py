@@ -35,6 +35,9 @@ import re
 import sys
 import subprocess
 
+# Disabled LINT rules and reason.
+# build/include_what_you_use: Started giving false positives for variables
+#  named "string" and "map" assuming that you needed to include STL headers.
 
 ENABLED_LINT_RULES = """
 build/class
@@ -42,7 +45,6 @@ build/deprecated
 build/endif_comment
 build/forward_decl
 build/include_order
-build/include_what_you_use
 build/printf_format
 build/storage_class
 legal/copyright
@@ -151,7 +153,7 @@ class CppLintProcessor(SourceFileProcessor):
 
 
 COPYRIGHT_HEADER_PATTERN = re.compile(
-    r'Copyright [\d-]*2008 the V8 project authors. All rights reserved.')
+    r'Copyright [\d-]*200[8-9] the V8 project authors. All rights reserved.')
 
 class SourceProcessor(SourceFileProcessor):
   """
@@ -175,7 +177,7 @@ class SourceProcessor(SourceFileProcessor):
               or (name == 'obj'))
 
   IGNORE_COPYRIGHTS = ['earley-boyer.js', 'raytrace.js', 'crypto.js',
-      'libraries.cc', 'libraries-empty.cc']
+      'libraries.cc', 'libraries-empty.cc', 'jsmin.py', 'regexp-pcre.js']
   IGNORE_TABS = IGNORE_COPYRIGHTS + ['unicode-test.js',
       'html-comments.js']
 

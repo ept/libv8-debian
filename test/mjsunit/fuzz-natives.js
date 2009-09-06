@@ -31,8 +31,8 @@ function makeArguments() {
   var result = [ ];
   result.push(17);
   result.push(-31);
-  result.push(Number.MAX_VALUE);
-  result.push(new Array(5003));
+  result.push(new Array(100));
+  result.push(new Array(100003));
   result.push(Number.MIN_VALUE);
   result.push("whoops");
   result.push("x");
@@ -106,6 +106,14 @@ var knownProblems = {
   "SetScriptBreakPoint": true,
   "ChangeBreakOnException": true,
   "PrepareStep": true,
+
+  // Too slow.
+  "DebugReferencedBy": true,
+
+  // Calling disable/enable access checks may interfere with the
+  // the rest of the tests.
+  "DisableAccessChecks": true,
+  "EnableAccessChecks": true,
   
   // These functions should not be callable as runtime functions.
   "NewContext": true,
@@ -113,8 +121,14 @@ var knownProblems = {
   "PushContext": true,
   "LazyCompile": true,
   "CreateObjectLiteralBoilerplate": true,
-  "CloneObjectLiteralBoilerplate": true,
-  "IS_VAR": true
+  "CloneLiteralBoilerplate": true,
+  "CloneShallowLiteralBoilerplate": true,
+  "CreateArrayLiteralBoilerplate": true,
+  "IS_VAR": true,
+  "ResolvePossiblyDirectEval": true,
+  "Log": true,
+
+  "CollectStackTrace": true
 };
 
 var currentlyUncallable = {

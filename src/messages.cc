@@ -33,7 +33,8 @@
 #include "spaces-inl.h"
 #include "top.h"
 
-namespace v8 { namespace internal {
+namespace v8 {
+namespace internal {
 
 
 // If no message listeners have been registered this one is called
@@ -66,7 +67,7 @@ Handle<Object> MessageHandler::MakeMessageObject(
     Vector< Handle<Object> > args,
     Handle<String> stack_trace) {
   // Build error message object
-  HandleScope scope;
+  v8::HandleScope scope;  // Instantiate a closeable HandleScope for EscapeFrom.
   Handle<Object> type_str = Factory::LookupAsciiSymbol(type);
   Handle<Object> array = Factory::NewJSArray(args.length());
   for (int i = 0; i < args.length(); i++)
@@ -96,15 +97,25 @@ Handle<Object> MessageHandler::MakeMessageObject(
                           script.location(),
                           stack_trace_val.location() };
 
+  // Setup a catch handler to catch exceptions in creating the message. This
+  // handler is non-verbose to avoid calling MakeMessage recursively in case of
+  // an exception.
+  v8::TryCatch catcher;
+  catcher.SetVerbose(false);
+  catcher.SetCaptureMessage(false);
+
+  // Format the message.
   bool caught_exception = false;
   Handle<Object> message =
-      Execution::TryCall(fun, Factory::undefined_value(), argc, argv,
-                         &caught_exception);
+      Execution::Call(fun, Factory::undefined_value(), argc, argv,
+                      &caught_exception);
+
   // If creating the message (in JS code) resulted in an exception, we
   // skip doing the callback. This usually only happens in case of
   // stack overflow exceptions being thrown by the parser when the
   // stack is almost full.
   if (caught_exception) return Handle<Object>();
+
   return message.EscapeFrom(&scope);
 }
 
@@ -136,14 +147,12 @@ Handle<String> MessageHandler::GetMessage(Handle<Object> data) {
   Handle<String> fmt_str = Factory::LookupAsciiSymbol("FormatMessage");
   Handle<JSFunction> fun =
       Handle<JSFunction>(
-          JSFunction::cast(
-              Top::security_context_builtins()->GetProperty(*fmt_str)));
+          JSFunction::cast(Top::builtins()->GetProperty(*fmt_str)));
   Object** argv[1] = { data.location() };
 
   bool caught_exception;
   Handle<Object> result =
-      Execution::TryCall(fun, Top::security_context_builtins(), 1, argv,
-                         &caught_exception);
+      Execution::TryCall(fun, Top::builtins(), 1, argv, &caught_exception);
 
   if (caught_exception || !result->IsString()) {
     return Factory::LookupAsciiSymbol("<error>");

@@ -1,4 +1,4 @@
-// Copyright 2006-2008 the V8 project authors. All rights reserved.
+// Copyright 2006-2009 the V8 project authors. All rights reserved.
 // Redistribution and use in source and binary forms, with or without
 // modification, are permitted provided that the following conditions are
 // met:
@@ -28,7 +28,8 @@
 #ifndef V8_LIST_H_
 #define V8_LIST_H_
 
-namespace v8 { namespace internal {
+namespace v8 {
+namespace internal {
 
 
 // ----------------------------------------------------------------------------
@@ -46,39 +47,49 @@ namespace v8 { namespace internal {
 template <typename T, class P>
 class List {
  public:
+
   INLINE(explicit List(int capacity)) { Initialize(capacity); }
   INLINE(~List()) { DeleteData(data_); }
 
   INLINE(void* operator new(size_t size)) { return P::New(size); }
   INLINE(void operator delete(void* p, size_t)) { return P::Delete(p); }
 
+  // Returns a reference to the element at index i.  This reference is
+  // not safe to use after operations that can change the list's
+  // backing store (eg, Add).
   inline T& operator[](int i) const  {
     ASSERT(0 <= i && i < length_);
     return data_[i];
   }
-  inline T& at(int i) const  { return this->operator[](i); }
-  INLINE(const T& last() const)  {
-    ASSERT(!is_empty());
-    return this->at(length_ - 1);
+  inline T& at(int i) const  { return operator[](i); }
+  inline T& last() const {
+    return at(length_ - 1);
   }
 
   INLINE(bool is_empty() const) { return length_ == 0; }
   INLINE(int length() const) { return length_; }
+  INLINE(int capacity() const) { return capacity_; }
 
   Vector<T> ToVector() { return Vector<T>(data_, length_); }
 
+  Vector<const T> ToConstVector() { return Vector<const T>(data_, length_); }
+
   // Adds a copy of the given 'element' to the end of the list,
   // expanding the list if necessary.
-  T& Add(const T& element);
+  void Add(const T& element);
+
+  // Add all the elements from the argument list to this list.
+  void AddAll(const List<T, P>& other);
 
   // Added 'count' elements with the value 'value' and returns a
   // vector that allows access to the elements.  The vector is valid
   // until the next change is made to this list.
-  Vector<T> AddBlock(const T& value, int count);
+  Vector<T> AddBlock(T value, int count);
 
   // Removes the i'th element without deleting it even if T is a
   // pointer type; moves all elements above i "down". Returns the
-  // removed element.
+  // removed element.  This function's complexity is linear in the
+  // size of the list.
   T Remove(int i);
 
   // Removes the last element without deleting it even if T is a
@@ -92,11 +103,14 @@ class List {
   // Drops all but the first 'pos' elements from the list.
   INLINE(void Rewind(int pos));
 
+  bool Contains(const T& elm);
+
   // Iterate through all list entries, starting at index 0.
   void Iterate(void (*callback)(T* x));
 
   // Sort all list entries (using QuickSort)
   void Sort(int (*cmp)(const T* x, const T* y));
+  void Sort();
 
   INLINE(void Initialize(int capacity));
 
@@ -108,9 +122,27 @@ class List {
   INLINE(T* NewData(int n))  { return static_cast<T*>(P::New(n * sizeof(T))); }
   INLINE(void DeleteData(T* data))  { P::Delete(data); }
 
+  // Increase the capacity of a full list, and add an element.
+  // List must be full already.
+  void ResizeAdd(const T& element);
+
+  // Inlined implementation of ResizeAdd, shared by inlined and
+  // non-inlined versions of ResizeAdd.
+  void ResizeAddInternal(const T& element);
+
+  // Resize the list.
+  void Resize(int new_capacity);
+
   DISALLOW_COPY_AND_ASSIGN(List);
 };
 
+class FrameElement;
+
+// Add() is inlined, ResizeAdd() called by Add() is inlined except for
+// Lists of FrameElements, and ResizeAddInternal() is inlined in ResizeAdd().
+template <>
+void List<FrameElement,
+          FreeStoreAllocationPolicy>::ResizeAdd(const FrameElement& element);
 
 } }  // namespace v8::internal
 

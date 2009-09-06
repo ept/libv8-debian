@@ -87,7 +87,8 @@ TEST(Promotion) {
 
   // Allocate a fixed array in the new space.
   int array_size =
-      (Heap::MaxHeapObjectSize() - Array::kHeaderSize) / (kPointerSize * 4);
+      (Heap::MaxObjectSizeInPagedSpace() - FixedArray::kHeaderSize) /
+      (kPointerSize * 4);
   Object* obj = Heap::AllocateFixedArray(array_size);
   CHECK(!obj->IsFailure());
 
@@ -118,7 +119,8 @@ TEST(NoPromotion) {
   CHECK(Heap::CollectGarbage(0, OLD_POINTER_SPACE));
 
   // Allocate a big Fixed array in the new space.
-  int size = (Heap::MaxHeapObjectSize() - Array::kHeaderSize) / kPointerSize;
+  int size = (Heap::MaxObjectSizeInPagedSpace() - FixedArray::kHeaderSize) /
+      kPointerSize;
   Object* obj = Heap::AllocateFixedArray(size);
 
   Handle<FixedArray> array(FixedArray::cast(obj));
@@ -244,7 +246,7 @@ TEST(GCCallback) {
 
 
 static int NumberOfWeakCalls = 0;
-static void WeakPointerCallback(v8::Persistent<v8::Object> handle, void* id) {
+static void WeakPointerCallback(v8::Persistent<v8::Value> handle, void* id) {
   NumberOfWeakCalls++;
 }
 
@@ -282,10 +284,12 @@ TEST(ObjectGroups) {
   Handle<FixedArray>::cast(g1s2)->set(0, *g2s2);
   Handle<FixedArray>::cast(g2s1)->set(0, *g1s1);
 
-  GlobalHandles::AddToGroup(reinterpret_cast<void*>(1), g1s1.location());
-  GlobalHandles::AddToGroup(reinterpret_cast<void*>(1), g1s2.location());
-  GlobalHandles::AddToGroup(reinterpret_cast<void*>(2), g2s1.location());
-  GlobalHandles::AddToGroup(reinterpret_cast<void*>(2), g2s2.location());
+  {
+    Object** g1_objects[] = { g1s1.location(), g1s2.location() };
+    Object** g2_objects[] = { g2s1.location(), g2s2.location() };
+    GlobalHandles::AddGroup(g1_objects, 2);
+    GlobalHandles::AddGroup(g2_objects, 2);
+  }
   // Do a full GC
   CHECK(Heap::CollectGarbage(0, OLD_POINTER_SPACE));
 
@@ -298,10 +302,12 @@ TEST(ObjectGroups) {
                           &WeakPointerCallback);
 
   // Groups are deleted, rebuild groups.
-  GlobalHandles::AddToGroup(reinterpret_cast<void*>(1), g1s1.location());
-  GlobalHandles::AddToGroup(reinterpret_cast<void*>(1), g1s2.location());
-  GlobalHandles::AddToGroup(reinterpret_cast<void*>(2), g2s1.location());
-  GlobalHandles::AddToGroup(reinterpret_cast<void*>(2), g2s2.location());
+  {
+    Object** g1_objects[] = { g1s1.location(), g1s2.location() };
+    Object** g2_objects[] = { g2s1.location(), g2s2.location() };
+    GlobalHandles::AddGroup(g1_objects, 2);
+    GlobalHandles::AddGroup(g2_objects, 2);
+  }
 
   CHECK(Heap::CollectGarbage(0, OLD_POINTER_SPACE));
 

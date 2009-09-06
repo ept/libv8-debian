@@ -31,7 +31,8 @@
 #include "scopeinfo.h"
 #include "scopes.h"
 
-namespace v8 { namespace internal {
+namespace v8 {
+namespace internal {
 
 // ----------------------------------------------------------------------------
 // A Zone allocator for use with LocalsMap.
@@ -70,28 +71,28 @@ static bool Match(void* key1, void* key2) {
 
 
 // Dummy constructor
-LocalsMap::LocalsMap(bool gotta_love_static_overloading) : HashMap()  {}
+VariableMap::VariableMap(bool gotta_love_static_overloading) : HashMap() {}
 
-LocalsMap::LocalsMap() : HashMap(Match, &LocalsMapAllocator, 8)  {}
-LocalsMap::~LocalsMap()  {}
+VariableMap::VariableMap() : HashMap(Match, &LocalsMapAllocator, 8) {}
+VariableMap::~VariableMap() {}
 
 
-Variable* LocalsMap::Declare(Scope* scope,
-                             Handle<String> name,
-                             Variable::Mode mode,
-                             bool is_valid_LHS,
-                             bool is_this) {
+Variable* VariableMap::Declare(Scope* scope,
+                               Handle<String> name,
+                               Variable::Mode mode,
+                               bool is_valid_lhs,
+                               Variable::Kind kind) {
   HashMap::Entry* p = HashMap::Lookup(name.location(), name->Hash(), true);
   if (p->value == NULL) {
     // The variable has not been declared yet -> insert it.
     ASSERT(p->key == name.location());
-    p->value = new Variable(scope, name, mode, is_valid_LHS, is_this);
+    p->value = new Variable(scope, name, mode, is_valid_lhs, kind);
   }
   return reinterpret_cast<Variable*>(p->value);
 }
 
 
-Variable* LocalsMap::Lookup(Handle<String> name) {
+Variable* VariableMap::Lookup(Handle<String> name) {
   HashMap::Entry* p = HashMap::Lookup(name.location(), name->Hash(), false);
   if (p != NULL) {
     ASSERT(*reinterpret_cast<String**>(p->key) == *name);
@@ -107,14 +108,31 @@ Variable* LocalsMap::Lookup(Handle<String> name) {
 
 
 // Dummy constructor
-Scope::Scope()
-  : inner_scopes_(0),
-    locals_(false),
+Scope::Scope(Type type)
+  : outer_scope_(NULL),
+    inner_scopes_(0),
+    type_(type),
+    scope_name_(Factory::empty_symbol()),
+    variables_(false),
     temps_(0),
     params_(0),
-    nonlocals_(0),
+    dynamics_(NULL),
     unresolved_(0),
-    decls_(0) {
+    decls_(0),
+    receiver_(NULL),
+    function_(NULL),
+    arguments_(NULL),
+    arguments_shadow_(NULL),
+    illegal_redecl_(NULL),
+    scope_inside_with_(false),
+    scope_contains_with_(false),
+    scope_calls_eval_(false),
+    outer_scope_calls_eval_(false),
+    inner_scope_calls_eval_(false),
+    outer_scope_is_eval_scope_(false),
+    force_eager_compilation_(false),
+    num_stack_slots_(0),
+    num_heap_slots_(0) {
 }
 
 
@@ -123,10 +141,9 @@ Scope::Scope(Scope* outer_scope, Type type)
     inner_scopes_(4),
     type_(type),
     scope_name_(Factory::empty_symbol()),
-    locals_(),
     temps_(4),
     params_(4),
-    nonlocals_(4),
+    dynamics_(NULL),
     unresolved_(16),
     decls_(4),
     receiver_(NULL),
@@ -139,6 +156,7 @@ Scope::Scope(Scope* outer_scope, Type type)
     scope_calls_eval_(false),
     outer_scope_calls_eval_(false),
     inner_scope_calls_eval_(false),
+    outer_scope_is_eval_scope_(false),
     force_eager_compilation_(false),
     num_stack_slots_(0),
     num_heap_slots_(0) {
@@ -167,47 +185,66 @@ void Scope::Initialize(bool inside_with) {
   // instead load them directly from the stack. Currently, the only
   // such parameter is 'this' which is passed on the stack when
   // invoking scripts
-  { Variable* var =
-      locals_.Declare(this, Factory::this_symbol(), Variable::VAR, false, true);
-    var->rewrite_ = new Slot(var, Slot::PARAMETER, -1);
-    receiver_ = new VariableProxy(Factory::this_symbol(), true, false);
-    receiver_->BindTo(var);
-  }
+  Variable* var =
+      variables_.Declare(this, Factory::this_symbol(), Variable::VAR,
+                         false, Variable::THIS);
+  var->rewrite_ = new Slot(var, Slot::PARAMETER, -1);
+  receiver_ = new VariableProxy(Factory::this_symbol(), true, false);
+  receiver_->BindTo(var);
 
   if (is_function_scope()) {
     // Declare 'arguments' variable which exists in all functions.
-    // Note that it may never be accessed, in which case it won't
-    // be allocated during variable allocation.
-    Declare(Factory::arguments_symbol(), Variable::VAR);
+    // Note that it might never be accessed, in which case it won't be
+    // allocated during variable allocation.
+    variables_.Declare(this, Factory::arguments_symbol(), Variable::VAR,
+                       true, Variable::ARGUMENTS);
   }
 }
 
 
 
+Variable* Scope::LocalLookup(Handle<String> name) {
+  return variables_.Lookup(name);
+}
+
+
 Variable* Scope::Lookup(Handle<String> name) {
-  return locals_.Lookup(name);
+  for (Scope* scope = this;
+       scope != NULL;
+       scope = scope->outer_scope()) {
+    Variable* var = scope->LocalLookup(name);
+    if (var != NULL) return var;
+  }
+  return NULL;
 }
 
 
 Variable* Scope::DeclareFunctionVar(Handle<String> name) {
   ASSERT(is_function_scope() && function_ == NULL);
-  function_ = new Variable(this, name, Variable::CONST, true, false);
+  function_ = new Variable(this, name, Variable::CONST, true, Variable::NORMAL);
   return function_;
 }
 
 
-Variable* Scope::Declare(Handle<String> name, Variable::Mode mode) {
+Variable* Scope::DeclareLocal(Handle<String> name, Variable::Mode mode) {
   // DYNAMIC variables are introduces during variable allocation,
   // INTERNAL variables are allocated explicitly, and TEMPORARY
   // variables are allocated via NewTemporary().
   ASSERT(mode == Variable::VAR || mode == Variable::CONST);
-  return locals_.Declare(this, name, mode, true, false);
+  return variables_.Declare(this, name, mode, true, Variable::NORMAL);
+}
+
+
+Variable* Scope::DeclareGlobal(Handle<String> name) {
+  ASSERT(is_global_scope());
+  return variables_.Declare(this, name, Variable::DYNAMIC, true,
+                            Variable::NORMAL);
 }
 
 
 void Scope::AddParameter(Variable* var) {
   ASSERT(is_function_scope());
-  ASSERT(Lookup(var->name()) == var);
+  ASSERT(LocalLookup(var->name()) == var);
   params_.Add(var);
 }
 
@@ -235,7 +272,8 @@ void Scope::RemoveUnresolved(VariableProxy* var) {
 
 
 VariableProxy* Scope::NewTemporary(Handle<String> name) {
-  Variable* var = new Variable(this, name, Variable::TEMPORARY, true, false);
+  Variable* var = new Variable(this, name, Variable::TEMPORARY, true,
+                               Variable::NORMAL);
   VariableProxy* tmp = new VariableProxy(name, false, false);
   tmp->BindTo(var);
   temps_.Add(var);
@@ -258,7 +296,7 @@ void Scope::SetIllegalRedeclaration(Expression* expression) {
 }
 
 
-void Scope::VisitIllegalRedeclaration(Visitor* visitor) {
+void Scope::VisitIllegalRedeclaration(AstVisitor* visitor) {
   ASSERT(HasIllegalRedeclaration());
   illegal_redecl_->Accept(visitor);
 }
@@ -276,7 +314,9 @@ void Scope::CollectUsedVariables(List<Variable*, Allocator>* locals) {
       locals->Add(var);
     }
   }
-  for (LocalsMap::Entry* p = locals_.Start(); p != NULL; p = locals_.Next(p)) {
+  for (VariableMap::Entry* p = variables_.Start();
+       p != NULL;
+       p = variables_.Next(p)) {
     Variable* var = reinterpret_cast<Variable*>(p->value);
     if (var->var_uses()->is_used()) {
       locals->Add(var);
@@ -290,9 +330,11 @@ template void Scope::CollectUsedVariables(
     List<Variable*, FreeStoreAllocationPolicy>* locals);
 template void Scope::CollectUsedVariables(
     List<Variable*, PreallocatedStorage>* locals);
+template void Scope::CollectUsedVariables(
+    List<Variable*, ZoneListAllocationPolicy>* locals);
 
 
-void Scope::AllocateVariables() {
+void Scope::AllocateVariables(Handle<Context> context) {
   ASSERT(outer_scope_ == NULL);  // eval or global scopes only
 
   // 1) Propagate scope information.
@@ -301,20 +343,16 @@ void Scope::AllocateVariables() {
   // and assume they may invoke eval themselves. Eventually we could capture
   // this information in the ScopeInfo and then use it here (by traversing
   // the call chain stack, at compile time).
-  PropagateScopeInfo(is_eval_scope());
+  bool eval_scope = is_eval_scope();
+  PropagateScopeInfo(eval_scope, eval_scope);
 
   // 2) Resolve variables.
   Scope* global_scope = NULL;
   if (is_global_scope()) global_scope = this;
-  ResolveVariablesRecursively(global_scope);
+  ResolveVariablesRecursively(global_scope, context);
 
   // 3) Allocate variables.
   AllocateVariablesRecursively();
-}
-
-
-bool Scope::SupportsEval() const {
-  return scope_calls_eval_ || inner_scope_calls_eval_;
 }
 
 
@@ -397,6 +435,14 @@ static void PrintVar(PrettyPrinter* printer, int indent, Variable* var) {
 }
 
 
+static void PrintMap(PrettyPrinter* printer, int indent, VariableMap* map) {
+  for (VariableMap::Entry* p = map->Start(); p != NULL; p = map->Next(p)) {
+    Variable* var = reinterpret_cast<Variable*>(p->value);
+    PrintVar(printer, indent, var);
+  }
+}
+
+
 void Scope::Print(int n) {
   int n0 = (n > 0 ? n : 0);
   int n1 = n0 + 2;  // indentation
@@ -436,6 +482,9 @@ void Scope::Print(int n) {
   if (scope_calls_eval_) Indent(n1, "// scope calls 'eval'\n");
   if (outer_scope_calls_eval_) Indent(n1, "// outer scope calls 'eval'\n");
   if (inner_scope_calls_eval_) Indent(n1, "// inner scope calls 'eval'\n");
+  if (outer_scope_is_eval_scope_) {
+    Indent(n1, "// outer scope is 'eval' scope\n");
+  }
   if (num_stack_slots_ > 0) { Indent(n1, "// ");
   PrintF("%d stack slots\n", num_stack_slots_); }
   if (num_heap_slots_ > 0) { Indent(n1, "// ");
@@ -454,14 +503,14 @@ void Scope::Print(int n) {
   }
 
   Indent(n1, "// local vars\n");
-  for (LocalsMap::Entry* p = locals_.Start(); p != NULL; p = locals_.Next(p)) {
-    Variable* var = reinterpret_cast<Variable*>(p->value);
-    PrintVar(&printer, n1, var);
-  }
+  PrintMap(&printer, n1, &variables_);
 
-  Indent(n1, "// nonlocal vars\n");
-  for (int i = 0; i < nonlocals_.length(); i++)
-    PrintVar(&printer, n1, nonlocals_[i]);
+  Indent(n1, "// dynamic vars\n");
+  if (dynamics_ != NULL) {
+    PrintMap(&printer, n1, dynamics_->GetMap(Variable::DYNAMIC));
+    PrintMap(&printer, n1, dynamics_->GetMap(Variable::DYNAMIC_LOCAL));
+    PrintMap(&printer, n1, dynamics_->GetMap(Variable::DYNAMIC_GLOBAL));
+  }
 
   // Print inner scopes (disable by providing negative n).
   if (n >= 0) {
@@ -476,25 +525,16 @@ void Scope::Print(int n) {
 #endif  // DEBUG
 
 
-Variable* Scope::NonLocal(Handle<String> name) {
-  // Space optimization: reuse existing non-local with the same name.
-  for (int i = 0; i < nonlocals_.length(); i++) {
-    Variable* var = nonlocals_[i];
-    if (var->name().is_identical_to(name)) {
-      ASSERT(var->mode() == Variable::DYNAMIC);
-      return var;
-    }
+Variable* Scope::NonLocal(Handle<String> name, Variable::Mode mode) {
+  if (dynamics_ == NULL) dynamics_ = new DynamicScopePart();
+  VariableMap* map = dynamics_->GetMap(mode);
+  Variable* var = map->Lookup(name);
+  if (var == NULL) {
+    // Declare a new non-local.
+    var = map->Declare(NULL, name, mode, true, Variable::NORMAL);
+    // Allocate it by giving it a dynamic lookup.
+    var->rewrite_ = new Slot(var, Slot::LOOKUP, -1);
   }
-
-  // Otherwise create a new new-local and add it to the list.
-  Variable* var = new Variable(
-    NULL /* we don't know the scope */,
-    name, Variable::DYNAMIC, true, false);
-  nonlocals_.Add(var);
-
-  // Allocate it by giving it a dynamic lookup.
-  var->rewrite_ = new Slot(var, Slot::LOOKUP, -1);
-
   return var;
 }
 
@@ -505,7 +545,9 @@ Variable* Scope::NonLocal(Handle<String> name) {
 // because the variable is just a guess (and may be shadowed by another
 // variable that is introduced dynamically via an 'eval' call or a 'with'
 // statement).
-Variable* Scope::LookupRecursive(Handle<String> name, bool inner_lookup) {
+Variable* Scope::LookupRecursive(Handle<String> name,
+                                 bool inner_lookup,
+                                 Variable** invalidated_local) {
   // If we find a variable, but the current scope calls 'eval', the found
   // variable may not be the correct one (the 'eval' may introduce a
   // property with the same name). In that case, remember that the variable
@@ -513,7 +555,7 @@ Variable* Scope::LookupRecursive(Handle<String> name, bool inner_lookup) {
   bool guess = scope_calls_eval_;
 
   // Try to find the variable in this scope.
-  Variable* var = Lookup(name);
+  Variable* var = LocalLookup(name);
 
   if (var != NULL) {
     // We found a variable. If this is not an inner lookup, we are done.
@@ -531,12 +573,12 @@ Variable* Scope::LookupRecursive(Handle<String> name, bool inner_lookup) {
     // This lookup corresponds to a lookup in the "intermediate" scope sitting
     // between this scope and the outer scope. (ECMA-262, 3rd., requires that
     // the name of named function literal is kept in an intermediate scope
-    // inbetween this scope and the next outer scope.)
+    // in between this scope and the next outer scope.)
     if (function_ != NULL && function_->name().is_identical_to(name)) {
       var = function_;
 
     } else if (outer_scope_ != NULL) {
-      var = outer_scope_->LookupRecursive(name, true /* inner lookup */);
+      var = outer_scope_->LookupRecursive(name, true, invalidated_local);
       // We may have found a variable in an outer scope. However, if
       // the current scope is inside a 'with', the actual variable may
       // be a property introduced via the 'with' statement. Then, the
@@ -557,14 +599,18 @@ Variable* Scope::LookupRecursive(Handle<String> name, bool inner_lookup) {
     var->is_accessed_from_inner_scope_ = true;
 
   // If the variable we have found is just a guess, invalidate the result.
-  if (guess)
+  if (guess) {
+    *invalidated_local = var;
     var = NULL;
+  }
 
   return var;
 }
 
 
-void Scope::ResolveVariable(Scope* global_scope, VariableProxy* proxy) {
+void Scope::ResolveVariable(Scope* global_scope,
+                            Handle<Context> context,
+                            VariableProxy* proxy) {
   ASSERT(global_scope == NULL || global_scope->is_global_scope());
 
   // If the proxy is already resolved there's nothing to do
@@ -572,7 +618,8 @@ void Scope::ResolveVariable(Scope* global_scope, VariableProxy* proxy) {
   if (proxy->var() != NULL) return;
 
   // Otherwise, try to resolve the variable.
-  Variable* var = LookupRecursive(proxy->name(), false);
+  Variable* invalidated_local = NULL;
+  Variable* var = LookupRecursive(proxy->name(), false, &invalidated_local);
 
   if (proxy->inside_with()) {
     // If we are inside a local 'with' statement, all bets are off
@@ -581,7 +628,7 @@ void Scope::ResolveVariable(Scope* global_scope, VariableProxy* proxy) {
     // Note that we must do a lookup anyway, because if we find one,
     // we must mark that variable as potentially accessed from this
     // inner scope (the property may not be in the 'with' object).
-    var = NonLocal(proxy->name());
+    var = NonLocal(proxy->name(), Variable::DYNAMIC);
 
   } else {
     // We are not inside a local 'with' statement.
@@ -594,26 +641,44 @@ void Scope::ResolveVariable(Scope* global_scope, VariableProxy* proxy) {
       // a local or outer eval() call, or an outer 'with' statement),
       // or we don't know about the outer scope (because we are
       // in an eval scope).
-      if (!is_global_scope() &&
-          (is_eval_scope() || outer_scope_calls_eval_ ||
-           scope_calls_eval_ || scope_inside_with_)) {
-        // We must look up the variable at runtime, and we don't
-        // know anything else.
-        var = NonLocal(proxy->name());
-
-      } else {
+      if (is_global_scope() ||
+          !(scope_inside_with_ || outer_scope_is_eval_scope_ ||
+            scope_calls_eval_ || outer_scope_calls_eval_)) {
         // We must have a global variable.
         ASSERT(global_scope != NULL);
-        var = new Variable(global_scope, proxy->name(),
-                           Variable::DYNAMIC, true, false);
-        // Ideally we simply rewrite these variables into property
-        // accesses. Unfortunately, we cannot do this here at the
-        // moment because then we can't differentiate between
-        // global variable ('x') and global property ('this.x') access.
-        // If 'x' doesn't exist, the former leads to an error, while the
-        // latter returns undefined. Sigh...
-        // var->rewrite_ = new Property(new Literal(env_->global()),
-        //                              new Literal(proxy->name()));
+        var = global_scope->DeclareGlobal(proxy->name());
+
+      } else if (scope_inside_with_) {
+        // If we are inside a with statement we give up and look up
+        // the variable at runtime.
+        var = NonLocal(proxy->name(), Variable::DYNAMIC);
+
+      } else if (invalidated_local != NULL) {
+        // No with statements are involved and we found a local
+        // variable that might be shadowed by eval introduced
+        // variables.
+        var = NonLocal(proxy->name(), Variable::DYNAMIC_LOCAL);
+        var->set_local_if_not_shadowed(invalidated_local);
+
+      } else if (outer_scope_is_eval_scope_) {
+        // No with statements and we did not find a local and the code
+        // is executed with a call to eval.  The context contains
+        // scope information that we can use to determine if the
+        // variable is global if it is not shadowed by eval-introduced
+        // variables.
+        if (context->GlobalIfNotShadowedByEval(proxy->name())) {
+          var = NonLocal(proxy->name(), Variable::DYNAMIC_GLOBAL);
+
+        } else {
+          var = NonLocal(proxy->name(), Variable::DYNAMIC);
+        }
+
+      } else {
+        // No with statements and we did not find a local and the code
+        // is not executed with a call to eval.  We know that this
+        // variable is global unless it is shadowed by eval-introduced
+        // variables.
+        var = NonLocal(proxy->name(), Variable::DYNAMIC_GLOBAL);
       }
     }
   }
@@ -622,30 +687,37 @@ void Scope::ResolveVariable(Scope* global_scope, VariableProxy* proxy) {
 }
 
 
-void Scope::ResolveVariablesRecursively(Scope* global_scope) {
+void Scope::ResolveVariablesRecursively(Scope* global_scope,
+                                        Handle<Context> context) {
   ASSERT(global_scope == NULL || global_scope->is_global_scope());
 
   // Resolve unresolved variables for this scope.
   for (int i = 0; i < unresolved_.length(); i++) {
-    ResolveVariable(global_scope, unresolved_[i]);
+    ResolveVariable(global_scope, context, unresolved_[i]);
   }
 
   // Resolve unresolved variables for inner scopes.
   for (int i = 0; i < inner_scopes_.length(); i++) {
-    inner_scopes_[i]->ResolveVariablesRecursively(global_scope);
+    inner_scopes_[i]->ResolveVariablesRecursively(global_scope, context);
   }
 }
 
 
-bool Scope::PropagateScopeInfo(bool outer_scope_calls_eval) {
+bool Scope::PropagateScopeInfo(bool outer_scope_calls_eval,
+                               bool outer_scope_is_eval_scope) {
   if (outer_scope_calls_eval) {
     outer_scope_calls_eval_ = true;
   }
 
-  bool b = scope_calls_eval_ || outer_scope_calls_eval_;
+  if (outer_scope_is_eval_scope) {
+    outer_scope_is_eval_scope_ = true;
+  }
+
+  bool calls_eval = scope_calls_eval_ || outer_scope_calls_eval_;
+  bool is_eval = is_eval_scope() || outer_scope_is_eval_scope_;
   for (int i = 0; i < inner_scopes_.length(); i++) {
     Scope* inner_scope = inner_scopes_[i];
-    if (inner_scope->PropagateScopeInfo(b)) {
+    if (inner_scope->PropagateScopeInfo(calls_eval, is_eval)) {
       inner_scope_calls_eval_ = true;
     }
     if (inner_scope->force_eager_compilation_) {
@@ -658,26 +730,26 @@ bool Scope::PropagateScopeInfo(bool outer_scope_calls_eval) {
 
 
 bool Scope::MustAllocate(Variable* var) {
-  // Give var a read/write use if there is a chance it might be
-  // accessed via an eval() call, or if it is a global variable.
-  // This is only possible if the variable has a visible name.
+  // Give var a read/write use if there is a chance it might be accessed
+  // via an eval() call.  This is only possible if the variable has a
+  // visible name.
   if ((var->is_this() || var->name()->length() > 0) &&
       (var->is_accessed_from_inner_scope_ ||
        scope_calls_eval_ || inner_scope_calls_eval_ ||
-       scope_contains_with_ || var->is_global())) {
+       scope_contains_with_)) {
     var->var_uses()->RecordAccess(1);
   }
-  return var->var_uses()->is_used();
+  // Global variables do not need to be allocated.
+  return !var->is_global() && var->var_uses()->is_used();
 }
 
 
 bool Scope::MustAllocateInContext(Variable* var) {
   // If var is accessed from an inner scope, or if there is a
-  // possibility that it might be accessed from the current or
-  // an inner scope (through an eval() call), it must be allocated
-  // in the context.
-  // Exceptions: Global variables and temporary variables must
-  // never be allocated in the (FixedArray part of the) context.
+  // possibility that it might be accessed from the current or an inner
+  // scope (through an eval() call), it must be allocated in the
+  // context.  Exception: temporary variables are not allocated in the
+  // context.
   return
     var->mode() != Variable::TEMPORARY &&
     (var->is_accessed_from_inner_scope_ ||
@@ -707,7 +779,7 @@ void Scope::AllocateHeapSlot(Variable* var) {
 
 void Scope::AllocateParameterLocals() {
   ASSERT(is_function_scope());
-  Variable* arguments = Lookup(Factory::arguments_symbol());
+  Variable* arguments = LocalLookup(Factory::arguments_symbol());
   ASSERT(arguments != NULL);  // functions have 'arguments' declared implicitly
   if (MustAllocate(arguments) && !HasArgumentsParameter()) {
     // 'arguments' is used. Unless there is also a parameter called
@@ -752,7 +824,7 @@ void Scope::AllocateParameterLocals() {
     // are never allocated in the context).
     Variable* arguments_shadow =
         new Variable(this, Factory::arguments_shadow_symbol(),
-                     Variable::INTERNAL, true, false);
+                     Variable::INTERNAL, true, Variable::ARGUMENTS);
     arguments_shadow_ =
         new VariableProxy(Factory::arguments_shadow_symbol(), false, false);
     arguments_shadow_->BindTo(arguments_shadow);
@@ -772,7 +844,8 @@ void Scope::AllocateParameterLocals() {
         var->rewrite_ =
           new Property(arguments_shadow_,
                        new Literal(Handle<Object>(Smi::FromInt(i))),
-                       RelocInfo::kNoPosition);
+                       RelocInfo::kNoPosition,
+                       Property::SYNTHETIC);
         arguments_shadow->var_uses()->RecordUses(var->var_uses());
       }
     }
@@ -816,7 +889,7 @@ void Scope::AllocateNonParameterLocal(Variable* var) {
   ASSERT(var->rewrite_ == NULL ||
          (!var->IsVariable(Factory::result_symbol())) ||
          (var->slot() == NULL || var->slot()->type() != Slot::LOCAL));
-  if (MustAllocate(var) && var->rewrite_ == NULL) {
+  if (var->rewrite_ == NULL && MustAllocate(var)) {
     if (MustAllocateInContext(var)) {
       AllocateHeapSlot(var);
     } else {
@@ -827,27 +900,21 @@ void Scope::AllocateNonParameterLocal(Variable* var) {
 
 
 void Scope::AllocateNonParameterLocals() {
-  // Each variable occurs exactly once in the locals_ list; all
-  // variables that have no rewrite yet are non-parameter locals.
-
-  // Sort them according to use such that the locals with more uses
-  // get allocated first.
-  if (FLAG_usage_computation) {
-    // This is currently not implemented.
-  }
-
+  // All variables that have no rewrite yet are non-parameter locals.
   for (int i = 0; i < temps_.length(); i++) {
     AllocateNonParameterLocal(temps_[i]);
   }
 
-  for (LocalsMap::Entry* p = locals_.Start(); p != NULL; p = locals_.Next(p)) {
+  for (VariableMap::Entry* p = variables_.Start();
+       p != NULL;
+       p = variables_.Next(p)) {
     Variable* var = reinterpret_cast<Variable*>(p->value);
     AllocateNonParameterLocal(var);
   }
 
-  // Note: For now, function_ must be allocated at the very end.  If
-  // it gets allocated in the context, it must be the last slot in the
-  // context, because of the current ScopeInfo implementation (see
+  // For now, function_ must be allocated at the very end.  If it gets
+  // allocated in the context, it must be the last slot in the context,
+  // because of the current ScopeInfo implementation (see
   // ScopeInfo::ScopeInfo(FunctionScope* scope) constructor).
   if (function_ != NULL) {
     AllocateNonParameterLocal(function_);

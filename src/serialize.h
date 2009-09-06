@@ -30,7 +30,8 @@
 
 #include "hashmap.h"
 
-namespace v8 { namespace internal {
+namespace v8 {
+namespace internal {
 
 // A TypeCode is used to distinguish different kinds of external reference.
 // It is a single bit to make testing for types easy.
@@ -70,7 +71,7 @@ class ExternalReferenceEncoder {
  private:
   HashMap encodings_;
   static uint32_t Hash(Address key) {
-    return reinterpret_cast<uint32_t>(key) >> 2;
+    return static_cast<uint32_t>(reinterpret_cast<uintptr_t>(key) >> 2);
   }
 
   int IndexOf(Address key) const;
@@ -135,7 +136,7 @@ class Serializer: public ObjectVisitor {
 
   // Returns the serialized buffer. Ownership is transferred to the
   // caller. Only the destructor and getters may be called after this call.
-  void Finalize(char** str, int* len);
+  void Finalize(byte** str, int* len);
 
   int roots() { return roots_; }
   int objects() { return objects_; }
@@ -147,16 +148,17 @@ class Serializer: public ObjectVisitor {
 
   static bool enabled() { return serialization_enabled_; }
 
-  static void disable() { serialization_enabled_ = false; }
+  static void Enable() { serialization_enabled_ = true; }
+  static void Disable() { serialization_enabled_ = false; }
 
  private:
   friend class ReferenceUpdater;
 
   virtual void VisitPointers(Object** start, Object** end);
 
-  bool IsVisited(HeapObject *obj);
+  bool IsVisited(HeapObject* obj);
 
-  Address GetSavedAddress(HeapObject *obj);
+  Address GetSavedAddress(HeapObject* obj);
 
   void SaveAddress(HeapObject* obj, Address addr);
 
@@ -211,7 +213,7 @@ class Serializer: public ObjectVisitor {
 
 class SnapshotReader {
  public:
-  SnapshotReader(const char* str, int len): str_(str), end_(str + len) {}
+  SnapshotReader(const byte* str, int len): str_(str), end_(str + len) {}
 
   void ExpectC(char expected) {
     int c = GetC();
@@ -225,8 +227,14 @@ class SnapshotReader {
   }
 
   int GetInt() {
-    int result = *reinterpret_cast<const int*>(str_);
-    str_ += sizeof(result);
+    int result;
+    GetBytes(reinterpret_cast<Address>(&result), sizeof(result));
+    return result;
+  }
+
+  Address GetAddress() {
+    Address result;
+    GetBytes(reinterpret_cast<Address>(&result), sizeof(result));
     return result;
   }
 
@@ -247,8 +255,8 @@ class SnapshotReader {
   }
 
  private:
-  const char* str_;
-  const char* end_;
+  const byte* str_;
+  const byte* end_;
 };
 
 
@@ -257,12 +265,12 @@ class SnapshotReader {
 class Deserializer: public ObjectVisitor {
  public:
   // Create a deserializer. The snapshot is held in str and has size len.
-  Deserializer(const char* str, int len);
+  Deserializer(const byte* str, int len);
 
   virtual ~Deserializer();
 
   // Read the flags from the header of the file, and set those that
-  // should be inhereted from the snapshot.
+  // should be inherited from the snapshot.
   void GetFlags();
 
   // Read saved profiling information from the file and log it if required.
@@ -312,10 +320,11 @@ class Deserializer: public ObjectVisitor {
   bool has_log_;  // The file has log information.
 
   // Resolve caches the following:
-  List<Page*> map_pages_;          // All pages in the map space.
+  List<Page*> map_pages_;  // All pages in the map space.
+  List<Page*> cell_pages_;  // All pages in the cell space.
   List<Page*> old_pointer_pages_;  // All pages in the old pointer space.
-  List<Page*> old_data_pages_;     // All pages in the old data space.
-  List<Page*> code_pages_;
+  List<Page*> old_data_pages_;  // All pages in the old data space.
+  List<Page*> code_pages_;  // All pages in the code space.
   List<Object*> large_objects_;    // All known large objects.
   // A list of global handles at deserialization time.
   List<Object**> global_handles_;

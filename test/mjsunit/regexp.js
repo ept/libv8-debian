@@ -89,7 +89,26 @@ assertEquals(result[6], 'F');
 // From ecma_3/RegExp/regress-334158.js
 assertTrue(/\ca/.test( "\x01" ));
 assertFalse(/\ca/.test( "\\ca" ));
-assertTrue(/\c[a/]/.test( "\x1ba/]" ));
+// Passes in KJS, fails in IrregularExpressions.
+// See http://code.google.com/p/v8/issues/detail?id=152
+//assertTrue(/\c[a/]/.test( "\x1ba/]" ));
+
+
+// Test \c in character class
+re = /^[\cM]$/;
+assertTrue(re.test("\r"));
+assertFalse(re.test("M"));
+assertFalse(re.test("c"));
+assertFalse(re.test("\\"));
+assertFalse(re.test("\x03"));  // I.e., read as \cc
+
+re = /^[\c]]$/;
+assertTrue(re.test("c]"));
+assertFalse(re.test("\\]"));
+assertFalse(re.test("\x1d"));  // ']' & 0x1f
+assertFalse(re.test("\\]"));
+assertFalse(re.test("\x03]"));  // I.e., read as \cc
+
 
 // Test that we handle \s and \S correctly inside some bizarre
 // character classes.
@@ -241,3 +260,131 @@ assertEquals("bar$00", "foox".replace(re, "bar$00"), "$00");
 assertEquals("bar$000", "foox".replace(re, "bar$000"), "$000");
 assertEquals("barx", "foox".replace(re, "bar$01"), "$01 2");
 assertEquals("barx5", "foox".replace(re, "bar$15"), "$15");
+
+assertFalse(/()foo$\1/.test("football"), "football1");
+assertFalse(/foo$(?=ball)/.test("football"), "football2");
+assertFalse(/foo$(?!bar)/.test("football"), "football3");
+assertTrue(/()foo$\1/.test("foo"), "football4");
+assertTrue(/foo$(?=(ball)?)/.test("foo"), "football5");
+assertTrue(/()foo$(?!bar)/.test("foo"), "football6");
+assertFalse(/(x?)foo$\1/.test("football"), "football7");
+assertFalse(/foo$(?=ball)/.test("football"), "football8");
+assertFalse(/foo$(?!bar)/.test("football"), "football9");
+assertTrue(/(x?)foo$\1/.test("foo"), "football10");
+assertTrue(/foo$(?=(ball)?)/.test("foo"), "football11");
+assertTrue(/foo$(?!bar)/.test("foo"), "football12");
+
+// Check that the back reference has two successors.  See
+// BackReferenceNode::PropagateForward.
+assertFalse(/f(o)\b\1/.test('foo'));
+assertTrue(/f(o)\B\1/.test('foo'));
+
+// Back-reference, ignore case:
+// ASCII
+assertEquals("xaAx,a", String(/x(a)\1x/i.exec("xaAx")), "backref-ASCII");
+assertFalse(/x(...)\1/i.test("xaaaaa"), "backref-ASCII-short");
+assertTrue(/x((?:))\1\1x/i.test("xx"), "backref-ASCII-empty");
+assertTrue(/x(?:...|(...))\1x/i.test("xabcx"), "backref-ASCII-uncaptured");
+assertTrue(/x(?:...|(...))\1x/i.test("xabcABCx"), "backref-ASCII-backtrack");
+assertEquals("xaBcAbCABCx,aBc",
+             String(/x(...)\1\1x/i.exec("xaBcAbCABCx")),
+             "backref-ASCII-twice");
+
+for (var i = 0; i < 128; i++) {
+  var testName = "backref-ASCII-char-" + i + "," + (i^0x20);
+  var test = /^(.)\1$/i.test(String.fromCharCode(i, i ^ 0x20))
+  var c = String.fromCharCode(i);
+  if (('A' <= c && c <= 'Z') || ('a' <= c && c <= 'z')) {
+    assertTrue(test, testName);
+  } else {
+    assertFalse(test, testName);
+  }
+}
+
+assertFalse(/f(o)$\1/.test('foo'), "backref detects at_end");
+
+// Check decimal escapes doesn't overflow.
+// (Note: \214 is interpreted as octal).
+assertEquals(/\2147483648/.exec("\x8c7483648"),
+             ["\x8c7483648"],
+             "Overflow decimal escape");
+
+
+// Check numbers in quantifiers doesn't overflow and doesn't throw on
+// too large numbers.
+assertFalse(/a{111111111111111111111111111111111111111111111}/.test('b'),
+            "overlarge1");
+assertFalse(/a{999999999999999999999999999999999999999999999}/.test('b'),
+            "overlarge2");
+assertFalse(/a{1,111111111111111111111111111111111111111111111}/.test('b'),
+            "overlarge3");
+assertFalse(/a{1,999999999999999999999999999999999999999999999}/.test('b'),
+            "overlarge4");
+assertFalse(/a{2147483648}/.test('b'),
+            "overlarge5");
+assertFalse(/a{21474836471}/.test('b'),
+            "overlarge6");
+assertFalse(/a{1,2147483648}/.test('b'),
+            "overlarge7");
+assertFalse(/a{1,21474836471}/.test('b'),
+            "overlarge8");
+assertFalse(/a{2147483648,2147483648}/.test('b'),
+            "overlarge9");
+assertFalse(/a{21474836471,21474836471}/.test('b'),
+            "overlarge10");
+assertFalse(/a{2147483647}/.test('b'),
+            "overlarge11");
+assertFalse(/a{1,2147483647}/.test('b'),
+            "overlarge12");
+assertTrue(/a{1,2147483647}/.test('a'),
+            "overlarge13");
+assertFalse(/a{2147483647,2147483647}/.test('a'),
+            "overlarge14");
+
+
+// Check that we don't read past the end of the string.
+assertFalse(/f/.test('b'));
+assertFalse(/[abc]f/.test('x'));
+assertFalse(/[abc]f/.test('xa'));
+assertFalse(/[abc]</.test('x'));
+assertFalse(/[abc]</.test('xa'));
+assertFalse(/f/i.test('b'));
+assertFalse(/[abc]f/i.test('x'));
+assertFalse(/[abc]f/i.test('xa'));
+assertFalse(/[abc]</i.test('x'));
+assertFalse(/[abc]</i.test('xa'));
+assertFalse(/f[abc]/.test('x'));
+assertFalse(/f[abc]/.test('xa'));
+assertFalse(/<[abc]/.test('x'));
+assertFalse(/<[abc]/.test('xa'));
+assertFalse(/f[abc]/i.test('x'));
+assertFalse(/f[abc]/i.test('xa'));
+assertFalse(/<[abc]/i.test('x'));
+assertFalse(/<[abc]/i.test('xa'));
+
+// Test that merging of quick test masks gets it right.
+assertFalse(/x([0-7]%%x|[0-6]%%y)/.test('x7%%y'), 'qt');
+assertFalse(/()x\1(y([0-7]%%%x|[0-6]%%%y)|dkjasldkas)/.test('xy7%%%y'), 'qt2');
+assertFalse(/()x\1(y([0-7]%%%x|[0-6]%%%y)|dkjasldkas)/.test('xy%%%y'), 'qt3');
+assertFalse(/()x\1y([0-7]%%%x|[0-6]%%%y)/.test('xy7%%%y'), 'qt4');
+assertFalse(/()x\1(y([0-7]%%%x|[0-6]%%%y)|dkjasldkas)/.test('xy%%%y'), 'qt5');
+assertFalse(/()x\1y([0-7]%%%x|[0-6]%%%y)/.test('xy7%%%y'), 'qt6');
+assertFalse(/xy([0-7]%%%x|[0-6]%%%y)/.test('xy7%%%y'), 'qt7');
+assertFalse(/x([0-7]%%%x|[0-6]%%%y)/.test('x7%%%y'), 'qt8');
+
+
+// Don't hang on this one.
+/[^\xfe-\xff]*/.test("");
+
+
+var long = "a";
+for (var i = 0; i < 100000; i++) {
+  long = "a?" + long;
+}
+// Don't crash on this one, but maybe throw an exception.
+try {
+  RegExp(long).exec("a");
+} catch (e) {
+  assertTrue(String(e).indexOf("Stack overflow") >= 0, "overflow");
+}
+

@@ -25,8 +25,6 @@
 // (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
 // OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
-// To avoid warnings from <map> on windows we disable exceptions.
-#define _HAS_EXCEPTIONS 0
 #include <signal.h>
 #include <string>
 #include <map>
@@ -48,10 +46,10 @@ static const unsigned int kMaxCounters = 256;
 class Counter {
  public:
   static const int kMaxNameSize = 64;
-  int32_t* Bind(const wchar_t* name) {
+  int32_t* Bind(const char* name) {
     int i;
     for (i = 0; i < kMaxNameSize - 1 && name[i]; i++) {
-      name_[i] = static_cast<char>(name[i]);
+      name_[i] = name[i];
     }
     name_[i] = '\0';
     return &counter_;
@@ -92,13 +90,13 @@ static CounterCollection local_counters;
 static CounterCollection* counters = &local_counters;
 
 
-typedef std::map<std::wstring, int*> CounterMap;
-typedef std::map<std::wstring, int*>::iterator CounterMapIterator;
+typedef std::map<std::string, int*> CounterMap;
+typedef std::map<std::string, int*>::iterator CounterMapIterator;
 static CounterMap counter_table_;
 
 // Callback receiver when v8 has a counter to track.
-static int* counter_callback(const wchar_t* name) {
-  std::wstring counter = name;
+static int* counter_callback(const char* name) {
+  std::string counter = name;
   // See if this counter name is already known.
   if (counter_table_.find(counter) != counter_table_.end())
     return counter_table_[counter];
@@ -114,7 +112,7 @@ static int* counter_callback(const wchar_t* name) {
 // Write C++ code that defines Snapshot::snapshot_ to contain the snapshot
 // to the file given by filename. Only the first size chars are written.
 static int WriteInternalSnapshotToFile(const char* filename,
-                                       const char* str,
+                                       const v8::internal::byte* bytes,
                                        int size) {
   FILE* f = i::OS::FOpen(filename, "wb");
   if (f == NULL) {
@@ -126,11 +124,11 @@ static int WriteInternalSnapshotToFile(const char* filename,
   fprintf(f, "#include \"platform.h\"\n\n");
   fprintf(f, "#include \"snapshot.h\"\n\n");
   fprintf(f, "namespace v8 {\nnamespace internal {\n\n");
-  fprintf(f, "const char Snapshot::data_[] = {");
+  fprintf(f, "const byte Snapshot::data_[] = {");
   int written = 0;
-  written += fprintf(f, "%i", str[0]);
+  written += fprintf(f, "0x%x", bytes[0]);
   for (int i = 1; i < size; ++i) {
-    written += fprintf(f, ",%i", str[i]);
+    written += fprintf(f, ",0x%x", bytes[i]);
     // The following is needed to keep the line length low on Visual C++:
     if (i % 512 == 0) fprintf(f, "\n");
   }
@@ -150,10 +148,10 @@ int main(int argc, char** argv) {
   // Print the usage if an error occurs when parsing the command line
   // flags or if the help flag is set.
   int result = i::FlagList::SetFlagsFromCommandLine(&argc, argv, true);
-  if (result > 0 || argc != 2 || i::FLAG_h) {
+  if (result > 0 || argc != 2 || i::FLAG_help) {
     ::printf("Usage: %s [flag] ... outfile\n", argv[0]);
     i::FlagList::PrintHelp();
-    return !i::FLAG_h;
+    return !i::FLAG_help;
   }
 
   v8::V8::SetCounterFunction(counter_callback);
@@ -162,6 +160,8 @@ int main(int argc, char** argv) {
   const int kExtensionCount = 1;
   const char* extension_list[kExtensionCount] = { "v8/gc" };
   v8::ExtensionConfiguration extensions(kExtensionCount, extension_list);
+
+  i::Serializer::Enable();
   v8::Context::New(&extensions);
 
   // Make sure all builtin scripts are cached.
@@ -171,16 +171,16 @@ int main(int argc, char** argv) {
     }
   }
   // Get rid of unreferenced scripts with a global GC.
-  i::Heap::CollectAllGarbage();
+  i::Heap::CollectAllGarbage(false);
   i::Serializer ser;
   ser.Serialize();
-  char* str;
+  v8::internal::byte* bytes;
   int len;
-  ser.Finalize(&str, &len);
+  ser.Finalize(&bytes, &len);
 
-  WriteInternalSnapshotToFile(argv[1], str, len);
+  WriteInternalSnapshotToFile(argv[1], bytes, len);
 
-  i::DeleteArray(str);
+  i::DeleteArray(bytes);
 
   return 0;
 }

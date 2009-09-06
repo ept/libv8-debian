@@ -28,18 +28,21 @@
 #ifndef V8_HANDLES_H_
 #define V8_HANDLES_H_
 
-namespace v8 { namespace internal {
+#include "apiutils.h"
+
+namespace v8 {
+namespace internal {
 
 // ----------------------------------------------------------------------------
 // A Handle provides a reference to an object that survives relocation by
 // the garbage collector.
-// Handles are only valid withing a HandleScope.
+// Handles are only valid within a HandleScope.
 // When a handle is created for an object a cell is allocated in the heap.
 
 template<class T>
 class Handle {
  public:
-  INLINE(Handle(T** location))  { location_ = location; }
+  INLINE(Handle(T** location)) { location_ = location; }
   INLINE(explicit Handle(T* obj));
 
   INLINE(Handle()) : location_(NULL) {}
@@ -56,7 +59,7 @@ class Handle {
     location_ = reinterpret_cast<T**>(handle.location());
   }
 
-  INLINE(T* operator ->() const)  { return operator*(); }
+  INLINE(T* operator ->() const) { return operator*(); }
 
   // Check if this handle refers to the exact same object as the other handle.
   bool is_identical_to(const Handle<T> other) const {
@@ -79,14 +82,98 @@ class Handle {
   }
 
   static Handle<T> null() { return Handle<T>(); }
-  bool is_null() {return location_ == NULL; }
+  bool is_null() { return location_ == NULL; }
 
   // Closes the given scope, but lets this handle escape. See
   // implementation in api.h.
-  inline Handle<T> EscapeFrom(HandleScope* scope);
+  inline Handle<T> EscapeFrom(v8::HandleScope* scope);
 
  private:
   T** location_;
+};
+
+
+// A stack-allocated class that governs a number of local handles.
+// After a handle scope has been created, all local handles will be
+// allocated within that handle scope until either the handle scope is
+// deleted or another handle scope is created.  If there is already a
+// handle scope and a new one is created, all allocations will take
+// place in the new handle scope until it is deleted.  After that,
+// new handles will again be allocated in the original handle scope.
+//
+// After the handle scope of a local handle has been deleted the
+// garbage collector will no longer track the object stored in the
+// handle and may deallocate it.  The behavior of accessing a handle
+// for which the handle scope has been deleted is undefined.
+class HandleScope {
+ public:
+  HandleScope() : previous_(current_) {
+    current_.extensions = 0;
+  }
+
+  ~HandleScope() {
+    Leave(&previous_);
+  }
+
+  // Counts the number of allocated handles.
+  static int NumberOfHandles();
+
+  // Creates a new handle with the given value.
+  template <typename T>
+  static inline T** CreateHandle(T* value) {
+    internal::Object** cur = current_.next;
+    if (cur == current_.limit) cur = Extend();
+    // Update the current next field, set the value in the created
+    // handle, and return the result.
+    ASSERT(cur < current_.limit);
+    current_.next = cur + 1;
+
+    T** result = reinterpret_cast<T**>(cur);
+    *result = value;
+    return result;
+  }
+
+ private:
+  // Prevent heap allocation or illegal handle scopes.
+  HandleScope(const HandleScope&);
+  void operator=(const HandleScope&);
+  void* operator new(size_t size);
+  void operator delete(void* size_t);
+
+  static v8::ImplementationUtilities::HandleScopeData current_;
+  const v8::ImplementationUtilities::HandleScopeData previous_;
+
+  // Pushes a fresh handle scope to be used when allocating new handles.
+  static void Enter(
+      v8::ImplementationUtilities::HandleScopeData* previous) {
+    *previous = current_;
+    current_.extensions = 0;
+  }
+
+  // Re-establishes the previous scope state. Should be called only
+  // once, and only for the current scope.
+  static void Leave(
+      const v8::ImplementationUtilities::HandleScopeData* previous) {
+    if (current_.extensions > 0) {
+      DeleteExtensions();
+    }
+    current_ = *previous;
+#ifdef DEBUG
+    ZapRange(current_.next, current_.limit);
+#endif
+  }
+
+  // Extend the handle scope making room for more handles.
+  static internal::Object** Extend();
+
+  // Deallocates any extensions used by the current scope.
+  static void DeleteExtensions();
+
+  // Zaps the handles in the half-open interval [start, end).
+  static void ZapRange(internal::Object** start, internal::Object** end);
+
+  friend class v8::HandleScope;
+  friend class v8::ImplementationUtilities;
 };
 
 
@@ -94,9 +181,11 @@ class Handle {
 // Handle operations.
 // They might invoke garbage collection. The result is an handle to
 // an object of expected type, or the handle is an error if running out
-// of space or encounting an internal error.
+// of space or encountering an internal error.
 
-void NormalizeProperties(Handle<JSObject> object);
+void NormalizeProperties(Handle<JSObject> object,
+                         PropertyNormalizationMode mode,
+                         int expected_additional_properties);
 void NormalizeElements(Handle<JSObject> object);
 void TransformToFastProperties(Handle<JSObject> object,
                                int unused_property_fields);
@@ -111,6 +200,14 @@ Handle<Object> SetProperty(Handle<Object> object,
                            Handle<Object> key,
                            Handle<Object> value,
                            PropertyAttributes attributes);
+
+Handle<Object> ForceSetProperty(Handle<JSObject> object,
+                                Handle<Object> key,
+                                Handle<Object> value,
+                                PropertyAttributes attributes);
+
+Handle<Object> ForceDeleteProperty(Handle<JSObject> object,
+                                   Handle<Object> key);
 
 Handle<Object> IgnoreAttributesAndSetLocalProperty(Handle<JSObject> object,
                                                    Handle<String> key,
@@ -139,16 +236,28 @@ Handle<Object> GetPropertyWithInterceptor(Handle<JSObject> receiver,
 
 Handle<Object> GetPrototype(Handle<Object> obj);
 
+// Return the object's hidden properties object. If the object has no hidden
+// properties and create_if_needed is true, then a new hidden property object
+// will be allocated. Otherwise the Heap::undefined_value is returned.
+Handle<Object> GetHiddenProperties(Handle<JSObject> obj, bool create_if_needed);
+
 Handle<Object> DeleteElement(Handle<JSObject> obj, uint32_t index);
 Handle<Object> DeleteProperty(Handle<JSObject> obj, Handle<String> prop);
 
 Handle<Object> LookupSingleCharacterStringFromCode(uint32_t index);
 
-Handle<JSObject> Copy(Handle<JSObject> obj, PretenureFlag = NOT_TENURED);
+Handle<JSObject> Copy(Handle<JSObject> obj);
+
+Handle<FixedArray> AddKeysFromJSArray(Handle<FixedArray>,
+                                      Handle<JSArray> array);
 
 // Get the JS object corresponding to the given script; create it
 // if none exists.
 Handle<JSValue> GetScriptWrapper(Handle<Script> script);
+
+// Script line number computations.
+void InitScriptLineEnds(Handle<Script> script);
+int GetScriptLineNumber(Handle<Script> script, int code_position);
 
 // Computes the enumerable keys from interceptors. Used for debug mirrors and
 // by GetKeysInFixedArrayFor below.
@@ -183,9 +292,9 @@ void SetExpectedNofPropertiesFromEstimate(Handle<JSFunction> func,
                                           int estimate);
 
 
-Handle<JSGlobalObject> ReinitializeJSGlobalObject(
+Handle<JSGlobalProxy> ReinitializeJSGlobalProxy(
     Handle<JSFunction> constructor,
-    Handle<JSGlobalObject> global);
+    Handle<JSGlobalProxy> global);
 
 Handle<Object> SetPrototype(Handle<JSFunction> function,
                             Handle<Object> prototype);
@@ -194,17 +303,20 @@ Handle<Object> SetPrototype(Handle<JSFunction> function,
 // Do lazy compilation of the given function. Returns true on success
 // and false if the compilation resulted in a stack overflow.
 enum ClearExceptionFlag { KEEP_EXCEPTION, CLEAR_EXCEPTION };
+
 bool CompileLazyShared(Handle<SharedFunctionInfo> shared,
-                       ClearExceptionFlag flag);
+                       ClearExceptionFlag flag,
+                       int loop_nesting);
+
 bool CompileLazy(Handle<JSFunction> function, ClearExceptionFlag flag);
+bool CompileLazyInLoop(Handle<JSFunction> function, ClearExceptionFlag flag);
 
 // These deal with lazily loaded properties.
-void SetupLazy(Handle<JSFunction> fun,
+void SetupLazy(Handle<JSObject> obj,
                int index,
                Handle<Context> compile_context,
-               Handle<Context> function_context,
-               Handle<Context> security_context);
-void LoadLazy(Handle<JSFunction> fun, bool* pending_exception);
+               Handle<Context> function_context);
+void LoadLazy(Handle<JSObject> obj, bool* pending_exception);
 
 class NoHandleAllocation BASE_EMBEDDED {
  public:
@@ -228,6 +340,7 @@ class NoHandleAllocation BASE_EMBEDDED {
 class OptimizedObjectForAddingMultipleProperties BASE_EMBEDDED {
  public:
   OptimizedObjectForAddingMultipleProperties(Handle<JSObject> object,
+                                             int expected_property_count,
                                              bool condition = true);
   ~OptimizedObjectForAddingMultipleProperties();
  private:

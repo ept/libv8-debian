@@ -78,12 +78,15 @@ function EQUALS(y) {
       // NOTE: This checks for both null and undefined.
       return (y == null) ? 0 : 1;
     } else {
+      // x is not a number, boolean, null or undefined.
+      if (y == null) return 1;  // not equal
       if (IS_OBJECT(y)) {
         return %_ObjectEquals(x, y) ? 0 : 1;
       }
       if (IS_FUNCTION(y)) {
         return %_ObjectEquals(x, y) ? 0 : 1;
       }
+
       x = %ToPrimitive(x, NO_HINT);
     }
   }
@@ -94,20 +97,16 @@ function STRICT_EQUALS(x) {
   if (IS_STRING(this)) {
     if (!IS_STRING(x)) return 1;  // not equal
     return %StringEquals(this, x);
-  } 
+  }
 
   if (IS_NUMBER(this)) {
     if (!IS_NUMBER(x)) return 1;  // not equal
     return %NumberEquals(this, x);
-  } 
-
-  if (IS_UNDEFINED(this)) {  
-    // Both undefined and undetectable.
-    return IS_UNDEFINED(x) ? 0 : 1;
   }
 
-  // Objects, null, booleans and functions are all that's left.
-  // They can all be compared with a simple identity check.
+  // If anything else gets here, we just do simple identity check.
+  // Objects (including functions), null, undefined and booleans were
+  // checked in the CompareStub, so there should be nothing left.
   return %_ObjectEquals(this, x) ? 0 : 1;
 }
 
@@ -149,7 +148,7 @@ function ADD(x) {
   // Default implementation.
   var a = %ToPrimitive(this, NO_HINT);
   var b = %ToPrimitive(x, NO_HINT);
-  
+
   if (IS_STRING(a)) {
     return %StringAdd(a, %ToString(b));
   } else if (IS_STRING(b)) {
@@ -160,39 +159,66 @@ function ADD(x) {
 }
 
 
+// Left operand (this) is already a string.
+function STRING_ADD_LEFT(y) {
+  if (!IS_STRING(y)) {
+    if (IS_STRING_WRAPPER(y)) {
+      y = %_ValueOf(y);
+    } else {
+      y = IS_NUMBER(y)
+          ? %NumberToString(y)
+          : %ToString(%ToPrimitive(y, NO_HINT));
+    }
+  }
+  return %StringAdd(this, y);
+}
+
+
+// Right operand (y) is already a string.
+function STRING_ADD_RIGHT(y) {
+  var x = this;
+  if (!IS_STRING(x)) {
+    if (IS_STRING_WRAPPER(x)) {
+      x = %_ValueOf(x);
+    } else {
+      x = IS_NUMBER(x)
+          ? %NumberToString(x)
+          : %ToString(%ToPrimitive(x, NO_HINT));
+    }
+  }
+  return %StringAdd(x, y);
+}
+
+
 // ECMA-262, section 11.6.2, page 50.
-function SUB(x) {
-  return %NumberSub(%ToNumber(this), %ToNumber(x));
+function SUB(y) {
+  var x = IS_NUMBER(this) ? this : %ToNumber(this);
+  if (!IS_NUMBER(y)) y = %ToNumber(y);
+  return %NumberSub(x, y);
 }
 
 
 // ECMA-262, section 11.5.1, page 48.
-function MUL(x) {
-  return %NumberMul(%ToNumber(this), %ToNumber(x));
+function MUL(y) {
+  var x = IS_NUMBER(this) ? this : %ToNumber(this);
+  if (!IS_NUMBER(y)) y = %ToNumber(y);
+  return %NumberMul(x, y);
 }
 
 
 // ECMA-262, section 11.5.2, page 49.
-function DIV(x) {
-  return %NumberDiv(%ToNumber(this), %ToNumber(x));
+function DIV(y) {
+  var x = IS_NUMBER(this) ? this : %ToNumber(this);
+  if (!IS_NUMBER(y)) y = %ToNumber(y);
+  return %NumberDiv(x, y);
 }
 
 
 // ECMA-262, section 11.5.3, page 49.
-function MOD(x) {
-  return %NumberMod(%ToNumber(this), %ToNumber(x));
-}
-
-
-// ECMA-262, section 11.4.4, page 47.
-function INC() {
-  return %NumberAdd(%ToNumber(this), 1);
-}
-
-
-// ECMA-262, section 11.4.5, page 48.
-function DEC() {
-  return %NumberSub(%ToNumber(this), 1);
+function MOD(y) {
+  var x = IS_NUMBER(this) ? this : %ToNumber(this);
+  if (!IS_NUMBER(y)) y = %ToNumber(y);
+  return %NumberMod(x, y);
 }
 
 
@@ -203,50 +229,92 @@ function DEC() {
 */
 
 // ECMA-262, section 11.10, page 57.
-function BIT_OR(x) {
-  return %NumberOr(%ToNumber(this), %ToNumber(x));
+function BIT_OR(y) {
+  var x = IS_NUMBER(this) ? this : %ToNumber(this);
+  if (!IS_NUMBER(y)) y = %ToNumber(y);
+  return %NumberOr(x, y);
 }
 
 
 // ECMA-262, section 11.10, page 57.
-function BIT_AND(x) {
-  return %NumberAnd(%ToNumber(this), %ToNumber(x));
+function BIT_AND(y) {
+  var x;
+  if (IS_NUMBER(this)) {
+    x = this;
+    if (!IS_NUMBER(y)) y = %ToNumber(y);
+  } else {
+    x = %ToNumber(this);
+    // Make sure to convert the right operand to a number before
+    // bailing out in the fast case, but after converting the
+    // left operand. This ensures that valueOf methods on the right
+    // operand are always executed.
+    if (!IS_NUMBER(y)) y = %ToNumber(y);
+    // Optimize for the case where we end up AND'ing a value
+    // that doesn't convert to a number. This is common in
+    // certain benchmarks.
+    if (NUMBER_IS_NAN(x)) return 0;
+  }
+  return %NumberAnd(x, y);
 }
 
 
 // ECMA-262, section 11.10, page 57.
-function BIT_XOR(x) {
-  return %NumberXor(%ToNumber(this), %ToNumber(x));
+function BIT_XOR(y) {
+  var x = IS_NUMBER(this) ? this : %ToNumber(this);
+  if (!IS_NUMBER(y)) y = %ToNumber(y);
+  return %NumberXor(x, y);
 }
 
 
 // ECMA-262, section 11.4.7, page 47.
 function UNARY_MINUS() {
-  return %NumberUnaryMinus(%ToNumber(this));
+  var x = IS_NUMBER(this) ? this : %ToNumber(this);
+  return %NumberUnaryMinus(x);
 }
 
 
 // ECMA-262, section 11.4.8, page 48.
 function BIT_NOT() {
-  return %NumberNot(%ToNumber(this));
+  var x = IS_NUMBER(this) ? this : %ToNumber(this);
+  return %NumberNot(x);
 }
 
 
 // ECMA-262, section 11.7.1, page 51.
-function SHL(x) {
-  return %NumberShl(%ToNumber(this), %ToNumber(x));
+function SHL(y) {
+  var x = IS_NUMBER(this) ? this : %ToNumber(this);
+  if (!IS_NUMBER(y)) y = %ToNumber(y);
+  return %NumberShl(x, y);
 }
 
 
 // ECMA-262, section 11.7.2, page 51.
-function SAR(x) {
-  return %NumberSar(%ToNumber(this), %ToNumber(x));
+function SAR(y) {
+  var x;
+  if (IS_NUMBER(this)) {
+    x = this;
+    if (!IS_NUMBER(y)) y = %ToNumber(y);
+  } else {
+    x = %ToNumber(this);
+    // Make sure to convert the right operand to a number before
+    // bailing out in the fast case, but after converting the
+    // left operand. This ensures that valueOf methods on the right
+    // operand are always executed.
+    if (!IS_NUMBER(y)) y = %ToNumber(y);
+    // Optimize for the case where we end up shifting a value
+    // that doesn't convert to a number. This is common in
+    // certain benchmarks.
+    if (NUMBER_IS_NAN(x)) return 0;
+  }
+  return %NumberSar(x, y);
 }
 
 
 // ECMA-262, section 11.7.3, page 52.
-function SHR(x) {
-  return %NumberShr(%ToNumber(this), %ToNumber(x));
+function SHR(y) {
+  var x = IS_NUMBER(this) ? this : %ToNumber(this);
+  if (!IS_NUMBER(y)) y = %ToNumber(y);
+  return %NumberShr(x, y);
 }
 
 
@@ -272,7 +340,7 @@ function IN(x) {
 
 
 // ECMA-262, section 11.8.6, page 54. To make the implementation more
-// efficient, the return value should be zero if the 'this' is an 
+// efficient, the return value should be zero if the 'this' is an
 // instance of F, and non-zero if not. This makes it possible to avoid
 // an expensive ToBoolean conversion in the generated code.
 function INSTANCE_OF(F) {
@@ -326,11 +394,24 @@ function CALL_NON_FUNCTION() {
 }
 
 
+function CALL_NON_FUNCTION_AS_CONSTRUCTOR() {
+  var callee = %GetCalledFunction();
+  var delegate = %GetConstructorDelegate(callee);
+  if (!IS_FUNCTION(delegate)) {
+    throw %MakeTypeError('called_non_callable', [typeof callee]);
+  }
+
+  var parameters = %NewArguments(delegate);
+  return delegate.apply(callee, parameters);
+}
+
+
 function APPLY_PREPARE(args) {
   var length;
-  // First check whether length is a positive Smi and args is an array.  This is the
-  // fast case.  If this fails, we do the slow case that takes care of more eventualities
-  if (%_IsArray(args)) {
+  // First check whether length is a positive Smi and args is an
+  // array. This is the fast case. If this fails, we do the slow case
+  // that takes care of more eventualities.
+  if (IS_ARRAY(args)) {
     length = args.length;
     if (%_IsSmi(length) && length >= 0 && length < 0x800000 && IS_FUNCTION(this)) {
       return length;
@@ -351,9 +432,7 @@ function APPLY_PREPARE(args) {
   }
 
   // Make sure the arguments list has the right type.
-  if (args != null &&
-      %ClassOf(args) != 'Array' &&
-      %ClassOf(args) != 'Arguments') {
+  if (args != null && !IS_ARRAY(args) && !IS_ARGUMENTS(args)) {
     throw %MakeTypeError('apply_wrong_args', []);
   }
 

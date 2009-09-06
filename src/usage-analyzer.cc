@@ -31,7 +31,8 @@
 #include "scopes.h"
 #include "usage-analyzer.h"
 
-namespace v8 { namespace internal {
+namespace v8 {
+namespace internal {
 
 // Weight boundaries
 static const int MinWeight = 1;
@@ -39,9 +40,9 @@ static const int MaxWeight = 1000000;
 static const int InitialWeight = 100;
 
 
-class UsageComputer: public Visitor {
+class UsageComputer: public AstVisitor {
  public:
-  static bool Traverse(Node* node);
+  static bool Traverse(AstNode* node);
 
   void VisitBlock(Block* node);
   void VisitDeclaration(Declaration* node);
@@ -69,10 +70,12 @@ class UsageComputer: public Visitor {
   void VisitRegExpLiteral(RegExpLiteral* node);
   void VisitObjectLiteral(ObjectLiteral* node);
   void VisitArrayLiteral(ArrayLiteral* node);
+  void VisitCatchExtensionObject(CatchExtensionObject* node);
   void VisitAssignment(Assignment* node);
   void VisitThrow(Throw* node);
   void VisitProperty(Property* node);
   void VisitCall(Call* node);
+  void VisitCallEval(CallEval* node);
   void VisitCallNew(CallNew* node);
   void VisitCallRuntime(CallRuntime* node);
   void VisitUnaryOperation(UnaryOperation* node);
@@ -113,7 +116,7 @@ class WeightScaler BASE_EMBEDDED {
 // ----------------------------------------------------------------------------
 // Implementation of UsageComputer
 
-bool UsageComputer::Traverse(Node* node) {
+bool UsageComputer::Traverse(AstNode* node) {
   UsageComputer uc(InitialWeight, false);
   uc.Visit(node);
   return !uc.HasStackOverflow();
@@ -287,6 +290,11 @@ void UsageComputer::VisitArrayLiteral(ArrayLiteral* node) {
 }
 
 
+void UsageComputer::VisitCatchExtensionObject(CatchExtensionObject* node) {
+  Read(node->value());
+}
+
+
 void UsageComputer::VisitAssignment(Assignment* node) {
   if (node->op() != Token::ASSIGN)
     Read(node->target());
@@ -318,6 +326,11 @@ void UsageComputer::VisitProperty(Property* node) {
 void UsageComputer::VisitCall(Call* node) {
   Read(node->expression());
   ReadList(node->arguments());
+}
+
+
+void UsageComputer::VisitCallEval(CallEval* node) {
+  VisitCall(node);
 }
 
 
@@ -432,6 +445,7 @@ WeightScaler::~WeightScaler() {
 
 bool AnalyzeVariableUsage(FunctionLiteral* lit) {
   if (!FLAG_usage_computation) return true;
+  HistogramTimerScope timer(&Counters::usage_analysis);
   return UsageComputer::Traverse(lit);
 }
 

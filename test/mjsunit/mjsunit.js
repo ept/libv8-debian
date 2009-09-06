@@ -51,8 +51,55 @@ function fail(expected, found, name_opt) {
 }
 
 
+function deepObjectEquals(a, b) {
+  var aProps = [];
+  for (var key in a)
+    aProps.push(key);
+  var bProps = [];
+  for (var key in b)
+    bProps.push(key);
+  aProps.sort();
+  bProps.sort();
+  if (!deepEquals(aProps, bProps))
+    return false;
+  for (var i = 0; i < aProps.length; i++) {
+    if (!deepEquals(a[aProps[i]], b[aProps[i]]))
+      return false;
+  }
+  return true;
+}
+
+
+function deepEquals(a, b) {
+  if (a == b) return true;
+  if (typeof a == "number" && typeof b == "number" && isNaN(a) && isNaN(b)) {
+    return true;
+  }
+  if ((typeof a) !== 'object' || (typeof b) !== 'object' ||
+      (a === null) || (b === null))
+    return false;
+  if (a.constructor === Array) {
+    if (b.constructor !== Array)
+      return false;
+    if (a.length != b.length)
+      return false;
+    for (var i = 0; i < a.length; i++) {
+      if (i in a) {
+        if (!(i in b) || !(deepEquals(a[i], b[i])))
+          return false;
+      } else if (i in b) {
+        return false;
+      }
+    }
+    return true;
+  } else {
+    return deepObjectEquals(a, b);
+  }
+}
+
+
 function assertEquals(expected, found, name_opt) {
-  if (expected != found) {
+  if (!deepEquals(found, expected)) {
     fail(expected, found, name_opt);
   }
 }
@@ -89,13 +136,37 @@ function assertNaN(value, name_opt) {
 }
 
 
-function assertThrows(code) {
+function assertNull(value, name_opt) {
+  if (value !== null) {
+    fail("null", value, name_opt);
+  }
+}
+
+
+function assertNotNull(value, name_opt) {
+  if (value === null) {
+    fail("not null", value, name_opt);
+  }
+}
+
+
+function assertThrows(code, type_opt, cause_opt) {
+  var threwException = true;
   try {
-    eval(code);
-    assertTrue(false, "did not throw exception");
+    if (typeof code == 'function') {
+      code();
+    } else {
+      eval(code);
+    }
+    threwException = false;
   } catch (e) {
+    if (typeof type_opt == 'function')
+      assertInstanceof(e, type_opt);
+    if (arguments.length >= 3)
+      assertEquals(e.type, cause_opt);
     // Do nothing.
   }
+  if (!threwException) assertTrue(false, "did not throw exception");
 }
 
 
@@ -108,9 +179,13 @@ function assertInstanceof(obj, type) {
 
 function assertDoesNotThrow(code) {
   try {
-    eval(code);
+    if (typeof code == 'function') {
+      code();
+    } else {
+      eval(code);
+    }
   } catch (e) {
-    assertTrue(false, "threw an exception");
+    assertTrue(false, "threw an exception: " + (e.message || e));
   }
 }
 

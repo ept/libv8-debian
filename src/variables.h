@@ -30,7 +30,8 @@
 
 #include "zone.h"
 
-namespace v8 { namespace internal {
+namespace v8 {
+namespace internal {
 
 class UseCount BASE_EMBEDDED {
  public:
@@ -61,6 +62,48 @@ class UseCount BASE_EMBEDDED {
 };
 
 
+// Variables and AST expression nodes can track their "type" to enable
+// optimizations and removal of redundant checks when generating code.
+
+class SmiAnalysis {
+ public:
+  enum Kind {
+    UNKNOWN,
+    LIKELY_SMI
+  };
+
+  SmiAnalysis() : kind_(UNKNOWN) {}
+
+  bool Is(Kind kind) const { return kind_ == kind; }
+
+  bool IsKnown() const { return !Is(UNKNOWN); }
+  bool IsUnknown() const { return Is(UNKNOWN); }
+  bool IsLikelySmi() const { return Is(LIKELY_SMI); }
+
+  void CopyFrom(SmiAnalysis* other) {
+    kind_ = other->kind_;
+  }
+
+  static const char* Type2String(SmiAnalysis* type);
+
+  // LIKELY_SMI accessors
+  void SetAsLikelySmi() {
+    kind_ = LIKELY_SMI;
+  }
+
+  void SetAsLikelySmiIfUnknown() {
+    if (IsUnknown()) {
+      SetAsLikelySmi();
+    }
+  }
+
+ private:
+  Kind kind_;
+
+  DISALLOW_COPY_AND_ASSIGN(SmiAnalysis);
+};
+
+
 // The AST refers to variables via VariableProxies - placeholders for the actual
 // variables. Variables themselves are never directly referred to from the AST,
 // they are maintained by scopes, and referred to from VariableProxies and Slots
@@ -71,14 +114,40 @@ class Variable: public ZoneObject {
   enum Mode {
     // User declared variables:
     VAR,       // declared via 'var', and 'function' declarations
+
     CONST,     // declared via 'const' declarations
 
     // Variables introduced by the compiler:
-    DYNAMIC,   // always require dynamic lookup (we don't know the declaration)
-    INTERNAL,  // like VAR, but not user-visible (may or may not be in a
-               // context)
-    TEMPORARY  // temporary variables (not user-visible), never in a context
+    DYNAMIC,         // always require dynamic lookup (we don't know
+                     // the declaration)
+
+    DYNAMIC_GLOBAL,  // requires dynamic lookup, but we know that the
+                     // variable is global unless it has been shadowed
+                     // by an eval-introduced variable
+
+    DYNAMIC_LOCAL,   // requires dynamic lookup, but we know that the
+                     // variable is local and where it is unless it
+                     // has been shadowed by an eval-introduced
+                     // variable
+
+    INTERNAL,        // like VAR, but not user-visible (may or may not
+                     // be in a context)
+
+    TEMPORARY        // temporary variables (not user-visible), never
+                     // in a context
   };
+
+  enum Kind {
+    NORMAL,
+    THIS,
+    ARGUMENTS
+  };
+
+  Variable(Scope* scope,
+           Handle<String> name,
+           Mode mode,
+           bool is_valid_lhs,
+           Kind kind);
 
   // Printing support
   static const char* Mode2String(Mode mode);
@@ -93,9 +162,7 @@ class Variable: public ZoneObject {
   // be the global scope). scope() is NULL in that case. Currently the
   // scope is only used to follow the context chain length.
   Scope* scope() const  { return scope_; }
-  // If this assertion fails it means that some code has tried to
-  // treat the special this variable as an ordinary variable with
-  // the name "this".
+
   Handle<String> name() const  { return name_; }
   Mode mode() const  { return mode_; }
   bool is_accessed_from_inner_scope() const  {
@@ -108,35 +175,52 @@ class Variable: public ZoneObject {
     return !is_this() && name().is_identical_to(n);
   }
 
+  bool is_dynamic() const {
+    return (mode_ == DYNAMIC ||
+            mode_ == DYNAMIC_GLOBAL ||
+            mode_ == DYNAMIC_LOCAL);
+  }
+
   bool is_global() const;
-  bool is_this() const { return is_this_; }
+  bool is_this() const { return kind_ == THIS; }
+  bool is_arguments() const { return kind_ == ARGUMENTS; }
+
+  Variable* local_if_not_shadowed() const {
+    ASSERT(mode_ == DYNAMIC_LOCAL && local_if_not_shadowed_ != NULL);
+    return local_if_not_shadowed_;
+  }
+
+  void set_local_if_not_shadowed(Variable* local) {
+    local_if_not_shadowed_ = local;
+  }
 
   Expression* rewrite() const  { return rewrite_; }
   Slot* slot() const;
 
- private:
-  Variable(Scope* scope, Handle<String> name, Mode mode, bool is_valid_LHS,
-      bool is_this);
+  SmiAnalysis* type() { return &type_; }
 
+ private:
   Scope* scope_;
   Handle<String> name_;
   Mode mode_;
   bool is_valid_LHS_;
-  bool is_this_;
+  Kind kind_;
+
+  Variable* local_if_not_shadowed_;
 
   // Usage info.
   bool is_accessed_from_inner_scope_;  // set by variable resolver
   UseCount var_uses_;  // uses of the variable value
   UseCount obj_uses_;  // uses of the object the variable points to
 
+  // Static type information
+  SmiAnalysis type_;
+
   // Code generation.
-  // rewrite_ is usually a Slot or a Property, but maybe any expression.
+  // rewrite_ is usually a Slot or a Property, but may be any expression.
   Expression* rewrite_;
 
-  friend class VariableProxy;
-  friend class Scope;
-  friend class LocalsMap;
-  friend class AstBuildingParser;
+  friend class Scope;  // Has explicit access to rewrite_.
 };
 
 

@@ -25,13 +25,15 @@
 // (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
 // OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
-// Platform specific code for Linux goes here
+// Platform specific code for Linux goes here. For the POSIX comaptible parts
+// the implementation is in platform-posix.cc.
 
 #include <pthread.h>
 #include <semaphore.h>
 #include <signal.h>
 #include <sys/time.h>
 #include <sys/resource.h>
+#include <sys/types.h>
 #include <stdlib.h>
 
 // Ubuntu Dapper requires memory pages to be marked as
@@ -40,9 +42,11 @@
 #include <sys/types.h>  // mmap & munmap
 #include <sys/mman.h>   // mmap & munmap
 #include <sys/stat.h>   // open
-#include <sys/fcntl.h>  // open
-#include <unistd.h>     // getpagesize
+#include <fcntl.h>      // open
+#include <unistd.h>     // sysconf
+#ifdef __GLIBC__
 #include <execinfo.h>   // backtrace, backtrace_symbols
+#endif  // def __GLIBC__
 #include <strings.h>    // index
 #include <errno.h>
 #include <stdarg.h>
@@ -54,7 +58,8 @@
 #include "platform.h"
 
 
-namespace v8 { namespace internal {
+namespace v8 {
+namespace internal {
 
 // 0 is never a valid thread id on Linux since tids and pids share a
 // name space and pid 0 is reserved (see man 2 kill).
@@ -77,132 +82,21 @@ void OS::Setup() {
 }
 
 
-int OS::GetUserTime(uint32_t* secs,  uint32_t* usecs) {
-  struct rusage usage;
-
-  if (getrusage(RUSAGE_SELF, &usage) < 0) return -1;
-  *secs = usage.ru_utime.tv_sec;
-  *usecs = usage.ru_utime.tv_usec;
-  return 0;
-}
-
-
-double OS::TimeCurrentMillis() {
-  struct timeval tv;
-  if (gettimeofday(&tv, NULL) < 0) return 0.0;
-  return (static_cast<double>(tv.tv_sec) * 1000) +
-         (static_cast<double>(tv.tv_usec) / 1000);
-}
-
-
-int64_t OS::Ticks() {
-  // Linux's gettimeofday has microsecond resolution.
-  struct timeval tv;
-  if (gettimeofday(&tv, NULL) < 0)
-    return 0;
-  return (static_cast<int64_t>(tv.tv_sec) * 1000000) + tv.tv_usec;
-}
-
-
-char* OS::LocalTimezone(double time) {
-  time_t tv = static_cast<time_t>(floor(time/msPerSecond));
-  struct tm* t = localtime(&tv);
-  return const_cast<char*>(t->tm_zone);
-}
-
-
-double OS::DaylightSavingsOffset(double time) {
-  time_t tv = static_cast<time_t>(floor(time/msPerSecond));
-  struct tm* t = localtime(&tv);
-  return t->tm_isdst > 0 ? 3600 * msPerSecond : 0;
-}
-
-
-double OS::LocalTimeOffset() {
-  time_t tv = time(NULL);
-  struct tm* t = localtime(&tv);
-  // tm_gmtoff includes any daylight savings offset, so subtract it.
-  return static_cast<double>(t->tm_gmtoff * msPerSecond -
-                             (t->tm_isdst > 0 ? 3600 * msPerSecond : 0));
-}
-
-
-FILE* OS::FOpen(const char* path, const char* mode) {
-  return fopen(path, mode);
-}
-
-
-void OS::Print(const char* format, ...) {
-  va_list args;
-  va_start(args, format);
-  VPrint(format, args);
-  va_end(args);
-}
-
-
-void OS::VPrint(const char* format, va_list args) {
-  vprintf(format, args);
-}
-
-
-void OS::PrintError(const char* format, ...) {
-  va_list args;
-  va_start(args, format);
-  VPrintError(format, args);
-  va_end(args);
-}
-
-
-void OS::VPrintError(const char* format, va_list args) {
-  vfprintf(stderr, format, args);
-}
-
-
-int OS::SNPrintF(Vector<char> str, const char* format, ...) {
-  va_list args;
-  va_start(args, format);
-  int result = VSNPrintF(str, format, args);
-  va_end(args);
-  return result;
-}
-
-
-int OS::VSNPrintF(Vector<char> str,
-                  const char* format,
-                  va_list args) {
-  int n = vsnprintf(str.start(), str.length(), format, args);
-  if (n < 0 || n >= str.length()) {
-    str[str.length() - 1] = '\0';
-    return -1;
-  } else {
-    return n;
-  }
-}
-
-
-void OS::StrNCpy(Vector<char> dest, const char* src, size_t n) {
-  strncpy(dest.start(), src, n);
-}
-
-
-void OS::WcsCpy(Vector<wchar_t> dest, const wchar_t* src) {
-  wcscpy(dest.start(), src);
-}
-
-
-char *OS::StrDup(const char* str) {
-  return strdup(str);
-}
-
-
 double OS::nan_value() {
   return NAN;
 }
 
 
 int OS::ActivationFrameAlignment() {
-  // No constraint on Linux.
-  return 0;
+#ifdef V8_TARGET_ARCH_ARM
+  // On EABI ARM targets this is required for fp correctness in the
+  // runtime system.
+  return 8;
+#else
+  // With gcc 4.4 the tree vectorization optimiser can generate code
+  // that requires 16 byte alignment such as movdqa on x86.
+  return 16;
+#endif
 }
 
 
@@ -229,15 +123,15 @@ bool OS::IsOutsideAllocatedSpace(void* address) {
 
 
 size_t OS::AllocateAlignment() {
-  return getpagesize();
+  return sysconf(_SC_PAGESIZE);
 }
 
 
 void* OS::Allocate(const size_t requested,
                    size_t* allocated,
-                   bool executable) {
-  const size_t msize = RoundUp(requested, getpagesize());
-  int prot = PROT_READ | PROT_WRITE | (executable ? PROT_EXEC : 0);
+                   bool is_executable) {
+  const size_t msize = RoundUp(requested, sysconf(_SC_PAGESIZE));
+  int prot = PROT_READ | PROT_WRITE | (is_executable ? PROT_EXEC : 0);
   void* mbase = mmap(NULL, msize, prot, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
   if (mbase == MAP_FAILED) {
     LOG(StringEvent("OS::Allocate", "mmap failed"));
@@ -249,10 +143,27 @@ void* OS::Allocate(const size_t requested,
 }
 
 
-void OS::Free(void* buf, const size_t length) {
+void OS::Free(void* address, const size_t size) {
   // TODO(1240712): munmap has a return value which is ignored here.
-  munmap(buf, length);
+  munmap(address, size);
 }
+
+
+#ifdef ENABLE_HEAP_PROTECTION
+
+void OS::Protect(void* address, size_t size) {
+  // TODO(1240712): mprotect has a return value which is ignored here.
+  mprotect(address, size, PROT_READ);
+}
+
+
+void OS::Unprotect(void* address, size_t size, bool is_executable) {
+  // TODO(1240712): mprotect has a return value which is ignored here.
+  int prot = PROT_READ | PROT_WRITE | (is_executable ? PROT_EXEC : 0);
+  mprotect(address, size, prot);
+}
+
+#endif
 
 
 void OS::Sleep(int milliseconds) {
@@ -268,7 +179,9 @@ void OS::Abort() {
 
 
 void OS::DebugBreak() {
-#if defined (__arm__) || defined(__thumb__)
+// TODO(lrn): Introduce processor define for runtime system (!= V8_ARCH_x,
+//  which is the architecture of generated code).
+#if defined(__arm__) || defined(__thumb__)
   asm("bkpt 0");
 #else
   asm("int $3");
@@ -309,56 +222,72 @@ PosixMemoryMappedFile::~PosixMemoryMappedFile() {
   fclose(file_);
 }
 
-#ifdef ENABLE_LOGGING_AND_PROFILING
-static unsigned  StringToLongLong(char* buffer) {
-  return static_cast<unsigned>(strtoll(buffer, NULL, 16));  // NOLINT
-}
-
-#endif
 
 void OS::LogSharedLibraryAddresses() {
 #ifdef ENABLE_LOGGING_AND_PROFILING
-  static const int MAP_LENGTH = 1024;
-  int fd = open("/proc/self/maps", O_RDONLY);
-  if (fd < 0) return;
+  // This function assumes that the layout of the file is as follows:
+  // hex_start_addr-hex_end_addr rwxp <unused data> [binary_file_name]
+  // If we encounter an unexpected situation we abort scanning further entries.
+  FILE *fp = fopen("/proc/self/maps", "r");
+  if (fp == NULL) return;
+
+  // Allocate enough room to be able to store a full file name.
+  const int kLibNameLen = FILENAME_MAX + 1;
+  char* lib_name = reinterpret_cast<char*>(malloc(kLibNameLen));
+
+  // This loop will terminate once the scanning hits an EOF.
   while (true) {
-    char addr_buffer[11];
-    addr_buffer[0] = '0';
-    addr_buffer[1] = 'x';
-    addr_buffer[10] = 0;
-    int result = read(fd, addr_buffer + 2, 8);
-    if (result < 8) break;
-    unsigned start = StringToLongLong(addr_buffer);
-    result = read(fd, addr_buffer + 2, 1);
-    if (result < 1) break;
-    if (addr_buffer[2] != '-') break;
-    result = read(fd, addr_buffer + 2, 8);
-    if (result < 8) break;
-    unsigned end = StringToLongLong(addr_buffer);
-    char buffer[MAP_LENGTH];
-    int bytes_read = -1;
-    do {
-      bytes_read++;
-      if (bytes_read >= MAP_LENGTH - 1)
-        break;
-      result = read(fd, buffer + bytes_read, 1);
-      if (result < 1) break;
-    } while (buffer[bytes_read] != '\n');
-    buffer[bytes_read] = 0;
-    // Ignore mappings that are not executable.
-    if (buffer[3] != 'x') continue;
-    char* start_of_path = index(buffer, '/');
-    // There may be no filename in this line.  Skip to next.
-    if (start_of_path == NULL) continue;
-    buffer[bytes_read] = 0;
-    LOG(SharedLibraryEvent(start_of_path, start, end));
+    uintptr_t start, end;
+    char attr_r, attr_w, attr_x, attr_p;
+    // Parse the addresses and permission bits at the beginning of the line.
+    if (fscanf(fp, "%" V8PRIxPTR "-%" V8PRIxPTR, &start, &end) != 2) break;
+    if (fscanf(fp, " %c%c%c%c", &attr_r, &attr_w, &attr_x, &attr_p) != 4) break;
+
+    int c;
+    if (attr_r == 'r' && attr_x == 'x') {
+      // Found a readable and executable entry. Skip characters until we reach
+      // the beginning of the filename or the end of the line.
+      do {
+        c = getc(fp);
+      } while ((c != EOF) && (c != '\n') && (c != '/'));
+      if (c == EOF) break;  // EOF: Was unexpected, just exit.
+
+      // Process the filename if found.
+      if (c == '/') {
+        ungetc(c, fp);  // Push the '/' back into the stream to be read below.
+
+        // Read to the end of the line. Exit if the read fails.
+        if (fgets(lib_name, kLibNameLen, fp) == NULL) break;
+
+        // Drop the newline character read by fgets. We do not need to check
+        // for a zero-length string because we know that we at least read the
+        // '/' character.
+        lib_name[strlen(lib_name) - 1] = '\0';
+      } else {
+        // No library name found, just record the raw address range.
+        snprintf(lib_name, kLibNameLen,
+                 "%08" V8PRIxPTR "-%08" V8PRIxPTR, start, end);
+      }
+      LOG(SharedLibraryEvent(lib_name, start, end));
+    } else {
+      // Entry not describing executable data. Skip to end of line to setup
+      // reading the next entry.
+      do {
+        c = getc(fp);
+      } while ((c != EOF) && (c != '\n'));
+      if (c == EOF) break;
+    }
   }
-  close(fd);
+  free(lib_name);
+  fclose(fp);
 #endif
 }
 
 
-int OS::StackWalk(OS::StackFrame* frames, int frames_size) {
+int OS::StackWalk(Vector<OS::StackFrame> frames) {
+  // backtrace is a glibc extension.
+#ifdef __GLIBC__
+  int frames_size = frames.length();
   void** addresses = NewArray<void*>(frames_size);
 
   int frames_count = backtrace(addresses, frames_size);
@@ -385,6 +314,9 @@ int OS::StackWalk(OS::StackFrame* frames, int frames_size) {
   free(symbols);
 
   return frames_count;
+#else  // ndef __GLIBC__
+  return 0;
+#endif  // ndef __GLIBC__
 }
 
 
@@ -413,8 +345,8 @@ bool VirtualMemory::IsReserved() {
 }
 
 
-bool VirtualMemory::Commit(void* address, size_t size, bool executable) {
-  int prot = PROT_READ | PROT_WRITE | (executable ? PROT_EXEC : 0);
+bool VirtualMemory::Commit(void* address, size_t size, bool is_executable) {
+  int prot = PROT_READ | PROT_WRITE | (is_executable ? PROT_EXEC : 0);
   if (MAP_FAILED == mmap(address, size, prot,
                          MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED,
                          kMmapFd, kMmapFdOffset)) {
@@ -445,6 +377,7 @@ class ThreadHandle::PlatformData : public Malloced {
       case ThreadHandle::INVALID: thread_ = kNoThread; break;
     }
   }
+
   pthread_t thread_;  // Thread handle for pthread.
 };
 
@@ -580,10 +513,12 @@ class LinuxSemaphore : public Semaphore {
   virtual ~LinuxSemaphore() { sem_destroy(&sem_); }
 
   virtual void Wait();
+  virtual bool Wait(int timeout);
   virtual void Signal() { sem_post(&sem_); }
  private:
   sem_t sem_;
 };
+
 
 void LinuxSemaphore::Wait() {
   while (true) {
@@ -593,13 +528,85 @@ void LinuxSemaphore::Wait() {
   }
 }
 
+
+#ifndef TIMEVAL_TO_TIMESPEC
+#define TIMEVAL_TO_TIMESPEC(tv, ts) do {                            \
+    (ts)->tv_sec = (tv)->tv_sec;                                    \
+    (ts)->tv_nsec = (tv)->tv_usec * 1000;                           \
+} while (false)
+#endif
+
+
+bool LinuxSemaphore::Wait(int timeout) {
+  const long kOneSecondMicros = 1000000;  // NOLINT
+
+  // Split timeout into second and nanosecond parts.
+  struct timeval delta;
+  delta.tv_usec = timeout % kOneSecondMicros;
+  delta.tv_sec = timeout / kOneSecondMicros;
+
+  struct timeval current_time;
+  // Get the current time.
+  if (gettimeofday(&current_time, NULL) == -1) {
+    return false;
+  }
+
+  // Calculate time for end of timeout.
+  struct timeval end_time;
+  timeradd(&current_time, &delta, &end_time);
+
+  struct timespec ts;
+  TIMEVAL_TO_TIMESPEC(&end_time, &ts);
+  // Wait for semaphore signalled or timeout.
+  while (true) {
+    int result = sem_timedwait(&sem_, &ts);
+    if (result == 0) return true;  // Successfully got semaphore.
+    if (result > 0) {
+      // For glibc prior to 2.3.4 sem_timedwait returns the error instead of -1.
+      errno = result;
+      result = -1;
+    }
+    if (result == -1 && errno == ETIMEDOUT) return false;  // Timeout.
+    CHECK(result == -1 && errno == EINTR);  // Signal caused spurious wakeup.
+  }
+}
+
+
 Semaphore* OS::CreateSemaphore(int count) {
   return new LinuxSemaphore(count);
 }
 
+
 #ifdef ENABLE_LOGGING_AND_PROFILING
 
 static Sampler* active_sampler_ = NULL;
+
+
+#if !defined(__GLIBC__) && (defined(__arm__) || defined(__thumb__))
+// Android runs a fairly new Linux kernel, so signal info is there,
+// but the C library doesn't have the structs defined.
+
+struct sigcontext {
+  uint32_t trap_no;
+  uint32_t error_code;
+  uint32_t oldmask;
+  uint32_t gregs[16];
+  uint32_t arm_cpsr;
+  uint32_t fault_address;
+};
+typedef uint32_t __sigset_t;
+typedef struct sigcontext mcontext_t;
+typedef struct ucontext {
+  uint32_t uc_flags;
+  struct ucontext *uc_link;
+  stack_t uc_stack;
+  mcontext_t uc_mcontext;
+  __sigset_t uc_sigmask;
+} ucontext_t;
+enum ArmRegisters {R15 = 15, R13 = 13, R11 = 11};
+
+#endif
+
 
 static void ProfilerSignalHandler(int signal, siginfo_t* info, void* context) {
   USE(info);
@@ -613,13 +620,27 @@ static void ProfilerSignalHandler(int signal, siginfo_t* info, void* context) {
     // Extracting the sample from the context is extremely machine dependent.
     ucontext_t* ucontext = reinterpret_cast<ucontext_t*>(context);
     mcontext_t& mcontext = ucontext->uc_mcontext;
-#if defined (__arm__) || defined(__thumb__)
-    sample.pc = mcontext.gregs[R15];
-    sample.sp = mcontext.gregs[R13];
-#else
+#if V8_HOST_ARCH_IA32
     sample.pc = mcontext.gregs[REG_EIP];
     sample.sp = mcontext.gregs[REG_ESP];
+    sample.fp = mcontext.gregs[REG_EBP];
+#elif V8_HOST_ARCH_X64
+    sample.pc = mcontext.gregs[REG_RIP];
+    sample.sp = mcontext.gregs[REG_RSP];
+    sample.fp = mcontext.gregs[REG_RBP];
+#elif V8_HOST_ARCH_ARM
+// An undefined macro evaluates to 0, so this applies to Android's Bionic also.
+#if (__GLIBC__ < 2 || (__GLIBC__ == 2 && __GLIBC_MINOR__ <= 3))
+    sample.pc = mcontext.gregs[R15];
+    sample.sp = mcontext.gregs[R13];
+    sample.fp = mcontext.gregs[R11];
+#else
+    sample.pc = mcontext.arm_pc;
+    sample.sp = mcontext.arm_sp;
+    sample.fp = mcontext.arm_fp;
 #endif
+#endif
+    active_sampler_->SampleStack(&sample);
   }
 
   // We always sample the VM state.

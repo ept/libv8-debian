@@ -34,19 +34,18 @@
 #include "string-stream.h"
 #include "platform.h"
 
-namespace v8 { namespace internal {
+namespace v8 {
+namespace internal {
 
 ThreadLocalTop Top::thread_local_;
-Mutex* Top::break_access_;
-StackFrame::Id Top::break_frame_id_;
-int Top::break_count_;
-int Top::break_id_;
+Mutex* Top::break_access_ = OS::CreateMutex();
 
 NoAllocationStringAllocator* preallocated_message_space = NULL;
 
 Address top_addresses[] = {
 #define C(name) reinterpret_cast<Address>(Top::name()),
     TOP_ADDRESS_LIST(C)
+    TOP_ADDRESS_LIST_PROF(C)
 #undef C
     NULL
 };
@@ -62,11 +61,11 @@ char* Top::Iterate(ObjectVisitor* v, char* thread_storage) {
 }
 
 
-#define VISIT(field) v->VisitPointer(reinterpret_cast<Object**>(&(field)));
-
 void Top::Iterate(ObjectVisitor* v, ThreadLocalTop* thread) {
   v->VisitPointer(&(thread->pending_exception_));
-  v->VisitPointer(bit_cast<Object**, Context**>(&(thread->security_context_)));
+  v->VisitPointer(&(thread->pending_message_obj_));
+  v->VisitPointer(
+      bit_cast<Object**, Script**>(&(thread->pending_message_script_)));
   v->VisitPointer(bit_cast<Object**, Context**>(&(thread->context_)));
   v->VisitPointer(&(thread->scheduled_exception_));
 
@@ -82,7 +81,6 @@ void Top::Iterate(ObjectVisitor* v, ThreadLocalTop* thread) {
     it.frame()->Iterate(v);
   }
 }
-#undef VISIT
 
 
 void Top::Iterate(ObjectVisitor* v) {
@@ -94,15 +92,20 @@ void Top::Iterate(ObjectVisitor* v) {
 void Top::InitializeThreadLocal() {
   thread_local_.c_entry_fp_ = 0;
   thread_local_.handler_ = 0;
+#ifdef ENABLE_LOGGING_AND_PROFILING
+  thread_local_.js_entry_sp_ = 0;
+#endif
   thread_local_.stack_is_cooked_ = false;
   thread_local_.try_catch_handler_ = NULL;
-  thread_local_.security_context_ = NULL;
   thread_local_.context_ = NULL;
+  thread_local_.thread_id_ = ThreadManager::kInvalidId;
   thread_local_.external_caught_exception_ = false;
   thread_local_.failed_access_check_callback_ = NULL;
   clear_pending_exception();
+  clear_pending_message();
   clear_scheduled_exception();
   thread_local_.save_context_ = NULL;
+  thread_local_.catcher_ = NULL;
 }
 
 
@@ -119,15 +122,15 @@ class PreallocatedMemoryThread: public Thread {
   // When the thread starts running it will allocate a fixed number of bytes
   // on the stack and publish the location of this memory for others to use.
   void Run() {
-    EmbeddedVector<char, 32 * 1024> local_buffer;
+    EmbeddedVector<char, 15 * 1024> local_buffer;
 
     // Initialize the buffer with a known good value.
     OS::StrNCpy(local_buffer, "Trace data was not generated.\n",
                 local_buffer.length());
 
     // Publish the local buffer and signal its availability.
-    data_ = &local_buffer[0];
-    length_ = sizeof(local_buffer);
+    data_ = local_buffer.start();
+    length_ = local_buffer.length();
     data_ready_semaphore_->Signal();
 
     while (keep_running_) {
@@ -222,11 +225,6 @@ void Top::Initialize() {
 
   InitializeThreadLocal();
 
-  break_access_ = OS::CreateMutex();
-  break_frame_id_ = StackFrame::NO_ID;
-  break_count_ = 0;
-  break_id_ = 0;
-
   // Only preallocate on the first initialization.
   if (FLAG_preallocate_message_memory && (preallocated_message_space == NULL)) {
     // Start the thread which will set aside some memory.
@@ -254,7 +252,38 @@ void Top::TearDown() {
 }
 
 
+// There are cases where the C stack is separated from JS stack (ARM simulator).
+// To figure out the order of top-most JS try-catch handler and the top-most C
+// try-catch handler, the C try-catch handler keeps a reference to the top-most
+// JS try_catch handler when it was created.
+//
+// Here is a picture to explain the idea:
+//   Top::thread_local_.handler_       Top::thread_local_.try_catch_handler_
+//
+//             |                                         |
+//             v                                         v
+//
+//      | JS handler  |                        | C try_catch handler |
+//      |    next     |--+           +-------- |    js_handler_      |
+//                       |           |         |      next_          |--+
+//                       |           |                                  |
+//      | JS handler  |--+ <---------+                                  |
+//      |    next     |
+//
+// If the top-most JS try-catch handler is not equal to
+// Top::thread_local_.try_catch_handler_.js_handler_, it means the JS handler
+// is on the top. Otherwise, it means the C try-catch handler is on the top.
+//
 void Top::RegisterTryCatchHandler(v8::TryCatch* that) {
+  StackHandler* handler =
+    reinterpret_cast<StackHandler*>(thread_local_.handler_);
+
+  // Find the top-most try-catch handler.
+  while (handler != NULL && !handler->is_try_catch()) {
+    handler = handler->next();
+  }
+
+  that->js_handler_ = handler;  // casted to void*
   thread_local_.try_catch_handler_ = that;
 }
 
@@ -262,74 +291,41 @@ void Top::RegisterTryCatchHandler(v8::TryCatch* that) {
 void Top::UnregisterTryCatchHandler(v8::TryCatch* that) {
   ASSERT(thread_local_.try_catch_handler_ == that);
   thread_local_.try_catch_handler_ = that->next_;
+  thread_local_.catcher_ = NULL;
 }
 
 
-void Top::new_break(StackFrame::Id break_frame_id) {
-  ExecutionAccess access;
-  break_frame_id_ = break_frame_id;
-  break_id_ = ++break_count_;
+void Top::MarkCompactPrologue(bool is_compacting) {
+  MarkCompactPrologue(is_compacting, &thread_local_);
 }
 
 
-void Top::set_break(StackFrame::Id break_frame_id, int break_id) {
-  ExecutionAccess access;
-  break_frame_id_ = break_frame_id;
-  break_id_ = break_id;
+void Top::MarkCompactPrologue(bool is_compacting, char* data) {
+  MarkCompactPrologue(is_compacting, reinterpret_cast<ThreadLocalTop*>(data));
 }
 
 
-bool Top::check_break(int break_id) {
-  ExecutionAccess access;
-  return break_id == break_id_;
+void Top::MarkCompactPrologue(bool is_compacting, ThreadLocalTop* thread) {
+  if (is_compacting) {
+    StackFrame::CookFramesForThread(thread);
+  }
 }
 
 
-bool Top::is_break() {
-  ExecutionAccess access;
-  return break_id_ != 0;
+void Top::MarkCompactEpilogue(bool is_compacting, char* data) {
+  MarkCompactEpilogue(is_compacting, reinterpret_cast<ThreadLocalTop*>(data));
 }
 
 
-StackFrame::Id Top::break_frame_id() {
-  ExecutionAccess access;
-  return break_frame_id_;
+void Top::MarkCompactEpilogue(bool is_compacting) {
+  MarkCompactEpilogue(is_compacting, &thread_local_);
 }
 
 
-int Top::break_id() {
-  ExecutionAccess access;
-  return break_id_;
-}
-
-
-void Top::MarkCompactPrologue() {
-  MarkCompactPrologue(&thread_local_);
-}
-
-
-void Top::MarkCompactPrologue(char* data) {
-  MarkCompactPrologue(reinterpret_cast<ThreadLocalTop*>(data));
-}
-
-
-void Top::MarkCompactPrologue(ThreadLocalTop* thread) {
-  StackFrame::CookFramesForThread(thread);
-}
-
-
-void Top::MarkCompactEpilogue(char* data) {
-  MarkCompactEpilogue(reinterpret_cast<ThreadLocalTop*>(data));
-}
-
-
-void Top::MarkCompactEpilogue() {
-  MarkCompactEpilogue(&thread_local_);
-}
-
-
-void Top::MarkCompactEpilogue(ThreadLocalTop* thread) {
-  StackFrame::UncookFramesForThread(thread);
+void Top::MarkCompactEpilogue(bool is_compacting, ThreadLocalTop* thread) {
+  if (is_compacting) {
+    StackFrame::UncookFramesForThread(thread);
+  }
 }
 
 
@@ -444,7 +440,7 @@ void Top::ReportFailedAccessCheck(JSObject* receiver, v8::AccessType type) {
   if (!thread_local_.failed_access_check_callback_) return;
 
   ASSERT(receiver->IsAccessCheckNeeded());
-  ASSERT(Top::security_context());
+  ASSERT(Top::context());
   // The callers of this method are not expecting a GC.
   AssertNoAllocation no_gc;
 
@@ -465,23 +461,45 @@ void Top::ReportFailedAccessCheck(JSObject* receiver, v8::AccessType type) {
     v8::Utils::ToLocal(data));
 }
 
+
+enum MayAccessDecision {
+  YES, NO, UNKNOWN
+};
+
+
+static MayAccessDecision MayAccessPreCheck(JSObject* receiver,
+                                           v8::AccessType type) {
+  // During bootstrapping, callback functions are not enabled yet.
+  if (Bootstrapper::IsActive()) return YES;
+
+  if (receiver->IsJSGlobalProxy()) {
+    Object* receiver_context = JSGlobalProxy::cast(receiver)->context();
+    if (!receiver_context->IsContext()) return NO;
+
+    // Get the global context of current top context.
+    // avoid using Top::global_context() because it uses Handle.
+    Context* global_context = Top::context()->global()->global_context();
+    if (receiver_context == global_context) return YES;
+
+    if (Context::cast(receiver_context)->security_token() ==
+        global_context->security_token())
+      return YES;
+  }
+
+  return UNKNOWN;
+}
+
+
 bool Top::MayNamedAccess(JSObject* receiver, Object* key, v8::AccessType type) {
   ASSERT(receiver->IsAccessCheckNeeded());
   // Check for compatibility between the security tokens in the
-  // current security context and the accessed object.
-  ASSERT(Top::security_context());
+  // current lexical context and the accessed object.
+  ASSERT(Top::context());
   // The callers of this method are not expecting a GC.
   AssertNoAllocation no_gc;
 
-  // During bootstrapping, callback functions are not enabled yet.
-  if (Bootstrapper::IsActive()) return true;
-
-  if (receiver->IsJSGlobalObject()) {
-    JSGlobalObject* global = JSGlobalObject::cast(receiver);
-    JSGlobalObject* current =
-        JSGlobalObject::cast(Top::security_context()->global());
-    if (current->security_token() == global->security_token()) return true;
-  }
+  MayAccessDecision decision = MayAccessPreCheck(receiver, type);
+  if (decision != UNKNOWN) return decision == YES;
 
   // Get named access check callback
   JSFunction* constructor = JSFunction::cast(receiver->map()->constructor());
@@ -505,7 +523,7 @@ bool Top::MayNamedAccess(JSObject* receiver, Object* key, v8::AccessType type) {
   bool result = false;
   {
     // Leaving JavaScript.
-    VMState state(OTHER);
+    VMState state(EXTERNAL);
     result = callback(v8::Utils::ToLocal(receiver_handle),
                       v8::Utils::ToLocal(key_handle),
                       type,
@@ -520,20 +538,13 @@ bool Top::MayIndexedAccess(JSObject* receiver,
                            v8::AccessType type) {
   ASSERT(receiver->IsAccessCheckNeeded());
   // Check for compatibility between the security tokens in the
-  // current security context and the accessed object.
-  ASSERT(Top::security_context());
+  // current lexical context and the accessed object.
+  ASSERT(Top::context());
   // The callers of this method are not expecting a GC.
   AssertNoAllocation no_gc;
 
-  // During bootstrapping, callback functions are not enabled yet.
-  if (Bootstrapper::IsActive()) return true;
-
-  if (receiver->IsJSGlobalObject()) {
-    JSGlobalObject* global = JSGlobalObject::cast(receiver);
-    JSGlobalObject* current =
-      JSGlobalObject::cast(Top::security_context()->global());
-    if (current->security_token() == global->security_token()) return true;
-  }
+  MayAccessDecision decision = MayAccessPreCheck(receiver, type);
+  if (decision != UNKNOWN) return decision == YES;
 
   // Get indexed access check callback
   JSFunction* constructor = JSFunction::cast(receiver->map()->constructor());
@@ -556,7 +567,7 @@ bool Top::MayIndexedAccess(JSObject* receiver,
   bool result = false;
   {
     // Leaving JavaScript.
-    VMState state(OTHER);
+    VMState state(EXTERNAL);
     result = callback(v8::Utils::ToLocal(receiver_handle),
                       index,
                       type,
@@ -566,12 +577,15 @@ bool Top::MayIndexedAccess(JSObject* receiver,
 }
 
 
+const char* Top::kStackOverflowMessage =
+  "Uncaught RangeError: Maximum call stack size exceeded";
+
+
 Failure* Top::StackOverflow() {
   HandleScope scope;
   Handle<String> key = Factory::stack_overflow_symbol();
   Handle<JSObject> boilerplate =
-      Handle<JSObject>::cast(
-          GetProperty(Top::security_context_builtins(), key));
+      Handle<JSObject>::cast(GetProperty(Top::builtins(), key));
   Handle<Object> exception = Copy(boilerplate);
   // TODO(1240995): To avoid having to call JavaScript code to compute
   // the message for stack overflow exceptions which is very likely to
@@ -580,22 +594,32 @@ Failure* Top::StackOverflow() {
   // doesn't use ReportUncaughtException to determine the location
   // from where the exception occurred. It should probably be
   // reworked.
-  static const char* kMessage =
-      "Uncaught RangeError: Maximum call stack size exceeded";
-  DoThrow(*exception, NULL, kMessage, false);
+  DoThrow(*exception, NULL, kStackOverflowMessage);
+  return Failure::Exception();
+}
+
+
+Failure* Top::TerminateExecution() {
+  DoThrow(Heap::termination_exception(), NULL, NULL);
   return Failure::Exception();
 }
 
 
 Failure* Top::Throw(Object* exception, MessageLocation* location) {
-  DoThrow(exception, location, NULL, false);
+  DoThrow(exception, location, NULL);
   return Failure::Exception();
 }
 
 
 Failure* Top::ReThrow(Object* exception, MessageLocation* location) {
-  DoThrow(exception, location, NULL, true);
+  // Set the exception being re-thrown.
+  set_pending_exception(exception);
   return Failure::Exception();
+}
+
+
+Failure* Top::ThrowIllegalOperation() {
+  return Throw(Heap::illegal_access_symbol());
 }
 
 
@@ -617,33 +641,13 @@ Object* Top::PromoteScheduledException() {
 }
 
 
-// NOTE: The stack trace frame iterator is an iterator that only
-// traverse proper JavaScript frames; that is JavaScript frames that
-// have proper JavaScript functions. This excludes the problematic
-// functions in runtime.js.
-class StackTraceFrameIterator: public JavaScriptFrameIterator {
- public:
-  StackTraceFrameIterator() {
-    if (!done() && !frame()->function()->IsJSFunction()) Advance();
-  }
-
-  void Advance() {
-    while (true) {
-      JavaScriptFrameIterator::Advance();
-      if (done()) return;
-      if (frame()->function()->IsJSFunction()) return;
-    }
-  }
-};
-
-
 void Top::PrintCurrentStackTrace(FILE* out) {
   StackTraceFrameIterator it;
   while (!it.done()) {
     HandleScope scope;
     // Find code position if recorded in relocation info.
     JavaScriptFrame* frame = it.frame();
-    int pos = frame->FindCode()->SourcePosition(frame->pc());
+    int pos = frame->code()->SourcePosition(frame->pc());
     Handle<Object> pos_obj(Smi::FromInt(pos));
     // Fetch function and receiver.
     Handle<JSFunction> fun(JSFunction::cast(frame->function()));
@@ -654,7 +658,7 @@ void Top::PrintCurrentStackTrace(FILE* out) {
     Handle<Object> is_top_level = it.done()
         ? Factory::true_value()
         : Factory::false_value();
-    // Generate and print strack trace line.
+    // Generate and print stack trace line.
     Handle<String> line =
         Execution::GetStackTraceLine(recv, fun, pos_obj, is_top_level);
     if (line->length() > 0) {
@@ -674,7 +678,7 @@ void Top::ComputeLocation(MessageLocation* target) {
     Object* script = fun->shared()->script();
     if (script->IsScript() &&
         !(Script::cast(script)->source()->IsUndefined())) {
-      int pos = frame->FindCode()->SourcePosition(frame->pc());
+      int pos = frame->code()->SourcePosition(frame->pc());
       // Compute the location from the function and the reloc info.
       Handle<Script> casted_script(Script::cast(script));
       *target = MessageLocation(casted_script, pos, pos + 1);
@@ -697,74 +701,68 @@ void Top::ReportUncaughtException(Handle<Object> exception,
 }
 
 
-bool Top::ShouldReportException(bool* is_caught_externally) {
+bool Top::ShouldReturnException(bool* is_caught_externally,
+                                bool catchable_by_javascript) {
+  // Find the top-most try-catch handler.
   StackHandler* handler =
       StackHandler::FromAddress(Top::handler(Top::GetCurrentThread()));
-
-  // Determine if we have an external exception handler and get the
-  // address of the external handler so we can compare the address to
-  // determine which one is closer to the top of the stack.
-  bool has_external_handler = (thread_local_.try_catch_handler_ != NULL);
-  Address external_handler_address =
-      reinterpret_cast<Address>(thread_local_.try_catch_handler_);
-
-  // NOTE: The stack is assumed to grown towards lower addresses. If
-  // the handler is at a higher address than the external address it
-  // means that it is below it on the stack.
-
-  // Find the top-most try-catch or try-finally handler.
-  while (handler != NULL && handler->is_entry()) {
-    handler = handler->next();
-  }
-
-  // The exception has been externally caught if and only if there is
-  // an external handler which is above any JavaScript try-catch or
-  // try-finally handlers.
-  *is_caught_externally = has_external_handler &&
-      (handler == NULL || handler->address() > external_handler_address);
-
-  // Find the top-most try-catch handler.
   while (handler != NULL && !handler->is_try_catch()) {
     handler = handler->next();
   }
 
-  // If we have a try-catch handler then the exception is caught in
-  // JavaScript code.
-  bool is_uncaught_by_js = (handler == NULL);
+  // Get the address of the external handler so we can compare the address to
+  // determine which one is closer to the top of the stack.
+  v8::TryCatch* try_catch = thread_local_.try_catch_handler_;
 
-  // If there is no external try-catch handler, we report the
-  // exception if it isn't caught by JavaScript code.
-  if (!has_external_handler) return is_uncaught_by_js;
+  // The exception has been externally caught if and only if there is
+  // an external handler which is on top of the top-most try-catch
+  // handler.
+  //
+  // See comments in RegisterTryCatchHandler for details.
+  *is_caught_externally = try_catch != NULL &&
+      (handler == NULL || handler == try_catch->js_handler_ ||
+       !catchable_by_javascript);
 
-  if (is_uncaught_by_js || handler->address() > external_handler_address) {
+  if (*is_caught_externally) {
     // Only report the exception if the external handler is verbose.
     return thread_local_.try_catch_handler_->is_verbose_;
   } else {
     // Report the exception if it isn't caught by JavaScript code.
-    return is_uncaught_by_js;
+    return handler == NULL;
   }
 }
 
 
 void Top::DoThrow(Object* exception,
                   MessageLocation* location,
-                  const char* message,
-                  bool is_rethrow) {
+                  const char* message) {
   ASSERT(!has_pending_exception());
-  ASSERT(!external_caught_exception());
 
   HandleScope scope;
   Handle<Object> exception_handle(exception);
 
+  // Determine reporting and whether the exception is caught externally.
   bool is_caught_externally = false;
-  bool report_exception = (exception != Failure::OutOfMemoryException()) &&
-    ShouldReportException(&is_caught_externally);
-  if (is_rethrow) report_exception = false;
+  bool is_out_of_memory = exception == Failure::OutOfMemoryException();
+  bool is_termination_exception = exception == Heap::termination_exception();
+  bool catchable_by_javascript = !is_termination_exception && !is_out_of_memory;
+  bool should_return_exception =
+      ShouldReturnException(&is_caught_externally, catchable_by_javascript);
+  bool report_exception = catchable_by_javascript && should_return_exception;
 
+#ifdef ENABLE_DEBUGGER_SUPPORT
+  // Notify debugger of exception.
+  if (catchable_by_javascript) {
+    Debugger::OnException(exception_handle, report_exception);
+  }
+#endif
+
+  // Generate the message.
   Handle<Object> message_obj;
   MessageLocation potential_computed_location;
   bool try_catch_needs_message =
-    is_caught_externally && thread_local_.try_catch_handler_->capture_message_;
+      is_caught_externally &&
+      thread_local_.try_catch_handler_->capture_message_;
   if (report_exception || try_catch_needs_message) {
     if (location == NULL) {
       // If no location was specified we use a computed one instead
@@ -777,33 +775,78 @@ void Top::DoThrow(Object* exception,
         location, HandleVector<Object>(&exception_handle, 1), stack_trace);
   }
 
-  // If the exception is caught externally, we store it in the
-  // try/catch handler. The C code can find it later and process it if
-  // necessary.
+  // Save the message for reporting if the the exception remains uncaught.
+  thread_local_.has_pending_message_ = report_exception;
+  thread_local_.pending_message_ = message;
+  if (!message_obj.is_null()) {
+    thread_local_.pending_message_obj_ = *message_obj;
+    if (location != NULL) {
+      thread_local_.pending_message_script_ = *location->script();
+      thread_local_.pending_message_start_pos_ = location->start_pos();
+      thread_local_.pending_message_end_pos_ = location->end_pos();
+    }
+  }
+
   if (is_caught_externally) {
-    thread_local_.try_catch_handler_->exception_ =
-      reinterpret_cast<void*>(*exception_handle);
-    if (!message_obj.is_null()) {
-      thread_local_.try_catch_handler_->message_ =
-        reinterpret_cast<void*>(*message_obj);
-    }
+    thread_local_.catcher_ = thread_local_.try_catch_handler_;
   }
 
-  // Notify debugger of exception.
-  Debugger::OnException(exception_handle, report_exception);
-
-  if (report_exception) {
-    if (message != NULL) {
-      MessageHandler::ReportMessage(message);
-    } else {
-      MessageHandler::ReportMessage(location, message_obj);
-    }
-  }
-  thread_local_.external_caught_exception_ = is_caught_externally;
-  // NOTE: Notifying the debugger or reporting the exception may have caused
-  // new exceptions. For now, we just ignore that and set the pending exception
-  // to the original one.
+  // NOTE: Notifying the debugger or generating the message
+  // may have caused new exceptions. For now, we just ignore
+  // that and set the pending exception to the original one.
   set_pending_exception(*exception_handle);
+}
+
+
+void Top::ReportPendingMessages() {
+  ASSERT(has_pending_exception());
+  setup_external_caught();
+  // If the pending exception is OutOfMemoryException set out_of_memory in
+  // the global context.  Note: We have to mark the global context here
+  // since the GenerateThrowOutOfMemory stub cannot make a RuntimeCall to
+  // set it.
+  bool external_caught = thread_local_.external_caught_exception_;
+  HandleScope scope;
+  if (thread_local_.pending_exception_ == Failure::OutOfMemoryException()) {
+    context()->mark_out_of_memory();
+  } else if (thread_local_.pending_exception_ ==
+             Heap::termination_exception()) {
+    if (external_caught) {
+      thread_local_.try_catch_handler_->can_continue_ = false;
+      thread_local_.try_catch_handler_->exception_ = Heap::null_value();
+    }
+  } else {
+    Handle<Object> exception(pending_exception());
+    thread_local_.external_caught_exception_ = false;
+    if (external_caught) {
+      thread_local_.try_catch_handler_->can_continue_ = true;
+      thread_local_.try_catch_handler_->exception_ =
+        thread_local_.pending_exception_;
+      if (!thread_local_.pending_message_obj_->IsTheHole()) {
+        try_catch_handler()->message_ = thread_local_.pending_message_obj_;
+      }
+    }
+    if (thread_local_.has_pending_message_) {
+      thread_local_.has_pending_message_ = false;
+      if (thread_local_.pending_message_ != NULL) {
+        MessageHandler::ReportMessage(thread_local_.pending_message_);
+      } else if (!thread_local_.pending_message_obj_->IsTheHole()) {
+        Handle<Object> message_obj(thread_local_.pending_message_obj_);
+        if (thread_local_.pending_message_script_ != NULL) {
+          Handle<Script> script(thread_local_.pending_message_script_);
+          int start_pos = thread_local_.pending_message_start_pos_;
+          int end_pos = thread_local_.pending_message_end_pos_;
+          MessageLocation location(script, start_pos, end_pos);
+          MessageHandler::ReportMessage(&location, message_obj);
+        } else {
+          MessageHandler::ReportMessage(NULL, message_obj);
+        }
+      }
+    }
+    thread_local_.external_caught_exception_ = external_caught;
+    set_pending_exception(*exception);
+  }
+  clear_pending_message();
 }
 
 
@@ -812,17 +855,46 @@ void Top::TraceException(bool flag) {
 }
 
 
-bool Top::optional_reschedule_exception(bool is_bottom_call) {
-  if (!is_out_of_memory() &&
-      (thread_local_.external_caught_exception_ || is_bottom_call)) {
-    thread_local_.external_caught_exception_ = false;
-    clear_pending_exception();
-    return false;
-  } else {
-    thread_local_.scheduled_exception_ = pending_exception();
-    clear_pending_exception();
-    return true;
+bool Top::OptionalRescheduleException(bool is_bottom_call) {
+  // Allways reschedule out of memory exceptions.
+  if (!is_out_of_memory()) {
+    bool is_termination_exception =
+        pending_exception() == Heap::termination_exception();
+
+    // Do not reschedule the exception if this is the bottom call.
+    bool clear_exception = is_bottom_call;
+
+    if (is_termination_exception) {
+      if (is_bottom_call) {
+        thread_local_.external_caught_exception_ = false;
+        clear_pending_exception();
+        return false;
+      }
+    } else if (thread_local_.external_caught_exception_) {
+      // If the exception is externally caught, clear it if there are no
+      // JavaScript frames on the way to the C++ frame that has the
+      // external handler.
+      ASSERT(thread_local_.try_catch_handler_ != NULL);
+      Address external_handler_address =
+          reinterpret_cast<Address>(thread_local_.try_catch_handler_);
+      JavaScriptFrameIterator it;
+      if (it.done() || (it.frame()->sp() > external_handler_address)) {
+        clear_exception = true;
+      }
+    }
+
+    // Clear the exception if needed.
+    if (clear_exception) {
+      thread_local_.external_caught_exception_ = false;
+      clear_pending_exception();
+      return false;
+    }
   }
+
+  // Reschedule the exception.
+  thread_local_.scheduled_exception_ = pending_exception();
+  clear_pending_exception();
+  return true;
 }
 
 
@@ -846,6 +918,15 @@ bool Top::is_out_of_memory() {
 Handle<Context> Top::global_context() {
   GlobalObject* global = thread_local_.context_->global();
   return Handle<Context>(global->global_context());
+}
+
+
+Handle<Context> Top::GetCallingGlobalContext() {
+  JavaScriptFrameIterator it;
+  if (it.done()) return Handle<Context>::null();
+  JavaScriptFrame* frame = it.frame();
+  Context* context = Context::cast(frame->context());
+  return Handle<Context>(context->global_context());
 }
 
 

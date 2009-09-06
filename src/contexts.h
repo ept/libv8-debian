@@ -28,7 +28,8 @@
 #ifndef V8_CONTEXTS_H_
 #define V8_CONTEXTS_H_
 
-namespace v8 { namespace internal {
+namespace v8 {
+namespace internal {
 
 
 enum ContextLookupFlags {
@@ -56,12 +57,15 @@ enum ContextLookupFlags {
 // Array.prototype.{push,pop}.
 
 #define GLOBAL_CONTEXT_FIELDS(V) \
+  V(GLOBAL_PROXY_INDEX, JSObject, global_proxy_object) \
+  V(SECURITY_TOKEN_INDEX, Object, security_token) \
   V(BOOLEAN_FUNCTION_INDEX, JSFunction, boolean_function) \
   V(NUMBER_FUNCTION_INDEX, JSFunction, number_function) \
   V(STRING_FUNCTION_INDEX, JSFunction, string_function) \
   V(OBJECT_FUNCTION_INDEX, JSFunction, object_function) \
   V(ARRAY_FUNCTION_INDEX, JSFunction, array_function) \
   V(DATE_FUNCTION_INDEX, JSFunction, date_function) \
+  V(JSON_OBJECT_INDEX, JSObject, json_object) \
   V(REGEXP_FUNCTION_INDEX, JSFunction, regexp_function) \
   V(INITIAL_OBJECT_PROTOTYPE_INDEX, JSObject, initial_object_prototype) \
   V(CREATE_DATE_FUN_INDEX, JSFunction,  create_date_fun) \
@@ -81,18 +85,20 @@ enum ContextLookupFlags {
   V(SPECIAL_FUNCTION_TABLE_INDEX, FixedArray, special_function_table) \
   V(ARGUMENTS_BOILERPLATE_INDEX, JSObject, arguments_boilerplate) \
   V(MESSAGE_LISTENERS_INDEX, JSObject, message_listeners) \
-  V(DEBUG_EVENT_LISTENERS_INDEX, JSObject, debug_event_listeners) \
   V(MAKE_MESSAGE_FUN_INDEX, JSFunction, make_message_fun) \
   V(GET_STACK_TRACE_LINE_INDEX, JSFunction, get_stack_trace_line_fun) \
   V(CONFIGURE_GLOBAL_INDEX, JSFunction, configure_global_fun) \
   V(FUNCTION_CACHE_INDEX, JSObject, function_cache) \
   V(RUNTIME_CONTEXT_INDEX, Context, runtime_context) \
   V(CALL_AS_FUNCTION_DELEGATE_INDEX, JSFunction, call_as_function_delegate) \
+  V(CALL_AS_CONSTRUCTOR_DELEGATE_INDEX, JSFunction, \
+    call_as_constructor_delegate) \
   V(EMPTY_SCRIPT_INDEX, Script, empty_script) \
   V(SCRIPT_FUNCTION_INDEX, JSFunction, script_function) \
   V(CONTEXT_EXTENSION_FUNCTION_INDEX, JSFunction, context_extension_function) \
   V(OUT_OF_MEMORY_INDEX, Object, out_of_memory) \
-  V(MAP_CACHE_INDEX, Object, map_cache)
+  V(MAP_CACHE_INDEX, Object, map_cache) \
+  V(CONTEXT_DATA_INDEX, Object, data)
 
 // JSFunctions are pairs (context, function code), sometimes also called
 // closures. A Context object is used to represent function contexts and
@@ -172,7 +178,9 @@ class Context: public FixedArray {
     MIN_CONTEXT_SLOTS,
 
     // These slots are only in global contexts.
-    ARGUMENTS_BOILERPLATE_INDEX = MIN_CONTEXT_SLOTS,
+    GLOBAL_PROXY_INDEX = MIN_CONTEXT_SLOTS,
+    SECURITY_TOKEN_INDEX,
+    ARGUMENTS_BOILERPLATE_INDEX,
     JS_ARRAY_MAP_INDEX,
     FUNCTION_MAP_INDEX,
     FUNCTION_INSTANCE_MAP_INDEX,
@@ -183,6 +191,7 @@ class Context: public FixedArray {
     OBJECT_FUNCTION_INDEX,
     ARRAY_FUNCTION_INDEX,
     DATE_FUNCTION_INDEX,
+    JSON_OBJECT_INDEX,
     REGEXP_FUNCTION_INDEX,
     CREATE_DATE_FUN_INDEX,
     TO_NUMBER_FUN_INDEX,
@@ -197,18 +206,19 @@ class Context: public FixedArray {
     CONFIGURE_INSTANCE_FUN_INDEX,
     SPECIAL_FUNCTION_TABLE_INDEX,
     MESSAGE_LISTENERS_INDEX,
-    DEBUG_EVENT_LISTENERS_INDEX,
     MAKE_MESSAGE_FUN_INDEX,
     GET_STACK_TRACE_LINE_INDEX,
     CONFIGURE_GLOBAL_INDEX,
     FUNCTION_CACHE_INDEX,
     RUNTIME_CONTEXT_INDEX,
     CALL_AS_FUNCTION_DELEGATE_INDEX,
+    CALL_AS_CONSTRUCTOR_DELEGATE_INDEX,
     EMPTY_SCRIPT_INDEX,
     SCRIPT_FUNCTION_INDEX,
     CONTEXT_EXTENSION_FUNCTION_INDEX,
     OUT_OF_MEMORY_INDEX,
     MAP_CACHE_INDEX,
+    CONTEXT_DATA_INDEX,
     GLOBAL_CONTEXT_SLOTS
   };
 
@@ -216,25 +226,30 @@ class Context: public FixedArray {
   JSFunction* closure() { return JSFunction::cast(get(CLOSURE_INDEX)); }
   void set_closure(JSFunction* closure) { set(CLOSURE_INDEX, closure); }
 
-  Context* fcontext() {
-    return reinterpret_cast<Context*>(get(FCONTEXT_INDEX));
-  }
+  Context* fcontext() { return Context::cast(get(FCONTEXT_INDEX)); }
   void set_fcontext(Context* context) { set(FCONTEXT_INDEX, context); }
 
   Context* previous() {
-    return reinterpret_cast<Context*>(get(PREVIOUS_INDEX));
+    Object* result = unchecked_previous();
+    ASSERT(IsBootstrappingOrContext(result));
+    return reinterpret_cast<Context*>(result);
   }
   void set_previous(Context* context) { set(PREVIOUS_INDEX, context); }
 
-  JSObject* extension() {
-    return reinterpret_cast<JSObject*>(get(EXTENSION_INDEX));
-  }
+  bool has_extension() { return unchecked_extension() != NULL; }
+  JSObject* extension() { return JSObject::cast(unchecked_extension()); }
   void set_extension(JSObject* object) { set(EXTENSION_INDEX, object); }
 
   GlobalObject* global() {
-    return reinterpret_cast<GlobalObject*>(get(GLOBAL_INDEX));
+    Object* result = get(GLOBAL_INDEX);
+    ASSERT(IsBootstrappingOrGlobalObject(result));
+    return reinterpret_cast<GlobalObject*>(result);
   }
   void set_global(GlobalObject* global) { set(GLOBAL_INDEX, global); }
+
+  // Returns a JSGlobalProxy object or null.
+  JSObject* global_proxy();
+  void set_global_proxy(JSObject* global);
 
   // The builtins object.
   JSBuiltinsObject* builtins();
@@ -243,7 +258,7 @@ class Context: public FixedArray {
   Context* global_context();
 
   // Tells if this is a function context (as opposed to a 'with' context).
-  bool is_function_context() { return previous() == NULL; }
+  bool is_function_context() { return unchecked_previous() == NULL; }
 
   // Tells whether the global context is marked with out of memory.
   bool has_out_of_memory() {
@@ -253,6 +268,12 @@ class Context: public FixedArray {
   // Mark the global context with out of memory.
   void mark_out_of_memory() {
     global_context()->set_out_of_memory(Heap::true_value());
+  }
+
+  // The exception holder is the object used as a with object in
+  // the implementation of a catch block.
+  bool is_exception_holder(Object* object) {
+    return IsCatchContext() && extension() == object;
   }
 
 #define GLOBAL_CONTEXT_FIELD_ACCESSORS(index, type, name) \
@@ -285,16 +306,36 @@ class Context: public FixedArray {
   //    and the name is the property name, and the property exists.
   //    attributes != ABSENT.
   //
-  // 4) index_ < 0 && result.deref() == NULL:
+  // 4) index_ < 0 && result.is_null():
   //    there was no context found with the corresponding property.
   //    attributes == ABSENT.
   Handle<Object> Lookup(Handle<String> name, ContextLookupFlags flags,
                         int* index_, PropertyAttributes* attributes);
 
+  // Determine if a local variable with the given name exists in a
+  // context.  Do not consider context extension objects.  This is
+  // used for compiling code using eval.  If the context surrounding
+  // the eval call does not have a local variable with this name and
+  // does not contain a with statement the property is global unless
+  // it is shadowed by a property in an extension object introduced by
+  // eval.
+  bool GlobalIfNotShadowedByEval(Handle<String> name);
+
   // Code generation support.
   static int SlotOffset(int index) {
     return kHeaderSize + index * kPointerSize - kHeapObjectTag;
   }
+
+ private:
+  // Unchecked access to the slots.
+  Object* unchecked_previous() { return get(PREVIOUS_INDEX); }
+  Object* unchecked_extension() { return get(EXTENSION_INDEX); }
+
+#ifdef DEBUG
+  // Bootstrapping-aware type checks.
+  static bool IsBootstrappingOrContext(Object* object);
+  static bool IsBootstrappingOrGlobalObject(Object* object);
+#endif
 };
 
 } }  // namespace v8::internal

@@ -1,4 +1,4 @@
-// Copyright 2008 the V8 project authors. All rights reserved.
+// Copyright 2009 the V8 project authors. All rights reserved.
 // Redistribution and use in source and binary forms, with or without
 // modification, are permitted provided that the following conditions are
 // met:
@@ -26,9 +26,10 @@
 // OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 #include <v8.h>
-#include <cstring>
-#include <cstdio>
-#include <cstdlib>
+#include <fcntl.h>
+#include <string.h>
+#include <stdio.h>
+#include <stdlib.h>
 
 
 void RunShell(v8::Handle<v8::Context> context);
@@ -37,6 +38,7 @@ bool ExecuteString(v8::Handle<v8::String> source,
                    bool print_result,
                    bool report_exceptions);
 v8::Handle<v8::Value> Print(const v8::Arguments& args);
+v8::Handle<v8::Value> Read(const v8::Arguments& args);
 v8::Handle<v8::Value> Load(const v8::Arguments& args);
 v8::Handle<v8::Value> Quit(const v8::Arguments& args);
 v8::Handle<v8::Value> Version(const v8::Arguments& args);
@@ -44,13 +46,15 @@ v8::Handle<v8::String> ReadFile(const char* name);
 void ReportException(v8::TryCatch* handler);
 
 
-int main(int argc, char* argv[]) {
+int RunMain(int argc, char* argv[]) {
   v8::V8::SetFlagsFromCommandLine(&argc, argv, true);
   v8::HandleScope handle_scope;
   // Create a template for the global object.
   v8::Handle<v8::ObjectTemplate> global = v8::ObjectTemplate::New();
   // Bind the global 'print' function to the C++ Print callback.
   global->Set(v8::String::New("print"), v8::FunctionTemplate::New(Print));
+  // Bind the global 'read' function to the C++ Read callback.
+  global->Set(v8::String::New("read"), v8::FunctionTemplate::New(Read));
   // Bind the global 'load' function to the C++ Load callback.
   global->Set(v8::String::New("load"), v8::FunctionTemplate::New(Load));
   // Bind the 'quit' function
@@ -72,7 +76,7 @@ int main(int argc, char* argv[]) {
       // alone JavaScript engines.
       continue;
     } else if (strncmp(str, "--", 2) == 0) {
-      printf("Warning: unknown flag %s.\n", str);
+      printf("Warning: unknown flag %s.\nTry --help for options\n", str);
     } else if (strcmp(str, "-e") == 0 && i + 1 < argc) {
       // Execute argument given to -e option directly
       v8::HandleScope handle_scope;
@@ -99,6 +103,19 @@ int main(int argc, char* argv[]) {
 }
 
 
+int main(int argc, char* argv[]) {
+  int result = RunMain(argc, argv);
+  v8::V8::Dispose();
+  return result;
+}
+
+
+// Extracts a C string from a V8 Utf8Value.
+const char* ToCString(const v8::String::Utf8Value& value) {
+  return *value ? *value : "<string conversion failed>";
+}
+
+
 // The callback that is invoked by v8 whenever the JavaScript 'print'
 // function is called.  Prints its arguments on stdout separated by
 // spaces and ending with a newline.
@@ -112,10 +129,31 @@ v8::Handle<v8::Value> Print(const v8::Arguments& args) {
       printf(" ");
     }
     v8::String::Utf8Value str(args[i]);
-    printf("%s", *str);
+    const char* cstr = ToCString(str);
+    printf("%s", cstr);
   }
   printf("\n");
+  fflush(stdout);
   return v8::Undefined();
+}
+
+
+// The callback that is invoked by v8 whenever the JavaScript 'read'
+// function is called.  This function loads the content of the file named in
+// the argument into a JavaScript string.
+v8::Handle<v8::Value> Read(const v8::Arguments& args) {
+  if (args.Length() != 1) {
+    return v8::ThrowException(v8::String::New("Bad parameters"));
+  }
+  v8::String::Utf8Value file(args[0]);
+  if (*file == NULL) {
+    return v8::ThrowException(v8::String::New("Error loading file"));
+  }
+  v8::Handle<v8::String> source = ReadFile(*file);
+  if (source.IsEmpty()) {
+    return v8::ThrowException(v8::String::New("Error loading file"));
+  }
+  return source;
 }
 
 
@@ -126,12 +164,15 @@ v8::Handle<v8::Value> Load(const v8::Arguments& args) {
   for (int i = 0; i < args.Length(); i++) {
     v8::HandleScope handle_scope;
     v8::String::Utf8Value file(args[i]);
+    if (*file == NULL) {
+      return v8::ThrowException(v8::String::New("Error loading file"));
+    }
     v8::Handle<v8::String> source = ReadFile(*file);
     if (source.IsEmpty()) {
       return v8::ThrowException(v8::String::New("Error loading file"));
     }
     if (!ExecuteString(source, v8::String::New(*file), false, false)) {
-      return v8::ThrowException(v8::String::New("Error executing  file"));
+      return v8::ThrowException(v8::String::New("Error executing file"));
     }
   }
   return v8::Undefined();
@@ -220,7 +261,8 @@ bool ExecuteString(v8::Handle<v8::String> source,
         // If all went well and the result wasn't undefined then print
         // the returned value.
         v8::String::Utf8Value str(result);
-        printf("%s\n", *str);
+        const char* cstr = ToCString(str);
+        printf("%s\n", cstr);
       }
       return true;
     }
@@ -231,19 +273,22 @@ bool ExecuteString(v8::Handle<v8::String> source,
 void ReportException(v8::TryCatch* try_catch) {
   v8::HandleScope handle_scope;
   v8::String::Utf8Value exception(try_catch->Exception());
+  const char* exception_string = ToCString(exception);
   v8::Handle<v8::Message> message = try_catch->Message();
   if (message.IsEmpty()) {
     // V8 didn't provide any extra information about this error; just
     // print the exception.
-    printf("%s\n", *exception);
+    printf("%s\n", exception_string);
   } else {
     // Print (filename):(line number): (message).
     v8::String::Utf8Value filename(message->GetScriptResourceName());
+    const char* filename_string = ToCString(filename);
     int linenum = message->GetLineNumber();
-    printf("%s:%i: %s\n", *filename, linenum, *exception);
+    printf("%s:%i: %s\n", filename_string, linenum, exception_string);
     // Print line of source code.
     v8::String::Utf8Value sourceline(message->GetSourceLine());
-    printf("%s\n", *sourceline);
+    const char* sourceline_string = ToCString(sourceline);
+    printf("%s\n", sourceline_string);
     // Print wavy underline (GetUnderline is deprecated).
     int start = message->GetStartColumn();
     for (int i = 0; i < start; i++) {

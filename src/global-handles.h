@@ -30,7 +30,8 @@
 
 #include "list-inl.h"
 
-namespace v8 { namespace internal {
+namespace v8 {
+namespace internal {
 
 // Structure for tracking global handles.
 // A single list keeps all the allocated global handles.
@@ -41,15 +42,14 @@ namespace v8 { namespace internal {
 // Callback function on handling weak global handles.
 // typedef bool (*WeakSlotCallback)(Object** pointer);
 
-// An object group is indexed by an id. An object group is treated like
-// a single JS object: if one of object in the group is alive,
-// all objects in the same group are considered alive.
+// An object group is treated like a single JS object: if one of object in
+// the group is alive, all objects in the same group are considered alive.
 // An object group is used to simulate object relationship in a DOM tree.
 class ObjectGroup : public Malloced {
  public:
-  explicit ObjectGroup(void* id) : id_(id), objects_(4) {}
+  ObjectGroup() : objects_(4) {}
+  explicit ObjectGroup(size_t capacity) : objects_(capacity) {}
 
-  void* id_;
   List<Object**> objects_;
 };
 
@@ -99,18 +99,17 @@ class GlobalHandles : public AllStatic {
   // Iterates over all weak roots in heap.
   static void IterateWeakRoots(ObjectVisitor* v);
 
-  // Mark the weak pointers based on the callback.
-  static void MarkWeakRoots(WeakSlotCallback f);
+  // Find all weak handles satisfying the callback predicate, mark
+  // them as pending.
+  static void IdentifyWeakHandles(WeakSlotCallback f);
 
-  // Add an object to a group indexed by an id.
+  // Add an object group.
   // Should only used in GC callback function before a collection.
   // All groups are destroyed after a mark-compact collection.
-  static void AddToGroup(void* id, Object** location);
+  static void AddGroup(Object*** handles, size_t length);
 
   // Returns the object groups.
-  static List<ObjectGroup*>& ObjectGroups() {
-    return object_groups_;
-  }
+  static List<ObjectGroup*>* ObjectGroups();
 
   // Remove bags, this should only happen after GC.
   static void RemoveObjectGroups();
@@ -143,9 +142,6 @@ class GlobalHandles : public AllStatic {
   static Node* first_free_;
   static Node* first_free() { return first_free_; }
   static void set_first_free(Node* value) { first_free_ = value; }
-
-  // A list of object groups.
-  static List<ObjectGroup*> object_groups_;
 };
 
 

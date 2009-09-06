@@ -28,7 +28,10 @@
 #ifndef V8_UTILS_H_
 #define V8_UTILS_H_
 
-namespace v8 { namespace internal {
+#include <stdlib.h>
+
+namespace v8 {
+namespace internal {
 
 // ----------------------------------------------------------------------------
 // General helper functions
@@ -38,8 +41,6 @@ template <typename T>
 static inline bool IsPowerOf2(T x) {
   return (x & (x - 1)) == 0;
 }
-
-
 
 
 // The C++ standard leaves the semantics of '>>' undefined for
@@ -54,7 +55,7 @@ static inline int ArithmeticShiftRight(int x, int s) {
 // This allows conversion of Addresses and integral types into
 // 0-relative int offsets.
 template <typename T>
-static inline int OffsetFrom(T x) {
+static inline intptr_t OffsetFrom(T x) {
   return x - static_cast<T>(0);
 }
 
@@ -63,7 +64,7 @@ static inline int OffsetFrom(T x) {
 // This allows conversion of 0-relative int offsets into Addresses and
 // integral types.
 template <typename T>
-static inline T AddressFrom(int x) {
+static inline T AddressFrom(intptr_t x) {
   return static_cast<T>(0) + x;
 }
 
@@ -83,6 +84,23 @@ static inline T RoundUp(T x, int m) {
 }
 
 
+template <typename T>
+static int Compare(const T& a, const T& b) {
+  if (a == b)
+    return 0;
+  else if (a < b)
+    return -1;
+  else
+    return 1;
+}
+
+
+template <typename T>
+static int PointerValueCompare(const T* a, const T* b) {
+  return Compare<T>(*a, *b);
+}
+
+
 // Returns the smallest power of two which is >= x. If you pass in a
 // number that is already a power of two, it is returned as is.
 uint32_t RoundUpToPowerOf2(uint32_t x);
@@ -96,8 +114,10 @@ static inline bool IsAligned(T value, T alignment) {
 
 
 // Returns true if (addr + offset) is aligned.
-static inline bool IsAddressAligned(Address addr, int alignment, int offset) {
-  int offs = OffsetFrom(addr + offset);
+static inline bool IsAddressAligned(Address addr,
+                                    intptr_t alignment,
+                                    int offset) {
+  intptr_t offs = OffsetFrom(addr + offset);
   return IsAligned(offs, alignment);
 }
 
@@ -188,6 +208,12 @@ inline byte* DecodeUnsignedIntBackward(byte* p, unsigned int* x) {
 
 
 // ----------------------------------------------------------------------------
+// Hash function.
+
+uint32_t ComputeIntegerHash(uint32_t key);
+
+
+// ----------------------------------------------------------------------------
 // I/O support.
 
 // Our version of printf(). Avoids compilation errors that we get
@@ -205,16 +231,24 @@ void Flush();
 char* ReadLine(const char* prompt);
 
 
-// Read and return the raw chars in a file. the size of the buffer is returned
+// Read and return the raw bytes in a file. the size of the buffer is returned
 // in size.
-// The returned buffer is not 0-terminated. It must be freed by the caller.
-char* ReadChars(const char* filename, int* size, bool verbose = true);
+// The returned buffer must be freed by the caller.
+byte* ReadBytes(const char* filename, int* size, bool verbose = true);
 
 
 // Write size chars from str to the file given by filename.
 // The file is overwritten. Returns the number of chars written.
 int WriteChars(const char* filename,
                const char* str,
+               int size,
+               bool verbose = true);
+
+
+// Write size bytes to the file given by filename.
+// The file is overwritten. Returns the number of bytes written.
+int WriteBytes(const char* filename,
+               const byte* bytes,
                int size,
                bool verbose = true);
 
@@ -283,6 +317,15 @@ class Vector {
     return Vector<T>(NewArray<T>(length), length);
   }
 
+  // Returns a vector using the same backing storage as this one,
+  // spanning from and including 'from', to but not including 'to'.
+  Vector<T> SubVector(int from, int to) {
+    ASSERT(from < length_);
+    ASSERT(to <= length_);
+    ASSERT(from < to);
+    return Vector<T>(start() + from, to - from);
+  }
+
   // Returns the length of the vector.
   int length() const { return length_; }
 
@@ -298,11 +341,32 @@ class Vector {
     return start_[index];
   }
 
+  T& first() { return start_[0]; }
+
+  T& last() { return start_[length_ - 1]; }
+
   // Returns a clone of this vector with a new backing store.
   Vector<T> Clone() const {
     T* result = NewArray<T>(length_);
     for (int i = 0; i < length_; i++) result[i] = start_[i];
     return Vector<T>(result, length_);
+  }
+
+  void Sort(int (*cmp)(const T*, const T*)) {
+    typedef int (*RawComparer)(const void*, const void*);
+    qsort(start(),
+          length(),
+          sizeof(T),
+          reinterpret_cast<RawComparer>(cmp));
+  }
+
+  void Sort() {
+    Sort(PointerValueCompare<T>);
+  }
+
+  void Truncate(int length) {
+    ASSERT(length <= length_);
+    length_ = length;
   }
 
   // Releases the array underlying this vector. Once disposed the
@@ -322,9 +386,29 @@ class Vector {
   // Factory method for creating empty vectors.
   static Vector<T> empty() { return Vector<T>(NULL, 0); }
 
+ protected:
+  void set_start(T* start) { start_ = start; }
+
  private:
   T* start_;
   int length_;
+};
+
+
+// A temporary assignment sets a (non-local) variable to a value on
+// construction and resets it the value on destruction.
+template <typename T>
+class TempAssign {
+ public:
+  TempAssign(T* var, T value): var_(var), old_value_(*var) {
+    *var = value;
+  }
+
+  ~TempAssign() { *var_ = old_value_; }
+
+ private:
+  T* var_;
+  T old_value_;
 };
 
 
@@ -332,21 +416,47 @@ template <typename T, int kSize>
 class EmbeddedVector : public Vector<T> {
  public:
   EmbeddedVector() : Vector<T>(buffer_, kSize) { }
+
+  // When copying, make underlying Vector to reference our buffer.
+  EmbeddedVector(const EmbeddedVector& rhs)
+      : Vector<T>(rhs) {
+    memcpy(buffer_, rhs.buffer_, sizeof(T) * kSize);
+    set_start(buffer_);
+  }
+
+  EmbeddedVector& operator=(const EmbeddedVector& rhs) {
+    if (this == &rhs) return *this;
+    Vector<T>::operator=(rhs);
+    memcpy(buffer_, rhs.buffer_, sizeof(T) * kSize);
+    set_start(buffer_);
+    return *this;
+  }
+
  private:
   T buffer_[kSize];
 };
 
 
+template <typename T>
+class ScopedVector : public Vector<T> {
+ public:
+  explicit ScopedVector(int length) : Vector<T>(NewArray<T>(length), length) { }
+  ~ScopedVector() {
+    DeleteArray(this->start());
+  }
+};
+
+
 inline Vector<const char> CStrVector(const char* data) {
-  return Vector<const char>(data, strlen(data));
+  return Vector<const char>(data, static_cast<int>(strlen(data)));
 }
 
 inline Vector<char> MutableCStrVector(char* data) {
-  return Vector<char>(data, strlen(data));
+  return Vector<char>(data, static_cast<int>(strlen(data)));
 }
 
 inline Vector<char> MutableCStrVector(char* data, int max) {
-  int length = strlen(data);
+  int length = static_cast<int>(strlen(data));
   return Vector<char>(data, (length < max) ? length : max);
 }
 
@@ -360,7 +470,7 @@ inline Vector< Handle<Object> > HandleVector(v8::internal::Handle<T>* elms,
 
 // Simple support to read a file into a 0-terminated C-string.
 // The returned buffer must be freed by the caller.
-// On return, *exits tells whether the file exisited.
+// On return, *exits tells whether the file existed.
 Vector<const char> ReadFile(const char* filename,
                             bool* exists,
                             bool verbose = true);
@@ -442,6 +552,29 @@ class StringBuilder {
 
   DISALLOW_IMPLICIT_CONSTRUCTORS(StringBuilder);
 };
+
+
+// Copy from ASCII/16bit chars to ASCII/16bit chars.
+template <typename sourcechar, typename sinkchar>
+static inline void CopyChars(sinkchar* dest, const sourcechar* src, int chars) {
+  sinkchar* limit = dest + chars;
+#ifdef V8_HOST_CAN_READ_UNALIGNED
+  if (sizeof(*dest) == sizeof(*src)) {
+    // Number of characters in a uint32_t.
+    static const int kStepSize = sizeof(uint32_t) / sizeof(*dest);  // NOLINT
+    while (dest <= limit - kStepSize) {
+      *reinterpret_cast<uint32_t*>(dest) =
+          *reinterpret_cast<const uint32_t*>(src);
+      dest += kStepSize;
+      src += kStepSize;
+    }
+  }
+#endif
+  while (dest < limit) {
+    *dest++ = static_cast<sinkchar>(*src++);
+  }
+}
+
 
 } }  // namespace v8::internal
 

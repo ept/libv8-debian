@@ -33,32 +33,32 @@ Date();
 RegExp();
 
 // Count script types.
-var native_count = 0;
+var named_native_count = 0;
 var extension_count = 0;
 var normal_count = 0;
 var scripts = Debug.scripts();
 for (i = 0; i < scripts.length; i++) {
   if (scripts[i].type == Debug.ScriptType.Native) {
-    native_count++;
+    if (scripts[i].name) {
+      named_native_count++;
+    }
   } else if (scripts[i].type == Debug.ScriptType.Extension) {
     extension_count++;
   } else if (scripts[i].type == Debug.ScriptType.Normal) {
-    if (!scripts[i].name) print("X" + scripts[i].source + "X"); // empty script
-    else {
-      print(scripts[i].name);
-      normal_count++;
-      }
+    normal_count++;
   } else {
     assertUnreachable('Unexpected type ' + scripts[i].type);
   }
 }
 
 // This has to be updated if the number of native scripts change.
-assertEquals(12, native_count);
+assertEquals(12, named_native_count);
 // If no snapshot is used, only the 'gc' extension is loaded.
 // If snapshot is used, all extensions are cached in the snapshot.
 assertTrue(extension_count == 1 || extension_count == 5);
-assertEquals(2, normal_count);  // This script and mjsunit.js.
+// This script and mjsunit.js has been loaded.  If using d8, d8 loads
+// a normal script during startup too.
+assertTrue(normal_count == 2 || normal_count == 3);
 
 // Test a builtins script.
 var math_script = Debug.findScript('native math.js');

@@ -32,13 +32,21 @@
 #include "api.h"
 #include "codegen-inl.h"
 
-#if defined(ARM) || defined (__arm__) || defined(__thumb__)
-#include "simulator-arm.h"
-#else  // ia32
-#include "simulator-ia32.h"
+#if V8_TARGET_ARCH_IA32
+#include "ia32/simulator-ia32.h"
+#elif V8_TARGET_ARCH_X64
+#include "x64/simulator-x64.h"
+#elif V8_TARGET_ARCH_ARM
+#include "arm/simulator-arm.h"
+#else
+#error Unsupported target architecture.
 #endif
 
-namespace v8 { namespace internal {
+#include "debug.h"
+#include "v8threads.h"
+
+namespace v8 {
+namespace internal {
 
 
 static Handle<Object> Invoke(bool construct,
@@ -75,6 +83,14 @@ static Handle<Object> Invoke(bool construct,
     code = stub.GetCode();
   }
 
+  // Convert calls on global objects to be calls on the global
+  // receiver instead to avoid having a 'this' pointer which refers
+  // directly to a global object.
+  if (receiver->IsGlobalObject()) {
+    Handle<GlobalObject> global = Handle<GlobalObject>::cast(receiver);
+    receiver = Handle<JSObject>(global->global_receiver());
+  }
+
   {
     // Save and restore context around invocation and block the
     // allocation of handles without explicit handle scopes.
@@ -94,15 +110,11 @@ static Handle<Object> Invoke(bool construct,
   // Update the pending exception flag and return the value.
   *has_pending_exception = value->IsException();
   ASSERT(*has_pending_exception == Top::has_pending_exception());
-
-  // If the pending exception is OutOfMemoryException set out_of_memory in
-  // the global context.  Note: We have to mark the global context here
-  // since the GenerateThrowOutOfMemory stub cannot make a RuntimeCall to
-  // set it.
   if (*has_pending_exception) {
-    if (Top::pending_exception() == Failure::OutOfMemoryException()) {
-      Top::context()->mark_out_of_memory();
-    }
+    Top::ReportPendingMessages();
+    return Handle<Object>();
+  } else {
+    Top::clear_pending_message();
   }
 
   return Handle<Object>(value);
@@ -144,8 +156,12 @@ Handle<Object> Execution::TryCall(Handle<JSFunction> func,
     ASSERT(catcher.HasCaught());
     ASSERT(Top::has_pending_exception());
     ASSERT(Top::external_caught_exception());
-    Top::optional_reschedule_exception(true);
-    result = v8::Utils::OpenHandle(*catcher.Exception());
+    if (Top::pending_exception() == Heap::termination_exception()) {
+      result = Factory::termination_exception();
+    } else {
+      result = v8::Utils::OpenHandle(*catcher.Exception());
+    }
+    Top::OptionalRescheduleException(true);
   }
 
   ASSERT(!Top::has_pending_exception());
@@ -160,19 +176,11 @@ Handle<Object> Execution::GetFunctionDelegate(Handle<Object> object) {
   // If you return a function from here, it will be called when an
   // attempt is made to call the given object as a function.
 
-  // The regular expression code here is really meant more as an
-  // example than anything else. KJS does not support calling regular
-  // expressions as functions, but SpiderMonkey does.
-  if (FLAG_call_regexp) {
-    bool is_regexp =
-        object->IsHeapObject() &&
-        (HeapObject::cast(*object)->map()->constructor() ==
-         *Top::regexp_function());
-
-    if (is_regexp) {
-      Handle<String> exec = Factory::exec_symbol();
-      return Handle<Object>(object->GetProperty(*exec));
-    }
+  // Regular expressions can be called as functions in both Firefox
+  // and Safari so we allow it too.
+  if (object->IsJSRegExp()) {
+    Handle<String> exec = Factory::exec_symbol();
+    return Handle<Object>(object->GetProperty(*exec));
   }
 
   // Objects created through the API can have an instance-call handler
@@ -187,20 +195,51 @@ Handle<Object> Execution::GetFunctionDelegate(Handle<Object> object) {
 }
 
 
+Handle<Object> Execution::GetConstructorDelegate(Handle<Object> object) {
+  ASSERT(!object->IsJSFunction());
+
+  // If you return a function from here, it will be called when an
+  // attempt is made to call the given object as a constructor.
+
+  // Objects created through the API can have an instance-call handler
+  // that should be used when calling the object as a function.
+  if (object->IsHeapObject() &&
+      HeapObject::cast(*object)->map()->has_instance_call_handler()) {
+    return Handle<JSFunction>(
+        Top::global_context()->call_as_constructor_delegate());
+  }
+
+  return Factory::undefined_value();
+}
+
+
 // Static state for stack guards.
 StackGuard::ThreadLocal StackGuard::thread_local_;
 
 
 StackGuard::StackGuard() {
+  // NOTE: Overall the StackGuard code assumes that the stack grows towards
+  // lower addresses.
   ExecutionAccess access;
-  if (thread_local_.nesting_++ == 0 &&
-      thread_local_.jslimit_ != kInterruptLimit) {
-    // NOTE: We assume that the stack grows towards lower addresses.
-    ASSERT(thread_local_.jslimit_ == kIllegalLimit);
-    ASSERT(thread_local_.climit_ == kIllegalLimit);
+  if (thread_local_.nesting_++ == 0) {
+    // Initial StackGuard is being set. We will set the stack limits based on
+    // the current stack pointer allowing the stack to grow kLimitSize from
+    // here.
 
-    thread_local_.initial_jslimit_ = thread_local_.jslimit_ =
-        GENERATED_CODE_STACK_LIMIT(kLimitSize);
+    // Ensure that either the stack limits are unset (kIllegalLimit) or that
+    // they indicate a pending interruption. The interrupt limit will be
+    // temporarily reset through the code below and reestablished if the
+    // interrupt flags indicate that an interrupt is pending.
+    ASSERT(thread_local_.jslimit_ == kIllegalLimit ||
+           (thread_local_.jslimit_ == kInterruptLimit &&
+            thread_local_.interrupt_flags_ != 0));
+    ASSERT(thread_local_.climit_ == kIllegalLimit ||
+           (thread_local_.climit_ == kInterruptLimit &&
+            thread_local_.interrupt_flags_ != 0));
+
+    uintptr_t limit = GENERATED_CODE_STACK_LIMIT(kLimitSize);
+    thread_local_.initial_jslimit_ = thread_local_.jslimit_ = limit;
+    Heap::SetStackLimit(limit);
     // NOTE: The check for overflow is not safe as there is no guarantee that
     // the running thread has its stack in all memory up to address 0x00000000.
     thread_local_.initial_climit_ = thread_local_.climit_ =
@@ -211,9 +250,11 @@ StackGuard::StackGuard() {
       set_limits(kInterruptLimit, access);
     }
   }
-  // make sure we have proper limits setup
+  // Ensure that proper limits have been set.
   ASSERT(thread_local_.jslimit_ != kIllegalLimit &&
          thread_local_.climit_ != kIllegalLimit);
+  ASSERT(thread_local_.initial_jslimit_ != kIllegalLimit &&
+         thread_local_.initial_climit_ != kIllegalLimit);
 }
 
 
@@ -246,6 +287,7 @@ void StackGuard::SetStackLimit(uintptr_t limit) {
   // leave them alone.
   if (thread_local_.jslimit_ == thread_local_.initial_jslimit_) {
     thread_local_.jslimit_ = limit;
+    Heap::SetStackLimit(limit);
   }
   if (thread_local_.climit_ == thread_local_.initial_climit_) {
     thread_local_.climit_ = limit;
@@ -292,6 +334,20 @@ void StackGuard::Preempt() {
 }
 
 
+bool StackGuard::IsTerminateExecution() {
+  ExecutionAccess access;
+  return thread_local_.interrupt_flags_ & TERMINATE;
+}
+
+
+void StackGuard::TerminateExecution() {
+  ExecutionAccess access;
+  thread_local_.interrupt_flags_ |= TERMINATE;
+  set_limits(kInterruptLimit, access);
+}
+
+
+#ifdef ENABLE_DEBUGGER_SUPPORT
 bool StackGuard::IsDebugBreak() {
   ExecutionAccess access;
   return thread_local_.interrupt_flags_ & DEBUGBREAK;
@@ -304,6 +360,21 @@ void StackGuard::DebugBreak() {
   set_limits(kInterruptLimit, access);
 }
 
+
+bool StackGuard::IsDebugCommand() {
+  ExecutionAccess access;
+  return thread_local_.interrupt_flags_ & DEBUGCOMMAND;
+}
+
+
+void StackGuard::DebugCommand() {
+  if (FLAG_debugger_auto_break) {
+    ExecutionAccess access;
+    thread_local_.interrupt_flags_ |= DEBUGCOMMAND;
+    set_limits(kInterruptLimit, access);
+  }
+}
+#endif
 
 void StackGuard::Continue(InterruptFlag after_what) {
   ExecutionAccess access;
@@ -331,6 +402,7 @@ char* StackGuard::ArchiveStackGuard(char* to) {
 char* StackGuard::RestoreStackGuard(char* from) {
   ExecutionAccess access;
   memcpy(reinterpret_cast<char*>(&thread_local_), from, sizeof(ThreadLocal));
+  Heap::SetStackLimit(thread_local_.jslimit_);
   return from + sizeof(ThreadLocal);
 }
 
@@ -440,7 +512,7 @@ Handle<JSFunction> Execution::InstantiateFunction(
   int serial_number = Smi::cast(data->serial_number())->value();
   Object* elm =
       Top::global_context()->function_cache()->GetElement(serial_number);
-  if (!elm->IsUndefined()) return Handle<JSFunction>(JSFunction::cast(elm));
+  if (elm->IsJSFunction()) return Handle<JSFunction>(JSFunction::cast(elm));
   // The function has not yet been instantiated in this context; do it.
   Object** args[1] = { Handle<Object>::cast(data).location() };
   Handle<Object> result =
@@ -454,7 +526,8 @@ Handle<JSObject> Execution::InstantiateObject(Handle<ObjectTemplateInfo> data,
                                               bool* exc) {
   if (data->property_list()->IsUndefined() &&
       !data->constructor()->IsUndefined()) {
-    Object* result;
+    // Initialization to make gcc happy.
+    Object* result = NULL;
     {
       HandleScope scope;
       Handle<FunctionTemplateInfo> cons_template =
@@ -504,6 +577,99 @@ Handle<String> Execution::GetStackTraceLine(Handle<Object> recv,
 }
 
 
+static Object* RuntimePreempt() {
+  // Clear the preempt request flag.
+  StackGuard::Continue(PREEMPT);
+
+  ContextSwitcher::PreemptionReceived();
+
+#ifdef ENABLE_DEBUGGER_SUPPORT
+  if (Debug::InDebugger()) {
+    // If currently in the debugger don't do any actual preemption but record
+    // that preemption occoured while in the debugger.
+    Debug::PreemptionWhileInDebugger();
+  } else {
+    // Perform preemption.
+    v8::Unlocker unlocker;
+    Thread::YieldCPU();
+  }
+#else
+  // Perform preemption.
+  v8::Unlocker unlocker;
+  Thread::YieldCPU();
+#endif
+
+  return Heap::undefined_value();
+}
+
+
+#ifdef ENABLE_DEBUGGER_SUPPORT
+Object* Execution::DebugBreakHelper() {
+  // Just continue if breaks are disabled.
+  if (Debug::disable_break()) {
+    return Heap::undefined_value();
+  }
+
+  {
+    JavaScriptFrameIterator it;
+    ASSERT(!it.done());
+    Object* fun = it.frame()->function();
+    if (fun && fun->IsJSFunction()) {
+      // Don't stop in builtin functions.
+      if (JSFunction::cast(fun)->IsBuiltin()) {
+        return Heap::undefined_value();
+      }
+      GlobalObject* global = JSFunction::cast(fun)->context()->global();
+      // Don't stop in debugger functions.
+      if (Debug::IsDebugGlobal(global)) {
+        return Heap::undefined_value();
+      }
+    }
+  }
+
+  // Collect the break state before clearing the flags.
+  bool debug_command_only =
+      StackGuard::IsDebugCommand() && !StackGuard::IsDebugBreak();
+
+  // Clear the debug request flags.
+  StackGuard::Continue(DEBUGBREAK);
+  StackGuard::Continue(DEBUGCOMMAND);
+
+  HandleScope scope;
+  // Enter the debugger. Just continue if we fail to enter the debugger.
+  EnterDebugger debugger;
+  if (debugger.FailedToEnter()) {
+    return Heap::undefined_value();
+  }
+
+  // Notify the debug event listeners. Indicate auto continue if the break was
+  // a debug command break.
+  Debugger::OnDebugBreak(Factory::undefined_value(), debug_command_only);
+
+  // Return to continue execution.
+  return Heap::undefined_value();
+}
+#endif
+
+Object* Execution::HandleStackGuardInterrupt() {
+#ifdef ENABLE_DEBUGGER_SUPPORT
+  if (StackGuard::IsDebugBreak() || StackGuard::IsDebugCommand()) {
+    DebugBreakHelper();
+  }
+#endif
+  if (StackGuard::IsPreempted()) RuntimePreempt();
+  if (StackGuard::IsTerminateExecution()) {
+    StackGuard::Continue(TERMINATE);
+    return Top::TerminateExecution();
+  }
+  if (StackGuard::IsInterrupted()) {
+    // interrupt
+    StackGuard::Continue(INTERRUPT);
+    return Top::StackOverflow();
+  }
+  return Heap::undefined_value();
+}
+
 // --- G C   E x t e n s i o n ---
 
 const char* GCExtension::kSource = "native function gc();";
@@ -517,7 +683,7 @@ v8::Handle<v8::FunctionTemplate> GCExtension::GetNativeFunction(
 
 v8::Handle<v8::Value> GCExtension::GC(const v8::Arguments& args) {
   // All allocation spaces other than NEW_SPACE have the same effect.
-  Heap::CollectGarbage(0, OLD_DATA_SPACE);
+  Heap::CollectAllGarbage(false);
   return v8::Undefined();
 }
 

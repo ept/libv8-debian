@@ -33,7 +33,7 @@
 // implementation for a particular platform is put in platform_<os>.cc.
 // The build system then uses the implementation for the target platform.
 //
-// This design has been choosen because it is simple and fast. Alternatively,
+// This design has been chosen because it is simple and fast. Alternatively,
 // the platform dependent classes could have been implemented using abstract
 // superclasses with virtual methods and having specializations for each
 // platform. This design was rejected because it was more complicated and
@@ -44,7 +44,13 @@
 #ifndef V8_PLATFORM_H_
 #define V8_PLATFORM_H_
 
+#define V8_INFINITY INFINITY
+
+// Windows specific stuff.
 #ifdef WIN32
+
+// Microsoft Visual C++ specific stuff.
+#ifdef _MSC_VER
 
 enum {
   FP_NAN,
@@ -54,9 +60,11 @@ enum {
   FP_NORMAL
 };
 
-#define INFINITY HUGE_VAL
+#undef V8_INFINITY
+#define V8_INFINITY HUGE_VAL
 
-namespace v8 { namespace internal {
+namespace v8 {
+namespace internal {
 int isfinite(double x);
 } }
 int isnan(double x);
@@ -66,12 +74,22 @@ int isgreater(double x, double y);
 int fpclassify(double x);
 int signbit(double x);
 
-int random();
-
-int strcasecmp(const char* s1, const char* s2);
 int strncasecmp(const char* s1, const char* s2, int n);
 
-#else
+#endif  // _MSC_VER
+
+// Random is missing on both Visual Studio and MinGW.
+int random();
+
+#endif  // WIN32
+
+// GCC specific stuff
+#ifdef __GNUC__
+
+// Needed for va_list on at least MinGW and Android.
+#include <stdarg.h>
+
+#define __GNUC_VERSION__ (__GNUC__ * 10000 + __GNUC_MINOR__ * 100)
 
 // Unfortunately, the INFINITY macro cannot be used with the '-pedantic'
 // warning flag and certain versions of GCC due to a bug:
@@ -79,21 +97,23 @@ int strncasecmp(const char* s1, const char* s2, int n);
 // For now, we use the more involved template-based version from <limits>, but
 // only when compiling with GCC versions affected by the bug (2.96.x - 4.0.x)
 // __GNUC_PREREQ is not defined in GCC for Mac OS X, so we define our own macro
-#if defined(__GNUC__)
-#define __GNUC_VERSION__ (__GNUC__ * 10000 + __GNUC_MINOR__ * 100)
-#endif
-
 #if __GNUC_VERSION__ >= 29600 && __GNUC_VERSION__ < 40100
 #include <limits>
-#undef INFINITY
-#define INFINITY std::numeric_limits<double>::infinity()
+#undef V8_INFINITY
+#define V8_INFINITY std::numeric_limits<double>::infinity()
 #endif
 
-#endif  // WIN32
+#endif  // __GNUC__
 
-namespace v8 { namespace internal {
+namespace v8 {
+namespace internal {
+
+class Semaphore;
 
 double ceiling(double x);
+
+// Forward declarations.
+class Socket;
 
 // ----------------------------------------------------------------------------
 // OS
@@ -123,7 +143,7 @@ class OS {
 
   // Returns a string identifying the current time zone. The
   // timestamp is used for determining if DST is in effect.
-  static char* LocalTimezone(double time);
+  static const char* LocalTimezone(double time);
 
   // Returns the local time offset in milliseconds east of UTC without
   // taking daylight savings time into account.
@@ -133,6 +153,9 @@ class OS {
   static double DaylightSavingsOffset(double time);
 
   static FILE* FOpen(const char* path, const char* mode);
+
+  // Log file open mode is platform-dependent due to line ends issues.
+  static const char* LogFileOpenMode;
 
   // Print output to console. This is mostly used for debugging output.
   // On platforms that has standard terminal output, the output
@@ -146,15 +169,21 @@ class OS {
   static void PrintError(const char* format, ...);
   static void VPrintError(const char* format, va_list args);
 
-  // Allocate/Free memory used by JS heap. Pages are readable/writeable, but
+  // Allocate/Free memory used by JS heap. Pages are readable/writable, but
   // they are not guaranteed to be executable unless 'executable' is true.
   // Returns the address of allocated memory, or NULL if failed.
   static void* Allocate(const size_t requested,
                         size_t* allocated,
-                        bool executable);
-  static void Free(void* buf, const size_t length);
+                        bool is_executable);
+  static void Free(void* address, const size_t size);
   // Get the Alignment guaranteed by Allocate().
   static size_t AllocateAlignment();
+
+#ifdef ENABLE_HEAP_PROTECTION
+  // Protect/unprotect a block of memory by marking it read-only/writable.
+  static void Protect(void* address, size_t size);
+  static void Unprotect(void* address, size_t size, bool is_executable);
+#endif
 
   // Returns an indication of whether a pointer is in a space that
   // has been allocated by Allocate().  This method may conservatively
@@ -163,8 +192,8 @@ class OS {
   // heap corruption.
   static bool IsOutsideAllocatedSpace(void* pointer);
 
-  // Sleep for a number of miliseconds.
-  static void Sleep(const int miliseconds);
+  // Sleep for a number of milliseconds.
+  static void Sleep(const int milliseconds);
 
   // Abort the current process.
   static void Abort();
@@ -181,7 +210,7 @@ class OS {
     char text[kStackWalkMaxTextLen];
   };
 
-  static int StackWalk(StackFrame* frames, int frames_size);
+  static int StackWalk(Vector<StackFrame> frames);
 
   // Factory method for creating platform dependent Mutex.
   // Please use delete to reclaim the storage for the returned Mutex.
@@ -190,6 +219,10 @@ class OS {
   // Factory method for creating platform dependent Semaphore.
   // Please use delete to reclaim the storage for the returned Semaphore.
   static Semaphore* CreateSemaphore(int count);
+
+  // Factory method for creating platform dependent Socket.
+  // Please use delete to reclaim the storage for the returned Socket.
+  static Socket* CreateSocket();
 
   class MemoryMappedFile {
    public:
@@ -205,9 +238,8 @@ class OS {
                        const char* format,
                        va_list args);
 
+  static char* StrChr(char* str, int c);
   static void StrNCpy(Vector<char> dest, const char* src, size_t n);
-  static void WcsCpy(Vector<wchar_t> dest, const wchar_t* src);
-  static char* StrDup(const char* str);
 
   // Support for profiler.  Can do nothing, in which case ticks
   // occuring in shared libraries will not be properly accounted
@@ -247,7 +279,7 @@ class VirtualMemory {
   size_t size() { return size_; }
 
   // Commits real memory. Returns whether the operation succeeded.
-  bool Commit(void* address, size_t size, bool executable);
+  bool Commit(void* address, size_t size, bool is_executable);
 
   // Uncommit real memory.  Returns whether the operation succeeded.
   bool Uncommit(void* address, size_t size);
@@ -321,7 +353,16 @@ class Thread: public ThreadHandle {
   static LocalStorageKey CreateThreadLocalKey();
   static void DeleteThreadLocalKey(LocalStorageKey key);
   static void* GetThreadLocal(LocalStorageKey key);
+  static int GetThreadLocalInt(LocalStorageKey key) {
+    return static_cast<int>(reinterpret_cast<intptr_t>(GetThreadLocal(key)));
+  }
   static void SetThreadLocal(LocalStorageKey key, void* value);
+  static void SetThreadLocalInt(LocalStorageKey key, int value) {
+    SetThreadLocal(key, reinterpret_cast<void*>(static_cast<intptr_t>(value)));
+  }
+  static bool HasThreadLocal(LocalStorageKey key) {
+    return GetThreadLocal(key) != NULL;
+  }
 
   // A hint to the scheduler to let another thread run.
   static void YieldCPU();
@@ -388,12 +429,57 @@ class Semaphore {
  public:
   virtual ~Semaphore() {}
 
-  // Suspends the calling thread until the counter is non zero
+  // Suspends the calling thread until the semaphore counter is non zero
   // and then decrements the semaphore counter.
   virtual void Wait() = 0;
 
+  // Suspends the calling thread until the counter is non zero or the timeout
+  // time has passsed. If timeout happens the return value is false and the
+  // counter is unchanged. Otherwise the semaphore counter is decremented and
+  // true is returned. The timeout value is specified in microseconds.
+  virtual bool Wait(int timeout) = 0;
+
   // Increments the semaphore counter.
   virtual void Signal() = 0;
+};
+
+
+// ----------------------------------------------------------------------------
+// Socket
+//
+
+class Socket {
+ public:
+  virtual ~Socket() {}
+
+  // Server initialization.
+  virtual bool Bind(const int port) = 0;
+  virtual bool Listen(int backlog) const = 0;
+  virtual Socket* Accept() const = 0;
+
+  // Client initialization.
+  virtual bool Connect(const char* host, const char* port) = 0;
+
+  // Shutdown socket for both read and write. This causes blocking Send and
+  // Receive calls to exit. After Shutdown the Socket object cannot be used for
+  // any communication.
+  virtual bool Shutdown() = 0;
+
+  // Data Transimission
+  virtual int Send(const char* data, int len) const = 0;
+  virtual int Receive(char* data, int len) const = 0;
+
+  // Set the value of the SO_REUSEADDR socket option.
+  virtual bool SetReuseAddress(bool reuse_address) = 0;
+
+  virtual bool IsValid() const = 0;
+
+  static bool Setup();
+  static int LastError();
+  static uint16_t HToN(uint16_t value);
+  static uint16_t NToH(uint16_t value);
+  static uint32_t HToN(uint32_t value);
+  static uint32_t NToH(uint32_t value);
 };
 
 
@@ -408,10 +494,14 @@ class Semaphore {
 // TickSample captures the information collected for each sample.
 class TickSample {
  public:
-  TickSample() : pc(0), sp(0), state(OTHER) {}
-  unsigned int pc;  // Instruction pointer.
-  unsigned int sp;  // Stack pointer.
+  TickSample() : pc(0), sp(0), fp(0), state(OTHER), frames_count(0) {}
+  uintptr_t pc;  // Instruction pointer.
+  uintptr_t sp;  // Stack pointer.
+  uintptr_t fp;  // Frame pointer.
   StateTag state;   // The state of the VM.
+  static const int kMaxFramesCount = 100;
+  EmbeddedVector<Address, kMaxFramesCount> stack;  // Call stack.
+  int frames_count;  // Number of captured frames.
 };
 
 class Sampler {
@@ -419,6 +509,9 @@ class Sampler {
   // Initialize sampler.
   explicit Sampler(int interval, bool profiling);
   virtual ~Sampler();
+
+  // Performs stack sampling.
+  virtual void SampleStack(TickSample* sample) = 0;
 
   // This method is called for each sampling period with the current
   // program counter.
@@ -431,13 +524,14 @@ class Sampler {
   // Is the sampler used for profiling.
   inline bool IsProfiling() { return profiling_; }
 
-  class PlatformData;
- protected:
+  // Whether the sampler is running (that is, consumes resources).
   inline bool IsActive() { return active_; }
 
+  class PlatformData;
+
  private:
-  int interval_;
-  bool profiling_;
+  const int interval_;
+  const bool profiling_;
   bool active_;
   PlatformData* data_;  // Platform specific data.
   DISALLOW_IMPLICIT_CONSTRUCTORS(Sampler);

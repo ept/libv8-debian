@@ -50,7 +50,8 @@ static void InitializeVM() {
 
 
 bool DisassembleAndCompare(byte* pc, const char* compare_string) {
-  disasm::Disassembler disasm;
+  disasm::NameConverter converter;
+  disasm::Disassembler disasm(converter);
   EmbeddedVector<char, 128> disasm_buffer;
 
   disasm.InstructionDecode(disasm_buffer, pc);
@@ -68,15 +69,21 @@ bool DisassembleAndCompare(byte* pc, const char* compare_string) {
 }
 
 
+// Setup V8 to a state where we can at least run the assembler and
+// disassembler. Declare the variables and allocate the data structures used
+// in the rest of the macros.
 #define SETUP() \
   InitializeVM(); \
-  Serializer::disable(); \
   v8::HandleScope scope; \
   byte *buffer = reinterpret_cast<byte*>(malloc(4*1024)); \
   Assembler assm(buffer, 4*1024); \
   bool failure = false;
 
 
+// This macro assembles one instruction using the preallocated assembler and
+// disassembles the generated instruction, comparing the output to the expected
+// value. If the comparison fails an error message is printed, but the test
+// continues to run until the end.
 #define COMPARE(asm_, compare_string) \
   { \
     int pc_offset = assm.pc_offset(); \
@@ -86,8 +93,10 @@ bool DisassembleAndCompare(byte* pc, const char* compare_string) {
   }
 
 
-#define OUTPUT() \
-  if (failure) { \
+// Verify that all invocations of the COMPARE macro passed successfully.
+// Exit with a failure if at least one of the tests failed.
+#define VERIFY_RUN() \
+if (failure) { \
     V8_Fatal(__FILE__, __LINE__, "ARM Disassembler tests failed.\n"); \
   }
 
@@ -114,13 +123,13 @@ TEST(Type0) {
           "20354189       eorcss r4, r5, r9, lsl #3");
 
   COMPARE(sub(r5, r6, Operand(r10, LSL, 31), LeaveCC, hs),
-          "20465f8a       subcs r5, r6, sl, lsl #31");
+          "20465f8a       subcs r5, r6, r10, lsl #31");
   COMPARE(sub(r5, r6, Operand(r10, LSL, 30), SetCC, cc),
-          "30565f0a       subccs r5, r6, sl, lsl #30");
+          "30565f0a       subccs r5, r6, r10, lsl #30");
   COMPARE(sub(r5, r6, Operand(r10, LSL, 24), LeaveCC, lo),
-          "30465c0a       subcc r5, r6, sl, lsl #24");
+          "30465c0a       subcc r5, r6, r10, lsl #24");
   COMPARE(sub(r5, r6, Operand(r10, LSL, 16), SetCC, mi),
-          "4056580a       submis r5, r6, sl, lsl #16");
+          "4056580a       submis r5, r6, r10, lsl #16");
 
   COMPARE(rsb(r6, r7, Operand(fp)),
           "e067600b       rsb r6, r7, fp");
@@ -154,7 +163,7 @@ TEST(Type0) {
   COMPARE(sbc(r7, r9, Operand(ip, ROR, 4)),
           "e0c9726c       sbc r7, r9, ip, ror #4");
   COMPARE(sbc(r7, r10, Operand(ip), SetCC),
-          "e0da700c       sbcs r7, sl, ip");
+          "e0da700c       sbcs r7, r10, ip");
   COMPARE(sbc(r7, ip, Operand(ip, ROR, 31), SetCC, hi),
           "80dc7fec       sbchis r7, ip, ip, ror #31");
 
@@ -231,7 +240,7 @@ TEST(Type0) {
           "51d10004       bicpls r0, r1, r4");
 
   COMPARE(mvn(r10, Operand(r1)),
-          "e1e0a001       mvn sl, r1");
+          "e1e0a001       mvn r10, r1");
   COMPARE(mvn(r9, Operand(r2)),
           "e1e09002       mvn r9, r2");
   COMPARE(mvn(r0, Operand(r3), SetCC),
@@ -239,7 +248,7 @@ TEST(Type0) {
   COMPARE(mvn(r5, Operand(r4), SetCC, cc),
           "31f05004       mvnccs r5, r4");
 
-  OUTPUT();
+  VERIFY_RUN();
 }
 
 
@@ -268,5 +277,5 @@ TEST(Type1) {
   COMPARE(eor(r4, r1, Operand(0x10000000), SetCC, cc),
           "32314201       eorccs r4, r1, #268435456");
 
-  OUTPUT();
+  VERIFY_RUN();
 }

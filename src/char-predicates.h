@@ -28,7 +28,8 @@
 #ifndef V8_CHAR_PREDICATES_H_
 #define V8_CHAR_PREDICATES_H_
 
-namespace v8 { namespace internal {
+namespace v8 {
+namespace internal {
 
 // Unicode character predicates as defined by ECMA-262, 3rd,
 // used for lexical analysis.
@@ -37,6 +38,8 @@ inline bool IsCarriageReturn(uc32 c);
 inline bool IsLineFeed(uc32 c);
 inline bool IsDecimalDigit(uc32 c);
 inline bool IsHexDigit(uc32 c);
+inline bool IsRegExpWord(uc32 c);
+inline bool IsRegExpNewline(uc32 c);
 
 struct IdentifierStart {
   static inline bool Is(uc32 c) {

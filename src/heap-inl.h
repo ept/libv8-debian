@@ -31,16 +31,30 @@
 #include "log.h"
 #include "v8-counters.h"
 
-namespace v8 { namespace internal {
+namespace v8 {
+namespace internal {
 
-int Heap::MaxHeapObjectSize() {
+int Heap::MaxObjectSizeInPagedSpace() {
   return Page::kMaxHeapObjectSize;
 }
 
 
+Object* Heap::AllocateSymbol(Vector<const char> str,
+                             int chars,
+                             uint32_t length_field) {
+  unibrow::Utf8InputBuffer<> buffer(str.start(),
+                                    static_cast<unsigned>(str.length()));
+  return AllocateInternalSymbol(&buffer, chars, length_field);
+}
+
+
 Object* Heap::AllocateRaw(int size_in_bytes,
-                          AllocationSpace space) {
+                          AllocationSpace space,
+                          AllocationSpace retry_space) {
   ASSERT(allocation_allowed_ && gc_state_ == NOT_IN_GC);
+  ASSERT(space != NEW_SPACE ||
+         retry_space == OLD_POINTER_SPACE ||
+         retry_space == OLD_DATA_SPACE);
 #ifdef DEBUG
   if (FLAG_gc_interval >= 0 &&
       !disallow_allocation_failure_ &&
@@ -50,11 +64,16 @@ Object* Heap::AllocateRaw(int size_in_bytes,
   Counters::objs_since_last_full.Increment();
   Counters::objs_since_last_young.Increment();
 #endif
+  Object* result;
   if (NEW_SPACE == space) {
-    return new_space_->AllocateRaw(size_in_bytes);
+    result = new_space_.AllocateRaw(size_in_bytes);
+    if (always_allocate() && result->IsFailure()) {
+      space = retry_space;
+    } else {
+      return result;
+    }
   }
 
-  Object* result;
   if (OLD_POINTER_SPACE == space) {
     result = old_pointer_space_->AllocateRaw(size_in_bytes);
   } else if (OLD_DATA_SPACE == space) {
@@ -63,6 +82,8 @@ Object* Heap::AllocateRaw(int size_in_bytes,
     result = code_space_->AllocateRaw(size_in_bytes);
   } else if (LO_SPACE == space) {
     result = lo_space_->AllocateRaw(size_in_bytes);
+  } else if (CELL_SPACE == space) {
+    result = cell_space_->AllocateRaw(size_in_bytes);
   } else {
     ASSERT(MAP_SPACE == space);
     result = map_space_->AllocateRaw(size_in_bytes);
@@ -88,29 +109,40 @@ Object* Heap::NumberFromUint32(uint32_t value) {
 }
 
 
-Object* Heap::AllocateRawMap(int size_in_bytes) {
+Object* Heap::AllocateRawMap() {
 #ifdef DEBUG
   Counters::objs_since_last_full.Increment();
   Counters::objs_since_last_young.Increment();
 #endif
-  Object* result = map_space_->AllocateRaw(size_in_bytes);
+  Object* result = map_space_->AllocateRaw(Map::kSize);
+  if (result->IsFailure()) old_gen_exhausted_ = true;
+  return result;
+}
+
+
+Object* Heap::AllocateRawCell() {
+#ifdef DEBUG
+  Counters::objs_since_last_full.Increment();
+  Counters::objs_since_last_young.Increment();
+#endif
+  Object* result = cell_space_->AllocateRaw(JSGlobalPropertyCell::kSize);
   if (result->IsFailure()) old_gen_exhausted_ = true;
   return result;
 }
 
 
 bool Heap::InNewSpace(Object* object) {
-  return new_space_->Contains(object);
+  return new_space_.Contains(object);
 }
 
 
 bool Heap::InFromSpace(Object* object) {
-  return new_space_->FromSpaceContains(object);
+  return new_space_.FromSpaceContains(object);
 }
 
 
 bool Heap::InToSpace(Object* object) {
-  return new_space_->ToSpaceContains(object);
+  return new_space_.ToSpaceContains(object);
 }
 
 
@@ -118,108 +150,164 @@ bool Heap::ShouldBePromoted(Address old_address, int object_size) {
   // An object should be promoted if:
   // - the object has survived a scavenge operation or
   // - to space is already 25% full.
-  return old_address < new_space_->age_mark()
-      || (new_space_->Size() + object_size) >= (new_space_->Capacity() >> 2);
+  return old_address < new_space_.age_mark()
+      || (new_space_.Size() + object_size) >= (new_space_.Capacity() >> 2);
 }
 
 
 void Heap::RecordWrite(Address address, int offset) {
-  if (new_space_->Contains(address)) return;
-  ASSERT(!new_space_->FromSpaceContains(address));
+  if (new_space_.Contains(address)) return;
+  ASSERT(!new_space_.FromSpaceContains(address));
   SLOW_ASSERT(Contains(address + offset));
   Page::SetRSet(address, offset);
 }
 
 
 OldSpace* Heap::TargetSpace(HeapObject* object) {
+  InstanceType type = object->map()->instance_type();
+  AllocationSpace space = TargetSpaceId(type);
+  return (space == OLD_POINTER_SPACE)
+      ? old_pointer_space_
+      : old_data_space_;
+}
+
+
+AllocationSpace Heap::TargetSpaceId(InstanceType type) {
   // Heap numbers and sequential strings are promoted to old data space, all
   // other object types are promoted to old pointer space.  We do not use
   // object->IsHeapNumber() and object->IsSeqString() because we already
   // know that object has the heap object tag.
-  InstanceType type = object->map()->instance_type();
   ASSERT((type != CODE_TYPE) && (type != MAP_TYPE));
   bool has_pointers =
       type != HEAP_NUMBER_TYPE &&
       (type >= FIRST_NONSTRING_TYPE ||
-       String::cast(object)->representation_tag() != kSeqStringTag);
-  return has_pointers ? old_pointer_space_ : old_data_space_;
+       (type & kStringRepresentationMask) != kSeqStringTag);
+  return has_pointers ? OLD_POINTER_SPACE : OLD_DATA_SPACE;
 }
 
 
-#define GC_GREEDY_CHECK()                                     \
-  ASSERT(!FLAG_gc_greedy                                      \
-         || v8::internal::Heap::disallow_allocation_failure() \
-         || v8::internal::Heap::CollectGarbage(0, NEW_SPACE))
+void Heap::CopyBlock(Object** dst, Object** src, int byte_size) {
+  ASSERT(IsAligned(byte_size, kPointerSize));
+
+  // Use block copying memcpy if the segment we're copying is
+  // enough to justify the extra call/setup overhead.
+  static const int kBlockCopyLimit = 16 * kPointerSize;
+
+  if (byte_size >= kBlockCopyLimit) {
+    memcpy(dst, src, byte_size);
+  } else {
+    int remaining = byte_size / kPointerSize;
+    do {
+      remaining--;
+      *dst++ = *src++;
+    } while (remaining > 0);
+  }
+}
 
 
-// Do not use the identifier __object__ in a call to this macro.
-//
-// Call the function FUNCTION_CALL.  If it fails with a RetryAfterGC
-// failure, call the garbage collector and retry the function.  If the
-// garbage collector cannot reclaim the required space or the second
-// call fails with a RetryAfterGC failure, fail with out of memory.
-// If there is any other failure, return a null handle.  If either
-// call succeeds, return a handle to the functions return value.
-//
-// Note that this macro always returns or raises a fatal error.
-#define CALL_HEAP_FUNCTION(FUNCTION_CALL, TYPE)                              \
-  do {                                                                       \
-    GC_GREEDY_CHECK();                                                       \
-    Object* __object__ = FUNCTION_CALL;                                      \
-    if (__object__->IsFailure()) {                                           \
-      if (__object__->IsRetryAfterGC()) {                                    \
-        if (!Heap::CollectGarbage(                                           \
-                Failure::cast(__object__)->requested(),                      \
-                Failure::cast(__object__)->allocation_space())) {            \
-          /* TODO(1181417): Fix this. */                                     \
-          v8::internal::V8::FatalProcessOutOfMemory("CALL_HEAP_FUNCTION");   \
-        }                                                                    \
-        __object__ = FUNCTION_CALL;                                          \
-        if (__object__->IsFailure()) {                                       \
-          if (__object__->IsRetryAfterGC()) {                                \
-            /* TODO(1181417): Fix this. */                                   \
-            v8::internal::V8::FatalProcessOutOfMemory("CALL_HEAP_FUNCTION"); \
-          }                                                                  \
-          return Handle<TYPE>();                                             \
-        }                                                                    \
-      } else {                                                               \
-        if (__object__->IsOutOfMemoryFailure()) {                            \
-          v8::internal::V8::FatalProcessOutOfMemory("CALL_HEAP_FUNCTION");   \
-        }                                                                    \
-        return Handle<TYPE>();                                               \
-      }                                                                      \
-    }                                                                        \
-    return Handle<TYPE>(TYPE::cast(__object__));                             \
+void Heap::ScavengeObject(HeapObject** p, HeapObject* object) {
+  ASSERT(InFromSpace(object));
+
+  // We use the first word (where the map pointer usually is) of a heap
+  // object to record the forwarding pointer.  A forwarding pointer can
+  // point to an old space, the code space, or the to space of the new
+  // generation.
+  MapWord first_word = object->map_word();
+
+  // If the first word is a forwarding address, the object has already been
+  // copied.
+  if (first_word.IsForwardingAddress()) {
+    *p = first_word.ToForwardingAddress();
+    return;
+  }
+
+  // Call the slow part of scavenge object.
+  return ScavengeObjectSlow(p, object);
+}
+
+
+int Heap::AdjustAmountOfExternalAllocatedMemory(int change_in_bytes) {
+  ASSERT(HasBeenSetup());
+  int amount = amount_of_external_allocated_memory_ + change_in_bytes;
+  if (change_in_bytes >= 0) {
+    // Avoid overflow.
+    if (amount > amount_of_external_allocated_memory_) {
+      amount_of_external_allocated_memory_ = amount;
+    }
+    int amount_since_last_global_gc =
+        amount_of_external_allocated_memory_ -
+        amount_of_external_allocated_memory_at_last_global_gc_;
+    if (amount_since_last_global_gc > external_allocation_limit_) {
+      CollectAllGarbage(false);
+    }
+  } else {
+    // Avoid underflow.
+    if (amount >= 0) {
+      amount_of_external_allocated_memory_ = amount;
+    }
+  }
+  ASSERT(amount_of_external_allocated_memory_ >= 0);
+  return amount_of_external_allocated_memory_;
+}
+
+
+void Heap::SetLastScriptId(Object* last_script_id) {
+  roots_[kLastScriptIdRootIndex] = last_script_id;
+}
+
+
+#define GC_GREEDY_CHECK() \
+  ASSERT(!FLAG_gc_greedy || v8::internal::Heap::GarbageCollectionGreedyCheck())
+
+
+// Calls the FUNCTION_CALL function and retries it up to three times
+// to guarantee that any allocations performed during the call will
+// succeed if there's enough memory.
+
+// Warning: Do not use the identifiers __object__ or __scope__ in a
+// call to this macro.
+
+#define CALL_AND_RETRY(FUNCTION_CALL, RETURN_VALUE, RETURN_EMPTY)         \
+  do {                                                                    \
+    GC_GREEDY_CHECK();                                                    \
+    Object* __object__ = FUNCTION_CALL;                                   \
+    if (!__object__->IsFailure()) RETURN_VALUE;                           \
+    if (__object__->IsOutOfMemoryFailure()) {                             \
+      v8::internal::V8::FatalProcessOutOfMemory("CALL_AND_RETRY_0");      \
+    }                                                                     \
+    if (!__object__->IsRetryAfterGC()) RETURN_EMPTY;                      \
+    Heap::CollectGarbage(Failure::cast(__object__)->requested(),          \
+                         Failure::cast(__object__)->allocation_space());  \
+    __object__ = FUNCTION_CALL;                                           \
+    if (!__object__->IsFailure()) RETURN_VALUE;                           \
+    if (__object__->IsOutOfMemoryFailure()) {                             \
+      v8::internal::V8::FatalProcessOutOfMemory("CALL_AND_RETRY_1");      \
+    }                                                                     \
+    if (!__object__->IsRetryAfterGC()) RETURN_EMPTY;                      \
+    Counters::gc_last_resort_from_handles.Increment();                    \
+    Heap::CollectAllGarbage(false);                                       \
+    {                                                                     \
+      AlwaysAllocateScope __scope__;                                      \
+      __object__ = FUNCTION_CALL;                                         \
+    }                                                                     \
+    if (!__object__->IsFailure()) RETURN_VALUE;                           \
+    if (__object__->IsOutOfMemoryFailure() ||                             \
+        __object__->IsRetryAfterGC()) {                                   \
+      /* TODO(1181417): Fix this. */                                      \
+      v8::internal::V8::FatalProcessOutOfMemory("CALL_AND_RETRY_2");      \
+    }                                                                     \
+    RETURN_EMPTY;                                                         \
   } while (false)
 
 
-// Don't use the following names: __object__, __failure__.
-#define CALL_HEAP_FUNCTION_VOID(FUNCTION_CALL)                      \
-  GC_GREEDY_CHECK();                                                \
-  Object* __object__ = FUNCTION_CALL;                               \
-  if (__object__->IsFailure()) {                                    \
-    if (__object__->IsRetryAfterGC()) {                             \
-      Failure* __failure__ = Failure::cast(__object__);             \
-      if (!Heap::CollectGarbage(__failure__->requested(),           \
-                                __failure__->allocation_space())) { \
-         /* TODO(1181417): Fix this. */                             \
-         V8::FatalProcessOutOfMemory("Handles");                    \
-      }                                                             \
-      __object__ = FUNCTION_CALL;                                   \
-      if (__object__->IsFailure()) {                                \
-        if (__object__->IsRetryAfterGC()) {                         \
-           /* TODO(1181417): Fix this. */                           \
-           V8::FatalProcessOutOfMemory("Handles");                  \
-        }                                                           \
-        return;                                                     \
-      }                                                             \
-    } else {                                                        \
-      if (__object__->IsOutOfMemoryFailure()) {                     \
-         V8::FatalProcessOutOfMemory("Handles");                    \
-      }                                                             \
-      UNREACHABLE();                                                \
-    }                                                               \
-  }
+#define CALL_HEAP_FUNCTION(FUNCTION_CALL, TYPE)                \
+  CALL_AND_RETRY(FUNCTION_CALL,                                \
+                 return Handle<TYPE>(TYPE::cast(__object__)),  \
+                 return Handle<TYPE>())
+
+
+#define CALL_HEAP_FUNCTION_VOID(FUNCTION_CALL) \
+  CALL_AND_RETRY(FUNCTION_CALL, return, return)
 
 
 #ifdef DEBUG

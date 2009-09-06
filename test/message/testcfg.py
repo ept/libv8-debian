@@ -27,7 +27,7 @@
 
 import test
 import os
-from os.path import join, dirname, exists, basename
+from os.path import join, dirname, exists, basename, isdir
 import re
 
 FLAGS_PATTERN = re.compile(r"//\s+Flags:(.*)")
@@ -40,6 +40,11 @@ class MessageTestCase(test.TestCase):
     self.expected = expected
     self.config = config
     self.mode = mode
+
+  def IgnoreLine(self, str):
+    """Ignore empty lines and valgrind output."""
+    if not str: return True
+    else: return str.startswith('==') or str.startswith('**')
 
   def IsFailureOutput(self, output):
     f = file(self.expected)
@@ -58,7 +63,8 @@ class MessageTestCase(test.TestCase):
       pattern = '^%s$' % pattern
       patterns.append(pattern)
     # Compare actual output with the expected
-    outlines = [ s for s in output.stdout.split('\n') if s ]
+    raw_lines = output.stdout.split('\n')
+    outlines = [ s for s in raw_lines if not self.IgnoreLine(s) ]
     if len(outlines) != len(patterns):
       return True
     for i in xrange(len(patterns)):
@@ -93,12 +99,16 @@ class MessageTestConfiguration(test.TestConfiguration):
     super(MessageTestConfiguration, self).__init__(context, root)
 
   def Ls(self, path):
-    return [f[:-3] for f in os.listdir(path) if f.endswith('.js')]
+    if isdir(path):
+        return [f[:-3] for f in os.listdir(path) if f.endswith('.js')]
+    else:
+        return []
 
   def ListTests(self, current_path, path, mode):
     mjsunit = [current_path + [t] for t in self.Ls(self.root)]
+    regress = [current_path + ['regress', t] for t in self.Ls(join(self.root, 'regress'))]
     bugs = [current_path + ['bugs', t] for t in self.Ls(join(self.root, 'bugs'))]
-    all_tests = mjsunit + bugs
+    all_tests = mjsunit + regress + bugs
     result = []
     for test in all_tests:
       if self.Contains(path, test):

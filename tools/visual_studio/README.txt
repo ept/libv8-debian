@@ -8,8 +8,7 @@ be performed by Visual Studio.
 v8_base.vcproj
 --------------
 Base V8 library containing all the V8 code but no JavaScript library code. This
-includes third party code for regular expression handling (jscre) and
-string/number convertions (dtoa).
+includes third party code for string/number convertions (dtoa).
 
 v8.vcproj
 ---------
@@ -19,6 +18,11 @@ which is compiled as V8 is running.
 v8_mksnapshot.vcproj
 --------------------
 Executable v8_mksnapshot.exe for building a heap snapshot from a running V8.
+
+v8_snapshot_cc.vcproj
+---------------------
+Uses v8_mksnapshot.exe to generate snapshot.cc, which is used in
+v8_snapshot.vcproj.
 
 v8_snapshot.vcproj
 ------------------
@@ -40,7 +44,8 @@ in place:
 
   v8.vcproj depends on v8_base.vcproj
   v8_mksnapshot.vcproj depends on v8.vcproj
-  v8_snapshot.vcproj depends on v8_mksnapshot.vcproj and v8_base.vcproj
+  v8_snapshot_cc.vcproj depends on v8_mksnapshot.vcproj
+  v8_snapshot.vcproj depends on v8_snapshot_cc.vcproj and v8_base.vcproj
 
 A project which uses V8 should then depend on v8_snapshot.vcproj.
 
@@ -50,6 +55,7 @@ required and a project which uses V8 should depend on v8.vcproj.
 Two sample project files are available as well. These are v8_shell_sample.vcproj
 for building the sample in samples\shell.cc and v8_process_sample.vcproj for
 building the sample in samples\process.cc. Add either of these (or both) to a
+solution with v8_base, v8, v8_mksnapshot and v8_snapshot set up as described
 solution with v8_base, v8, v8_mksnapshot and v8_snapshot set up as described
 above and have them depend on v8_snapshot.
 

@@ -45,7 +45,7 @@ function listener(event, exec_state, event_data, data) {
 };
 
 // Add the debug event listener.
-Debug.addListener(listener);
+Debug.setListener(listener);
 
 // Test step into constructor with simple constructor.
 function X() {
@@ -59,6 +59,10 @@ function f() {
 break_break_point_hit_count = 0;
 f();
 assertEquals(5, break_break_point_hit_count);
+f();
+assertEquals(10, break_break_point_hit_count);
+f();
+assertEquals(15, break_break_point_hit_count);
 
 // Test step into constructor with builtin constructor.
 function g() {
@@ -68,7 +72,7 @@ function g() {
 
 break_break_point_hit_count = 0;
 g();
-assertEquals(5, break_break_point_hit_count);
+assertEquals(4, break_break_point_hit_count);
 
 // Get rid of the debug event listener.
-Debug.removeListener(listener);
+Debug.setListener(null);

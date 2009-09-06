@@ -31,7 +31,8 @@
 #include "memory.h"
 #include "spaces.h"
 
-namespace v8 { namespace internal {
+namespace v8 {
+namespace internal {
 
 
 // -----------------------------------------------------------------------------
@@ -64,15 +65,16 @@ HeapObject* HeapObjectIterator::next() {
 // PageIterator
 
 bool PageIterator::has_next() {
-  return cur_page_ != stop_page_;
+  return prev_page_ != stop_page_;
 }
 
 
 Page* PageIterator::next() {
   ASSERT(has_next());
-  Page* result = cur_page_;
-  cur_page_ = cur_page_->next_page();
-  return result;
+  prev_page_ = (prev_page_ == NULL)
+               ? space_->first_page_
+               : prev_page_->next_page();
+  return prev_page_;
 }
 
 
@@ -96,10 +98,16 @@ void Page::ClearRSet() {
 }
 
 
-// Give an address a (32-bits):
+// Given a 32-bit address, separate its bits into:
 // | page address | words (6) | bit offset (5) | pointer alignment (2) |
-// The rset address is computed as:
+// The address of the rset word containing the bit for this word is computed as:
 //    page_address + words * 4
+// For a 64-bit address, if it is:
+// | page address | words(5) | bit offset(5) | pointer alignment (3) |
+// The address of the rset word containing the bit for this word is computed as:
+//    page_address + words * 4 + kRSetOffset.
+// The rset is accessed as 32-bit words, and bit offsets in a 32-bit word,
+// even on the X64 architecture.
 
 Address Page::ComputeRSetBitPosition(Address address, int offset,
                                      uint32_t* bitmask) {
@@ -107,11 +115,11 @@ Address Page::ComputeRSetBitPosition(Address address, int offset,
 
   Page* page = Page::FromAddress(address);
   uint32_t bit_offset = ArithmeticShiftRight(page->Offset(address) + offset,
-                                             kObjectAlignmentBits);
+                                             kPointerSizeLog2);
   *bitmask = 1 << (bit_offset % kBitsPerInt);
 
   Address rset_address =
-      page->address() + (bit_offset / kBitsPerInt) * kIntSize;
+      page->address() + kRSetOffset + (bit_offset / kBitsPerInt) * kIntSize;
   // The remembered set address is either in the normal remembered set range
   // of a page or else we have a large object page.
   ASSERT((page->RSetStart() <= rset_address && rset_address < page->RSetEnd())
@@ -119,18 +127,19 @@ Address Page::ComputeRSetBitPosition(Address address, int offset,
 
   if (rset_address >= page->RSetEnd()) {
     // We have a large object page, and the remembered set address is actually
-    // past the end of the object.  The address of the remembered set in this
-    // case is the extra remembered set start address at the address of the
-    // end of the object:
+    // past the end of the object.
+
+    // The first part of the remembered set is still located at the start of
+    // the page, but anything after kRSetEndOffset must be relocated to after
+    // the large object, i.e. after
     //   (page->ObjectAreaStart() + object size)
-    // plus the offset of the computed remembered set address from the start
-    // of the object:
-    //   (rset_address - page->ObjectAreaStart()).
-    // Ie, we can just add the object size.
+    // We do that by adding the difference between the normal RSet's end and
+    // the object's end.
     ASSERT(HeapObject::FromAddress(address)->IsFixedArray());
-    rset_address +=
+    int fixedarray_length =
         FixedArray::SizeFor(Memory::int_at(page->ObjectAreaStart()
                                            + Array::kLengthOffset));
+    rset_address += kObjectStartOffset - kRSetEndOffset + fixedarray_length;
   }
   return rset_address;
 }
@@ -193,7 +202,7 @@ bool MemoryAllocator::IsPageInSpace(Page* p, PagedSpace* space) {
 
 Page* MemoryAllocator::GetNextPage(Page* p) {
   ASSERT(p->is_valid());
-  int raw_addr = p->opaque_header & ~Page::kPageAlignmentMask;
+  intptr_t raw_addr = p->opaque_header & ~Page::kPageAlignmentMask;
   return Page::FromAddress(AddressFrom<Address>(raw_addr));
 }
 
@@ -206,7 +215,7 @@ int MemoryAllocator::GetChunkId(Page* p) {
 
 void MemoryAllocator::SetNextPage(Page* prev, Page* next) {
   ASSERT(prev->is_valid());
-  int chunk_id = prev->opaque_header & Page::kPageAlignmentMask;
+  int chunk_id = GetChunkId(prev);
   ASSERT_PAGE_ALIGNED(next->address());
   prev->opaque_header = OffsetFrom(next->address()) | chunk_id;
 }
@@ -217,6 +226,43 @@ PagedSpace* MemoryAllocator::PageOwner(Page* page) {
   ASSERT(IsValidChunk(chunk_id));
   return chunks_[chunk_id].owner();
 }
+
+
+bool MemoryAllocator::InInitialChunk(Address address) {
+  if (initial_chunk_ == NULL) return false;
+
+  Address start = static_cast<Address>(initial_chunk_->address());
+  return (start <= address) && (address < start + initial_chunk_->size());
+}
+
+
+#ifdef ENABLE_HEAP_PROTECTION
+
+void MemoryAllocator::Protect(Address start, size_t size) {
+  OS::Protect(start, size);
+}
+
+
+void MemoryAllocator::Unprotect(Address start,
+                                size_t size,
+                                Executability executable) {
+  OS::Unprotect(start, size, executable);
+}
+
+
+void MemoryAllocator::ProtectChunkFromPage(Page* page) {
+  int id = GetChunkId(page);
+  OS::Protect(chunks_[id].address(), chunks_[id].size());
+}
+
+
+void MemoryAllocator::UnprotectChunkFromPage(Page* page) {
+  int id = GetChunkId(page);
+  OS::Unprotect(chunks_[id].address(), chunks_[id].size(),
+                chunks_[id].owner()->executable() == EXECUTABLE);
+}
+
+#endif
 
 
 // --------------------------------------------------------------------------
@@ -300,15 +346,13 @@ int LargeObjectSpace::ExtraRSetBytesFor(int object_size) {
 Object* NewSpace::AllocateRawInternal(int size_in_bytes,
                                       AllocationInfo* alloc_info) {
   Address new_top = alloc_info->top + size_in_bytes;
-  if (new_top > alloc_info->limit) {
-    return Failure::RetryAfterGC(size_in_bytes, identity());
-  }
+  if (new_top > alloc_info->limit) return Failure::RetryAfterGC(size_in_bytes);
 
   Object* obj = HeapObject::FromAddress(alloc_info->top);
   alloc_info->top = new_top;
 #ifdef DEBUG
   SemiSpace* space =
-      (alloc_info == &allocation_info_) ? to_space_ : from_space_;
+      (alloc_info == &allocation_info_) ? &to_space_ : &from_space_;
   ASSERT(space->low() <= alloc_info->top
          && alloc_info->top <= space->high()
          && alloc_info->limit == space->high());

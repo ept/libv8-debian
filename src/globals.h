@@ -1,4 +1,4 @@
-// Copyright 2006-2008 the V8 project authors. All rights reserved.
+// Copyright 2006-2009 the V8 project authors. All rights reserved.
 // Redistribution and use in source and binary forms, with or without
 // modification, are permitted provided that the following conditions are
 // met:
@@ -25,26 +25,37 @@
 // (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
 // OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
-// -----------------------------------------------------------------------------
-// Types
-// Windows is missing the stdint.h header file. Instead we define standard
-// integer types for Windows here.
+#ifndef V8_GLOBALS_H_
+#define V8_GLOBALS_H_
 
-#ifdef WIN32
-typedef signed char int8_t;
-typedef unsigned char uint8_t;
-typedef short int16_t;  // NOLINT
-typedef unsigned short uint16_t;  // NOLINT
-typedef int int32_t;
-typedef unsigned int uint32_t;
-typedef __int64 int64_t;
-typedef unsigned __int64 uint64_t;
+namespace v8 {
+namespace internal {
+
+// Processor architecture detection.  For more info on what's defined, see:
+//   http://msdn.microsoft.com/en-us/library/b0084kay.aspx
+//   http://www.agner.org/optimize/calling_conventions.pdf
+//   or with gcc, run: "echo | gcc -E -dM -"
+#if defined(_M_X64) || defined(__x86_64__)
+#define V8_HOST_ARCH_X64 1
+#define V8_HOST_ARCH_64_BIT 1
+#define V8_HOST_CAN_READ_UNALIGNED 1
+#elif defined(_M_IX86) || defined(__i386__)
+#define V8_HOST_ARCH_IA32 1
+#define V8_HOST_ARCH_32_BIT 1
+#define V8_HOST_CAN_READ_UNALIGNED 1
+#elif defined(__ARMEL__)
+#define V8_HOST_ARCH_ARM 1
+#define V8_HOST_ARCH_32_BIT 1
 #else
-#include <stdint.h>  // for intptr_t
+#error Your host architecture was not detected as supported by v8
 #endif
 
-
-namespace v8 { namespace internal {
+#if defined(V8_TARGET_ARCH_X64) || defined(V8_TARGET_ARCH_IA32)
+#define V8_TARGET_CAN_READ_UNALIGNED 1
+#elif V8_TARGET_ARCH_ARM
+#else
+#error Your target architecture is not supported by v8
+#endif
 
 // Support for alternative bool type. This is only enabled if the code is
 // compiled with USE_MYBOOL defined. This catches some nasty type bugs.
@@ -58,9 +69,6 @@ namespace v8 { namespace internal {
 // defined here because the platform code uses bool, and platform.h is
 // include very early in the main include file.
 
-#ifndef V8_GLOBALS_H_
-#define V8_GLOBALS_H_
-
 #ifdef USE_MYBOOL
 typedef unsigned int __my_bool__;
 #define bool __my_bool__  // use 'indirection' to avoid name clashes
@@ -69,19 +77,38 @@ typedef unsigned int __my_bool__;
 typedef uint8_t byte;
 typedef byte* Address;
 
+// Define our own macros for writing 64-bit constants.  This is less fragile
+// than defining __STDC_CONSTANT_MACROS before including <stdint.h>, and it
+// works on compilers that don't have it (like MSVC).
+#if V8_HOST_ARCH_64_BIT
+#ifdef _MSC_VER
+#define V8_UINT64_C(x)  (x ## UI64)
+#define V8_INT64_C(x)   (x ## I64)
+#define V8_PTR_PREFIX "ll"
+#else  // _MSC_VER
+#define V8_UINT64_C(x)  (x ## UL)
+#define V8_INT64_C(x)   (x ## L)
+#define V8_PTR_PREFIX "l"
+#endif  // _MSC_VER
+#else  // V8_HOST_ARCH_64_BIT
+#define V8_PTR_PREFIX ""
+#endif  // V8_HOST_ARCH_64_BIT
+
+#define V8PRIxPTR V8_PTR_PREFIX "x"
+#define V8PRIdPTR V8_PTR_PREFIX "d"
+
+// Fix for Mac OS X defining uintptr_t as "unsigned long":
+#if defined(__APPLE__) && defined(__MACH__)
+#undef V8PRIxPTR
+#define V8PRIxPTR "lx"
+#endif
+
 // Code-point values in Unicode 4.0 are 21 bits wide.
 typedef uint16_t uc16;
-typedef signed int uc32;
-
+typedef int32_t uc32;
 
 // -----------------------------------------------------------------------------
 // Constants
-
-#ifdef DEBUG
-const bool kDebug = true;
-#else
-const bool kDebug = false;
-#endif  // DEBUG
 
 const int KB = 1024;
 const int MB = KB * KB;
@@ -89,35 +116,36 @@ const int GB = KB * KB * KB;
 const int kMaxInt = 0x7FFFFFFF;
 const int kMinInt = -kMaxInt - 1;
 
-const int kCharSize     = sizeof(char);    // NOLINT
-const int kShortSize    = sizeof(short);   // NOLINT
-const int kIntSize      = sizeof(int);     // NOLINT
-const int kDoubleSize   = sizeof(double);  // NOLINT
-const int kPointerSize  = sizeof(void*);   // NOLINT
+const uint32_t kMaxUInt32 = 0xFFFFFFFFu;
 
+const int kCharSize     = sizeof(char);      // NOLINT
+const int kShortSize    = sizeof(short);     // NOLINT
+const int kIntSize      = sizeof(int);       // NOLINT
+const int kDoubleSize   = sizeof(double);    // NOLINT
+const int kPointerSize  = sizeof(void*);     // NOLINT
+const int kIntptrSize   = sizeof(intptr_t);  // NOLINT
+
+#if V8_HOST_ARCH_64_BIT
+const int kPointerSizeLog2 = 3;
+const intptr_t kIntptrSignBit = V8_INT64_C(0x8000000000000000);
+#else
 const int kPointerSizeLog2 = 2;
+const intptr_t kIntptrSignBit = 0x80000000;
+#endif
 
-const int kObjectAlignmentBits = 2;
-const int kObjectAlignmentMask = (1 << kObjectAlignmentBits) - 1;
-const int kObjectAlignment = 1 << kObjectAlignmentBits;
+const int kObjectAlignmentBits = kPointerSizeLog2;
+const intptr_t kObjectAlignment = 1 << kObjectAlignmentBits;
+const intptr_t kObjectAlignmentMask = kObjectAlignment - 1;
 
-
-// Tag information for HeapObject.
-const int kHeapObjectTag = 1;
-const int kHeapObjectTagSize = 2;
-const int kHeapObjectTagMask = (1 << kHeapObjectTagSize) - 1;
-
-
-// Tag information for Smi.
-const int kSmiTag = 0;
-const int kSmiTagSize = 1;
-const int kSmiTagMask = (1 << kSmiTagSize) - 1;
+// Desired alignment for pointers.
+const intptr_t kPointerAlignment = (1 << kPointerSizeLog2);
+const intptr_t kPointerAlignmentMask = kPointerAlignment - 1;
 
 
 // Tag information for Failure.
 const int kFailureTag = 3;
 const int kFailureTagSize = 2;
-const int kFailureTagMask = (1 << kFailureTagSize) - 1;
+const intptr_t kFailureTagMask = (1 << kFailureTagSize) - 1;
 
 
 const int kBitsPerByte = 8;
@@ -126,11 +154,21 @@ const int kBitsPerPointer = kPointerSize * kBitsPerByte;
 const int kBitsPerInt = kIntSize * kBitsPerByte;
 
 
-// Zap-value: The value used for zapping dead objects. Should be a recognizable
-// illegal heap object pointer.
+// Zap-value: The value used for zapping dead objects.
+// Should be a recognizable hex value tagged as a heap object pointer.
+#ifdef V8_HOST_ARCH_64_BIT
+const Address kZapValue =
+    reinterpret_cast<Address>(V8_UINT64_C(0xdeadbeedbeadbeed));
+const Address kHandleZapValue =
+    reinterpret_cast<Address>(V8_UINT64_C(0x1baddead0baddead));
+const Address kFromSpaceZapValue =
+    reinterpret_cast<Address>(V8_UINT64_C(0x1beefdad0beefdad));
+#else
 const Address kZapValue = reinterpret_cast<Address>(0xdeadbeed);
 const Address kHandleZapValue = reinterpret_cast<Address>(0xbaddead);
 const Address kFromSpaceZapValue = reinterpret_cast<Address>(0xbeefdad);
+#endif
+
 
 // -----------------------------------------------------------------------------
 // Forward declarations for frequently used classes
@@ -138,6 +176,7 @@ const Address kFromSpaceZapValue = reinterpret_cast<Address>(0xbeefdad);
 
 class AccessorInfo;
 class Allocation;
+class Arguments;
 class Assembler;
 class BreakableStatement;
 class Code;
@@ -155,7 +194,8 @@ class FixedArray;
 class FunctionEntry;
 class FunctionLiteral;
 class FunctionTemplateInfo;
-class Dictionary;
+class NumberDictionary;
+class StringDictionary;
 class FreeStoreAllocationPolicy;
 template <typename T> class Handle;
 class Heap;
@@ -163,10 +203,10 @@ class HeapObject;
 class IC;
 class InterceptorInfo;
 class IterationStatement;
+class Array;
 class JSArray;
 class JSFunction;
 class JSObject;
-class LabelCollector;
 class LargeObjectSpace;
 template <typename T, class P = FreeStoreAllocationPolicy> class List;
 class LookupResult;
@@ -175,10 +215,16 @@ class Map;
 class MapSpace;
 class MarkCompactCollector;
 class NewSpace;
+class NodeVisitor;
 class Object;
 class OldSpace;
 class Property;
 class Proxy;
+class RegExpNode;
+struct RegExpCompileData;
+class RegExpTree;
+class RegExpCompiler;
+class RegExpVisitor;
 class Scope;
 template<class Allocator = FreeStoreAllocationPolicy> class ScopeInfo;
 class Script;
@@ -188,7 +234,7 @@ class Statement;
 class String;
 class Struct;
 class SwitchStatement;
-class Visitor;
+class AstVisitor;
 class Variable;
 class VariableProxy;
 class RelocInfo;
@@ -198,6 +244,7 @@ class ObjectGroup;
 class TickSample;
 class VirtualMemory;
 class Mutex;
+class ZoneScopeInfo;
 
 typedef bool (*WeakSlotCallback)(Object** pointer);
 
@@ -207,14 +254,16 @@ typedef bool (*WeakSlotCallback)(Object** pointer);
 // NOTE: SpaceIterator depends on AllocationSpace enumeration values being
 // consecutive.
 enum AllocationSpace {
-  NEW_SPACE,          // Semispaces collected with copying collector.
-  OLD_POINTER_SPACE,  // Must be first of the paged spaces - see PagedSpaces.
-  OLD_DATA_SPACE,     // May not have pointers to new space.
-  CODE_SPACE,         // Also one of the old spaces.  Marked executable.
-  MAP_SPACE,          // Only map objects.
-  LO_SPACE,           // Large objects.
+  NEW_SPACE,            // Semispaces collected with copying collector.
+  OLD_POINTER_SPACE,    // May contain pointers to new space.
+  OLD_DATA_SPACE,       // Must not have pointers to new space.
+  CODE_SPACE,           // No pointers to new space, marked executable.
+  MAP_SPACE,            // Only and all map objects.
+  CELL_SPACE,           // Only and all cell objects.
+  LO_SPACE,             // Promoted large objects.
+
   FIRST_SPACE = NEW_SPACE,
-  LAST_SPACE = LO_SPACE  // <= 5 (see kSpaceBits and kLOSpacePointer)
+  LAST_SPACE = LO_SPACE
 };
 const int kSpaceTagSize = 3;
 const int kSpaceTagMask = (1 << kSpaceTagSize) - 1;
@@ -250,6 +299,7 @@ struct CodeDesc {
   int buffer_size;
   int instr_size;
   int reloc_size;
+  Assembler* origin;
 };
 
 
@@ -290,6 +340,12 @@ enum InlineCacheState {
   // Special states for debug break or step in prepare stubs.
   DEBUG_BREAK,
   DEBUG_PREPARE_STEP_IN
+};
+
+
+enum InLoopFlag {
+  NOT_IN_LOOP,
+  IN_LOOP
 };
 
 
@@ -346,7 +402,8 @@ struct AccessorDescriptor {
   V(JS)                   \
   V(GC)                   \
   V(COMPILER)             \
-  V(OTHER)
+  V(OTHER)                \
+  V(EXTERNAL)
 
 enum StateTag {
 #define DEF_STATE_TAG(name) name,
@@ -363,18 +420,18 @@ enum StateTag {
 // Testers for test.
 
 #define HAS_SMI_TAG(value) \
-  ((reinterpret_cast<int>(value) & kSmiTagMask) == kSmiTag)
+  ((reinterpret_cast<intptr_t>(value) & kSmiTagMask) == kSmiTag)
 
 #define HAS_FAILURE_TAG(value) \
-  ((reinterpret_cast<int>(value) & kFailureTagMask) == kFailureTag)
-
-#define HAS_HEAP_OBJECT_TAG(value) \
-  ((reinterpret_cast<int>(value) & kHeapObjectTagMask) == kHeapObjectTag)
+  ((reinterpret_cast<intptr_t>(value) & kFailureTagMask) == kFailureTag)
 
 // OBJECT_SIZE_ALIGN returns the value aligned HeapObject size
 #define OBJECT_SIZE_ALIGN(value)                                \
-  ((value + kObjectAlignmentMask) & ~kObjectAlignmentMask)
+  (((value) + kObjectAlignmentMask) & ~kObjectAlignmentMask)
 
+// POINTER_SIZE_ALIGN returns the value aligned as a pointer.
+#define POINTER_SIZE_ALIGN(value)                               \
+  (((value) + kPointerAlignmentMask) & ~kPointerAlignmentMask)
 
 // The expression OFFSET_OF(type, field) computes the byte-offset
 // of the specified field relative to the containing type. This
@@ -452,8 +509,10 @@ F FUNCTION_CAST(Address addr) {
 #define TRACK_MEMORY(name)
 #endif
 
-// define used for helping GCC to make better inlining.
-#ifdef __GNUC__
+// define used for helping GCC to make better inlining. Don't bother for debug
+// builds. On GCC 3.4.5 using __attribute__((always_inline)) causes compilation
+// errors in debug build.
+#if defined(__GNUC__) && !defined(DEBUG)
 #if (__GNUC__ >= 4)
 #define INLINE(header) inline header  __attribute__((always_inline))
 #else
@@ -477,7 +536,7 @@ F FUNCTION_CAST(Address addr) {
 // exception'.
 //
 // Bit_cast uses the memcpy exception to move the bits from a variable of one
-// type o a variable of another type.  Of course the end result is likely to
+// type of a variable of another type.  Of course the end result is likely to
 // be implementation dependent.  Most compilers (gcc-4.2 and MSVC 2005)
 // will completely optimize bit_cast away.
 //

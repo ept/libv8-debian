@@ -28,7 +28,8 @@
 #ifndef V8_ALLOCATION_H_
 #define V8_ALLOCATION_H_
 
-namespace v8 { namespace internal {
+namespace v8 {
+namespace internal {
 
 
 // A class that controls whether allocation is allowed.  This is for
@@ -119,10 +120,11 @@ static void DeleteArray(T* array) {
 }
 
 
-// The normal strdup function uses malloc.  This version of StrDup
-// uses new and calls the FatalProcessOutOfMemory handler if
-// allocation fails.
+// The normal strdup functions use malloc.  These versions of StrDup
+// and StrNDup uses new and calls the FatalProcessOutOfMemory handler
+// if allocation fails.
 char* StrDup(const char* str);
+char* StrNDup(const char* str, size_t n);
 
 
 // Allocation policy for allocating in the C free store using malloc

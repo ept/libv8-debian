@@ -30,8 +30,13 @@
 Debug = debug.Debug
 
 // Simple function which stores the last debug event.
-listenerComplete = false;
-exception = false;
+var listenerComplete = false;
+var exception = false;
+var f_script_id = 0;
+var g_script_id = 0;
+var h_script_id = 0;
+var f_line = 0;
+var g_line = 0;
 
 var base_request = '"seq":0,"type":"request","command":"setbreakpoint"'
 
@@ -44,15 +49,19 @@ function safeEval(code) {
   }
 }
 
-function testArguments(dcp, arguments, success, type) {
+function testArguments(dcp, arguments, success, is_script) {
   var request = '{' + base_request + ',"arguments":' + arguments + '}'
   var json_response = dcp.processDebugJSONRequest(request);
   var response = safeEval(json_response);
   if (success) {
-    assertTrue(response.success, json_response);
-    assertEquals(type ? type : 'script', response.body.type, json_response);
+    assertTrue(response.success, request + ' -> ' + json_response);
+    if (is_script) {
+      assertEquals('scriptName', response.body.type, request + ' -> ' + json_response);
+    } else {
+      assertEquals('scriptId', response.body.type, request + ' -> ' + json_response);
+    }
   } else {
-    assertFalse(response.success, json_response);
+    assertFalse(response.success, request + ' -> ' + json_response);
   }
 }
 
@@ -66,6 +75,8 @@ function listener(event, exec_state, event_data, data) {
     var request = '{' + base_request + '}'
     var response = safeEval(dcp.processDebugJSONRequest(request));
     assertFalse(response.success);
+    
+    var mirror;
 
     testArguments(dcp, '{}', false);
     testArguments(dcp, '{"type":"xx"}', false);
@@ -77,20 +88,33 @@ function listener(event, exec_state, event_data, data) {
     testArguments(dcp, '{"type":"function","target":"f","line":-1}', false);
     testArguments(dcp, '{"type":"function","target":"f","column":-1}', false);
     testArguments(dcp, '{"type":"function","target":"f","ignoreCount":-1}', false);
+    testArguments(dcp, '{"type":"handle","target":"-1"}', false);
+    mirror = debug.MakeMirror(o);
+    testArguments(dcp, '{"type":"handle","target":' + mirror.handle() + '}', false);
 
     // Test some legal setbreakpoint requests.
-    testArguments(dcp, '{"type":"function","target":"f"}', true);
-    testArguments(dcp, '{"type":"function","target":"h"}', true, 'function');
-    testArguments(dcp, '{"type":"function","target":"f","line":1}', true);
-    testArguments(dcp, '{"type":"function","target":"f","position":1}', true);
-    testArguments(dcp, '{"type":"function","target":"f","condition":"i == 1"}', true);
-    testArguments(dcp, '{"type":"function","target":"f","enabled":true}', true);
-    testArguments(dcp, '{"type":"function","target":"f","enabled":false}', true);
-    testArguments(dcp, '{"type":"function","target":"f","ignoreCount":7}', true);
-    testArguments(dcp, '{"type":"script","target":"test"}', true);
-    testArguments(dcp, '{"type":"script","target":"test"}', true);
-    testArguments(dcp, '{"type":"script","target":"test","line":1}', true);
-    testArguments(dcp, '{"type":"script","target":"test","column":1}', true);
+    testArguments(dcp, '{"type":"function","target":"f"}', true, false);
+    testArguments(dcp, '{"type":"function","target":"h"}', true, false);
+    testArguments(dcp, '{"type":"function","target":"f","line":1}', true, false);
+    testArguments(dcp, '{"type":"function","target":"f","position":1}', true, false);
+    testArguments(dcp, '{"type":"function","target":"f","condition":"i == 1"}', true, false);
+    testArguments(dcp, '{"type":"function","target":"f","enabled":true}', true, false);
+    testArguments(dcp, '{"type":"function","target":"f","enabled":false}', true, false);
+    testArguments(dcp, '{"type":"function","target":"f","ignoreCount":7}', true, false);
+
+    testArguments(dcp, '{"type":"script","target":"test"}', true, true);
+    testArguments(dcp, '{"type":"script","target":"test"}', true, true);
+    testArguments(dcp, '{"type":"script","target":"test","line":1}', true, true);
+    testArguments(dcp, '{"type":"script","target":"test","column":1}', true, true);
+
+    testArguments(dcp, '{"type":"scriptId","target":' + f_script_id + ',"line":' + f_line + '}', true, false);
+    testArguments(dcp, '{"type":"scriptId","target":' + g_script_id + ',"line":' + g_line + '}', true, false);
+    testArguments(dcp, '{"type":"scriptId","target":' + h_script_id + ',"line":' + h_line + '}', true, false);
+
+    mirror = debug.MakeMirror(f);
+    testArguments(dcp, '{"type":"handle","target":' + mirror.handle() + '}', true, false);
+    mirror = debug.MakeMirror(o.a);
+    testArguments(dcp, '{"type":"handle","target":' + mirror.handle() + '}', true, false);
 
     // Indicate that all was processed.
     listenerComplete = true;
@@ -101,7 +125,7 @@ function listener(event, exec_state, event_data, data) {
 };
 
 // Add the debug event listener.
-Debug.addListener(listener);
+Debug.setListener(listener);
 
 function f() {
   a=1
@@ -113,10 +137,29 @@ function g() {
 
 eval('function h(){}');
 
+o = {a:function(){},b:function(){}}
+
+// Check the script ids for the test functions.
+f_script_id = Debug.findScript(f).id;
+g_script_id = Debug.findScript(g).id;
+h_script_id = Debug.findScript(h).id;
+assertTrue(f_script_id > 0, "invalid script id for f");
+assertTrue(g_script_id > 0, "invalid script id for g");
+assertTrue(h_script_id > 0, "invalid script id for h");
+assertEquals(f_script_id, g_script_id);
+
+// Get the source line for the test functions.
+f_line = Debug.findFunctionSourceLocation(f).line;
+g_line = Debug.findFunctionSourceLocation(g).line;
+h_line = Debug.findFunctionSourceLocation(h).line;
+assertTrue(f_line > 0, "invalid line for f");
+assertTrue(g_line > 0, "invalid line for g");
+assertTrue(f_line < g_line);
+assertEquals(h_line, 0, "invalid line for h");
+
 // Set a break point and call to invoke the debug event listener.
 Debug.setBreakPoint(g, 0, 0);
 g();
 
 // Make sure that the debug event listener vas invoked.
-assertTrue(listenerComplete, "listener did not run to completion");
-assertFalse(exception, "exception in listener")
+assertTrue(listenerComplete, "listener did not run to completion: " + exception);

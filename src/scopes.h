@@ -31,25 +31,45 @@
 #include "ast.h"
 #include "hashmap.h"
 
-namespace v8 { namespace internal {
+namespace v8 {
+namespace internal {
 
 
-// A hash map to support fast local variable declaration and lookup.
-
-class LocalsMap: public HashMap {
+// A hash map to support fast variable declaration and lookup.
+class VariableMap: public HashMap {
  public:
-  LocalsMap();
+  VariableMap();
 
   // Dummy constructor.  This constructor doesn't set up the map
   // properly so don't use it unless you have a good reason.
-  explicit LocalsMap(bool gotta_love_static_overloading);
+  explicit VariableMap(bool gotta_love_static_overloading);
 
-  virtual ~LocalsMap();
+  virtual ~VariableMap();
 
-  Variable* Declare(Scope* scope, Handle<String> name, Variable::Mode mode,
-                    bool is_valid_LHS, bool is_this);
+  Variable* Declare(Scope* scope,
+                    Handle<String> name,
+                    Variable::Mode mode,
+                    bool is_valid_lhs,
+                    Variable::Kind kind);
 
   Variable* Lookup(Handle<String> name);
+};
+
+
+// The dynamic scope part holds hash maps for the variables that will
+// be looked up dynamically from within eval and with scopes. The objects
+// are allocated on-demand from Scope::NonLocal to avoid wasting memory
+// and setup time for scopes that don't need them.
+class DynamicScopePart : public ZoneObject {
+ public:
+  VariableMap* GetMap(Variable::Mode mode) {
+    int index = mode - Variable::DYNAMIC;
+    ASSERT(index >= 0 && index < 3);
+    return &maps_[index];
+  }
+
+ private:
+  VariableMap maps_[3];
 };
 
 
@@ -73,7 +93,6 @@ class Scope: public ZoneObject {
     GLOBAL_SCOPE    // the top-level scope for a program or a top-level eval
   };
 
-  Scope();
   Scope(Scope* outer_scope, Type type);
 
   virtual ~Scope() { }
@@ -88,6 +107,10 @@ class Scope: public ZoneObject {
   // Declarations
 
   // Lookup a variable in this scope. Returns the variable or NULL if not found.
+  virtual Variable* LocalLookup(Handle<String> name);
+
+  // Lookup a variable in this scope or outer scopes.
+  // Returns the variable or NULL if not found.
   virtual Variable* Lookup(Handle<String> name);
 
   // Declare the function variable for a function literal. This variable
@@ -95,12 +118,18 @@ class Scope: public ZoneObject {
   // outer scope. Only possible for function scopes; at most one variable.
   Variable* DeclareFunctionVar(Handle<String> name);
 
-  // Declare a variable in this scope. If the variable has been
+  // Declare a local variable in this scope. If the variable has been
   // declared before, the previously declared variable is returned.
-  virtual Variable* Declare(Handle<String> name, Variable::Mode mode);
+  virtual Variable* DeclareLocal(Handle<String> name, Variable::Mode mode);
+
+  // Declare an implicit global variable in this scope which must be a
+  // global scope.  The variable was introduced (possibly from an inner
+  // scope) by a reference to an unresolved variable with no intervening
+  // with statements or eval calls.
+  Variable* DeclareGlobal(Handle<String> name);
 
   // Add a parameter to the parameter list. The parameter must have been
-  // declared via Declare. The same parameter may occur more then once in
+  // declared via Declare. The same parameter may occur more than once in
   // the parameter list; they must be added in source order, from left to
   // right.
   void AddParameter(Variable* var);
@@ -138,7 +167,7 @@ class Scope: public ZoneObject {
 
   // Visit the illegal redeclaration expression. Do not call if the
   // scope doesn't have an illegal redeclaration node.
-  void VisitIllegalRedeclaration(Visitor* visitor);
+  void VisitIllegalRedeclaration(AstVisitor* visitor);
 
   // Check if the scope has (at least) one illegal redeclaration.
   bool HasIllegalRedeclaration() const { return illegal_redecl_ != NULL; }
@@ -162,9 +191,17 @@ class Scope: public ZoneObject {
   bool is_function_scope() const  { return type_ == FUNCTION_SCOPE; }
   bool is_global_scope() const  { return type_ == GLOBAL_SCOPE; }
 
+  // Information about which scopes calls eval.
+  bool calls_eval() const  { return scope_calls_eval_; }
+  bool outer_scope_calls_eval() const  { return outer_scope_calls_eval_; }
+
+  // Is this scope inside a with statement.
+  bool inside_with() const  { return scope_inside_with_; }
+  // Does this scope contain a with statement.
+  bool contains_with() const  { return scope_contains_with_; }
+
   // The scope immediately surrounding this scope, or NULL.
   Scope* outer_scope() const  { return outer_scope_; }
-
 
   // ---------------------------------------------------------------------------
   // Accessors.
@@ -209,18 +246,19 @@ class Scope: public ZoneObject {
   template<class Allocator>
   void CollectUsedVariables(List<Variable*, Allocator>* locals);
 
-  // Resolve and fill in the allocation information for all variables in
-  // this scopes. Must be called *after* all scopes have been processed
-  // (parsed) to ensure that unresolved variables can be resolved properly.
-  void AllocateVariables();
+  // Resolve and fill in the allocation information for all variables
+  // in this scopes. Must be called *after* all scopes have been
+  // processed (parsed) to ensure that unresolved variables can be
+  // resolved properly.
+  //
+  // In the case of code compiled and run using 'eval', the context
+  // parameter is the context in which eval was called.  In all other
+  // cases the context parameter is an empty handle.
+  void AllocateVariables(Handle<Context> context);
 
   // Result of variable allocation.
   int num_stack_slots() const  { return num_stack_slots_; }
   int num_heap_slots() const  { return num_heap_slots_; }
-
-  // True if this scope supports calling eval (has a properly
-  // initialized context).
-  bool SupportsEval() const;
 
   // Make sure this scope and all outer scopes are eagerly compiled.
   void ForceEagerCompilation()  { force_eager_compilation_ = true; }
@@ -247,6 +285,8 @@ class Scope: public ZoneObject {
  protected:
   friend class ParserFactory;
 
+  explicit Scope(Type type);
+
   // Scope tree.
   Scope* outer_scope_;  // the immediately enclosing outer scope, or NULL
   ZoneList<Scope*> inner_scopes_;  // the immediately enclosed inner scopes
@@ -258,25 +298,28 @@ class Scope: public ZoneObject {
   Handle<String> scope_name_;
 
   // The variables declared in this scope:
-  // all user-declared variables (incl. parameters)
-  LocalsMap locals_;
-  // compiler-allocated (user-invisible) temporaries
+  //
+  // All user-declared variables (incl. parameters).  For global scopes
+  // variables may be implicitly 'declared' by being used (possibly in
+  // an inner scope) with no intervening with statements or eval calls.
+  VariableMap variables_;
+  // Compiler-allocated (user-invisible) temporaries.
   ZoneList<Variable*> temps_;
-  // parameter list in source order
+  // Parameter list in source order.
   ZoneList<Variable*> params_;
-  // variables that must be looked up dynamically
-  ZoneList<Variable*> nonlocals_;
-  // unresolved variables referred to from this scope
+  // Variables that must be looked up dynamically.
+  DynamicScopePart* dynamics_;
+  // Unresolved variables referred to from this scope.
   ZoneList<VariableProxy*> unresolved_;
-  // declarations
+  // Declarations.
   ZoneList<Declaration*> decls_;
-  // convenience variable
+  // Convenience variable.
   VariableProxy* receiver_;
-  // function variable, if any; function scopes only
+  // Function variable, if any; function scopes only.
   Variable* function_;
-  // convenience variable; function scopes only
+  // Convenience variable; function scopes only.
   VariableProxy* arguments_;
-  // convenience variable; function scopes only
+  // Convenience variable; function scopes only.
   VariableProxy* arguments_shadow_;
 
   // Illegal redeclaration.
@@ -290,6 +333,7 @@ class Scope: public ZoneObject {
   // Computed via PropagateScopeInfo.
   bool outer_scope_calls_eval_;
   bool inner_scope_calls_eval_;
+  bool outer_scope_is_eval_scope_;
   bool force_eager_compilation_;
 
   // Computed via AllocateVariables; function scopes only.
@@ -298,15 +342,21 @@ class Scope: public ZoneObject {
 
   // Create a non-local variable with a given name.
   // These variables are looked up dynamically at runtime.
-  Variable* NonLocal(Handle<String> name);
+  Variable* NonLocal(Handle<String> name, Variable::Mode mode);
 
   // Variable resolution.
-  Variable* LookupRecursive(Handle<String> name, bool inner_lookup);
-  void ResolveVariable(Scope* global_scope, VariableProxy* proxy);
-  void ResolveVariablesRecursively(Scope* global_scope);
+  Variable* LookupRecursive(Handle<String> name,
+                            bool inner_lookup,
+                            Variable** invalidated_local);
+  void ResolveVariable(Scope* global_scope,
+                       Handle<Context> context,
+                       VariableProxy* proxy);
+  void ResolveVariablesRecursively(Scope* global_scope,
+                                   Handle<Context> context);
 
   // Scope analysis.
-  bool PropagateScopeInfo(bool outer_scope_calls_eval);
+  bool PropagateScopeInfo(bool outer_scope_calls_eval,
+                          bool outer_scope_is_eval_scope);
   bool HasTrivialContext() const;
 
   // Predicates.
@@ -326,7 +376,7 @@ class Scope: public ZoneObject {
 
 class DummyScope : public Scope {
  public:
-  DummyScope() {
+  DummyScope() : Scope(GLOBAL_SCOPE) {
     outer_scope_ = this;
   }
 

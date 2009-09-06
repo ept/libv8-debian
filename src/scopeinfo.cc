@@ -32,7 +32,8 @@
 #include "scopeinfo.h"
 #include "scopes.h"
 
-namespace v8 { namespace internal {
+namespace v8 {
+namespace internal {
 
 
 static int CompareLocal(Variable* const* v, Variable* const* w) {
@@ -50,7 +51,7 @@ static int CompareLocal(Variable* const* v, Variable* const* w) {
 template<class Allocator>
 ScopeInfo<Allocator>::ScopeInfo(Scope* scope)
     : function_name_(Factory::empty_symbol()),
-      supports_eval_(scope->SupportsEval()),
+      calls_eval_(scope->calls_eval()),
       parameters_(scope->num_parameters()),
       stack_slots_(scope->num_stack_slots()),
       context_slots_(scope->num_heap_slots()),
@@ -151,7 +152,6 @@ ScopeInfo<Allocator>::ScopeInfo(Scope* scope)
 // Encoding format in the Code object:
 //
 // - function name
-// - supports eval info
 //
 // - number of variables in the context object (smi) (= function context
 //   slot index + 1)
@@ -247,7 +247,6 @@ static Object** ReadList(Object** p,
 template<class Allocator>
 ScopeInfo<Allocator>::ScopeInfo(Code* code)
   : function_name_(Factory::empty_symbol()),
-    supports_eval_(false),
     parameters_(4),
     stack_slots_(8),
     context_slots_(8),
@@ -257,7 +256,7 @@ ScopeInfo<Allocator>::ScopeInfo(Code* code)
   Object** p0 = &Memory::Object_at(code->sinfo_start());
   Object** p = p0;
   p = ReadSymbol(p, &function_name_);
-  p = ReadBool(p, &supports_eval_);
+  p = ReadBool(p, &calls_eval_);
   p = ReadList<Allocator>(p, &context_slots_, &context_modes_);
   p = ReadList<Allocator>(p, &parameters_);
   p = ReadList<Allocator>(p, &stack_slots_);
@@ -267,6 +266,12 @@ ScopeInfo<Allocator>::ScopeInfo(Code* code)
 
 static inline Object** WriteInt(Object** p, int x) {
   *p++ = Smi::FromInt(x);
+  return p;
+}
+
+
+static inline Object** WriteBool(Object** p, bool b) {
+  *p++ = Smi::FromInt(b ? 1 : 0);
   return p;
 }
 
@@ -310,7 +315,7 @@ static Object** WriteList(Object** p,
 
 template<class Allocator>
 int ScopeInfo<Allocator>::Serialize(Code* code) {
-  // function name, supports eval, length & sentinel for 3 tables:
+  // function name, calls eval, length & sentinel for 3 tables:
   const int extra_slots = 1 + 1 + 2 * 3;
   int size = (extra_slots +
               context_slots_.length() * 2 +
@@ -322,7 +327,7 @@ int ScopeInfo<Allocator>::Serialize(Code* code) {
     Object** p0 = &Memory::Object_at(code->sinfo_start());
     Object** p = p0;
     p = WriteSymbol(p, function_name_);
-    p = WriteInt(p, supports_eval_);
+    p = WriteBool(p, calls_eval_);
     p = WriteList(p, &context_slots_, &context_modes_);
     p = WriteList(p, &parameters_);
     p = WriteList(p, &stack_slots_);
@@ -343,7 +348,7 @@ void ScopeInfo<Allocator>::IterateScopeInfo(Code* code, ObjectVisitor* v) {
 
 static Object** ContextEntriesAddr(Code* code) {
   ASSERT(code->sinfo_size() > 0);
-  // +2 for function name, supports eval:
+  // +2 for function name and calls eval:
   return &Memory::Object_at(code->sinfo_start()) + 2;
 }
 
@@ -367,17 +372,15 @@ static Object** StackSlotEntriesAddr(Code* code) {
 
 
 template<class Allocator>
-bool ScopeInfo<Allocator>::SupportsEval(Code* code) {
-  bool result = false;
+bool ScopeInfo<Allocator>::CallsEval(Code* code) {
   if (code->sinfo_size() > 0) {
-    ReadBool(&Memory::Object_at(code->sinfo_start()) + 1, &result);
+    // +1 for function name:
+    Object** p = &Memory::Object_at(code->sinfo_start()) + 1;
+    bool calls_eval;
+    p = ReadBool(p, &calls_eval);
+    return calls_eval;
   }
-#ifdef DEBUG
-  { ScopeInfo info(code);
-    ASSERT(result == info.supports_eval_);
-  }
-#endif
-  return result;
+  return true;
 }
 
 
@@ -429,10 +432,13 @@ int ScopeInfo<Allocator>::ContextSlotIndex(Code* code,
                                            String* name,
                                            Variable::Mode* mode) {
   ASSERT(name->IsSymbol());
+  int result = ContextSlotCache::Lookup(code, name, mode);
+  if (result != ContextSlotCache::kNotFound) return result;
   if (code->sinfo_size() > 0) {
     // Loop below depends on the NULL sentinel after the context slot names.
     ASSERT(NumberOfContextSlots(code) >= Context::MIN_CONTEXT_SLOTS ||
            *(ContextEntriesAddr(code) + 1) == NULL);
+
     // slots start after length entry
     Object** p0 = ContextEntriesAddr(code) + 1;
     Object** p = p0;
@@ -440,14 +446,18 @@ int ScopeInfo<Allocator>::ContextSlotIndex(Code* code,
     while (*p != NULL) {
       if (*p == name) {
         ASSERT(((p - p0) & 1) == 0);
-        if (mode != NULL) {
-          ReadInt(p + 1, reinterpret_cast<int*>(mode));
-        }
-        return ((p - p0) >> 1) + Context::MIN_CONTEXT_SLOTS;
+        int v;
+        ReadInt(p + 1, &v);
+        Variable::Mode mode_value = static_cast<Variable::Mode>(v);
+        if (mode != NULL) *mode = mode_value;
+        result = ((p - p0) >> 1) + Context::MIN_CONTEXT_SLOTS;
+        ContextSlotCache::Update(code, name, mode_value, result);
+        return result;
       }
       p += 2;
     }
   }
+  ContextSlotCache::Update(code, name, Variable::INTERNAL, -1);
   return -1;
 }
 
@@ -523,7 +533,78 @@ int ScopeInfo<Allocator>::NumberOfLocals() const {
 }
 
 
+int ContextSlotCache::Hash(Code* code, String* name) {
+  // Uses only lower 32 bits if pointers are larger.
+  uintptr_t addr_hash =
+      static_cast<uint32_t>(reinterpret_cast<uintptr_t>(code)) >> 2;
+  return (addr_hash ^ name->Hash()) % kLength;
+}
+
+
+int ContextSlotCache::Lookup(Code* code,
+                             String* name,
+                             Variable::Mode* mode) {
+  int index = Hash(code, name);
+  Key& key = keys_[index];
+  if ((key.code == code) && key.name->Equals(name)) {
+    Value result(values_[index]);
+    if (mode != NULL) *mode = result.mode();
+    return result.index() + kNotFound;
+  }
+  return kNotFound;
+}
+
+
+void ContextSlotCache::Update(Code* code,
+                              String* name,
+                              Variable::Mode mode,
+                              int slot_index) {
+  String* symbol;
+  ASSERT(slot_index > kNotFound);
+  if (Heap::LookupSymbolIfExists(name, &symbol)) {
+    int index = Hash(code, symbol);
+    Key& key = keys_[index];
+    key.code = code;
+    key.name = symbol;
+    // Please note value only takes a uint as index.
+    values_[index] = Value(mode, slot_index - kNotFound).raw();
 #ifdef DEBUG
+    ValidateEntry(code, name, mode, slot_index);
+#endif
+  }
+}
+
+
+void ContextSlotCache::Clear() {
+  for (int index = 0; index < kLength; index++) keys_[index].code = NULL;
+}
+
+
+ContextSlotCache::Key ContextSlotCache::keys_[ContextSlotCache::kLength];
+
+
+uint32_t ContextSlotCache::values_[ContextSlotCache::kLength];
+
+
+#ifdef DEBUG
+
+void ContextSlotCache::ValidateEntry(Code* code,
+                                     String* name,
+                                     Variable::Mode mode,
+                                     int slot_index) {
+  String* symbol;
+  if (Heap::LookupSymbolIfExists(name, &symbol)) {
+    int index = Hash(code, name);
+    Key& key = keys_[index];
+    ASSERT(key.code == code);
+    ASSERT(key.name->Equals(name));
+    Value result(values_[index]);
+    ASSERT(result.mode() == mode);
+    ASSERT(result.index() + kNotFound == slot_index);
+  }
+}
+
+
 template <class Allocator>
 static void PrintList(const char* list_name,
                       int nof_internal_slots,
@@ -551,9 +632,6 @@ void ScopeInfo<Allocator>::Print() {
     PrintF("/* no function name */");
   PrintF("{");
 
-  if (supports_eval_)
-    PrintF("\n  // supports eval\n");
-
   PrintList<Allocator>("parameters", 0, parameters_);
   PrintList<Allocator>("stack slots", 0, stack_slots_);
   PrintList<Allocator>("context slots", Context::MIN_CONTEXT_SLOTS,
@@ -567,5 +645,6 @@ void ScopeInfo<Allocator>::Print() {
 // Make sure the classes get instantiated by the template system.
 template class ScopeInfo<FreeStoreAllocationPolicy>;
 template class ScopeInfo<PreallocatedStorage>;
+template class ScopeInfo<ZoneListAllocationPolicy>;
 
 } }  // namespace v8::internal

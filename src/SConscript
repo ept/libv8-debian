@@ -36,31 +36,88 @@ Import('context')
 SOURCES = {
   'all': [
     'accessors.cc', 'allocation.cc', 'api.cc', 'assembler.cc', 'ast.cc',
-    'bootstrapper.cc', 'builtins.cc', 'checks.cc', 'code-stubs.cc',
-    'codegen.cc', 'compilation-cache.cc', 'compiler.cc', 'contexts.cc',
-    'conversions.cc', 'counters.cc', 'dateparser.cc', 'debug.cc',
-    'disassembler.cc', 'execution.cc', 'factory.cc', 'flags.cc', 'frames.cc',
-    'global-handles.cc', 'handles.cc', 'hashmap.cc', 'heap.cc', 'ic.cc',
-    'jsregexp.cc', 'log.cc', 'mark-compact.cc', 'messages.cc', 'objects.cc',
-    'parser.cc', 'property.cc', 'rewriter.cc', 'runtime.cc', 'scanner.cc',
+    'bootstrapper.cc', 'builtins.cc', 'checks.cc', 'cfg.cc',
+    'code-stubs.cc', 'codegen.cc', 'compilation-cache.cc', 'compiler.cc',
+    'contexts.cc', 'conversions.cc', 'counters.cc', 'dateparser.cc',
+    'debug.cc', 'debug-agent.cc', 'disassembler.cc', 'execution.cc',
+    'factory.cc', 'flags.cc', 'frame-element.cc', 'frames.cc',
+    'func-name-inferrer.cc', 'global-handles.cc', 'handles.cc',
+    'hashmap.cc', 'heap.cc', 'ic.cc', 'interpreter-irregexp.cc',
+    'jsregexp.cc', 'jump-target.cc', 'log.cc', 'log-utils.cc',
+    'mark-compact.cc', 'messages.cc', 'objects.cc', 'oprofile-agent.cc',
+    'parser.cc', 'property.cc', 'regexp-macro-assembler.cc',
+    'regexp-macro-assembler-irregexp.cc', 'regexp-stack.cc',
+    'register-allocator.cc', 'rewriter.cc', 'runtime.cc', 'scanner.cc',
     'scopeinfo.cc', 'scopes.cc', 'serialize.cc', 'snapshot-common.cc',
     'spaces.cc', 'string-stream.cc', 'stub-cache.cc', 'token.cc', 'top.cc',
     'unicode.cc', 'usage-analyzer.cc', 'utils.cc', 'v8-counters.cc',
-    'v8.cc', 'v8threads.cc', 'variables.cc', 'zone.cc'
+    'v8.cc', 'v8threads.cc', 'variables.cc', 'version.cc',
+    'virtual-frame.cc', 'zone.cc'
   ],
-  'arch:arm':  ['assembler-arm.cc', 'builtins-arm.cc', 'codegen-arm.cc',
-      'cpu-arm.cc', 'disasm-arm.cc', 'frames-arm.cc', 'ic-arm.cc',
-      'macro-assembler-arm.cc', 'stub-cache-arm.cc'],
-  'arch:ia32': ['assembler-ia32.cc', 'builtins-ia32.cc', 'codegen-ia32.cc',
-      'cpu-ia32.cc', 'disasm-ia32.cc', 'frames-ia32.cc', 'ic-ia32.cc',
-      'macro-assembler-ia32.cc', 'stub-cache-ia32.cc'],
-  'simulator:arm': ['simulator-arm.cc'],
-  'os:linux':  ['platform-linux.cc'],
-  'os:macos':  ['platform-macos.cc'],
-  'os:nullos': ['platform-nullos.cc'],
-  'os:win32':  ['platform-win32.cc'],
+  'arch:arm': [
+    'arm/assembler-arm.cc', 'arm/builtins-arm.cc', 'arm/cfg-arm.cc',
+    'arm/codegen-arm.cc', 'arm/cpu-arm.cc', 'arm/disasm-arm.cc',
+    'arm/debug-arm.cc', 'arm/frames-arm.cc', 'arm/ic-arm.cc',
+    'arm/jump-target-arm.cc', 'arm/macro-assembler-arm.cc',
+    'arm/regexp-macro-assembler-arm.cc',
+    'arm/register-allocator-arm.cc', 'arm/stub-cache-arm.cc',
+    'arm/virtual-frame-arm.cc'
+  ],
+  'arch:ia32': [
+    'ia32/assembler-ia32.cc', 'ia32/builtins-ia32.cc', 'ia32/cfg-ia32.cc',
+    'ia32/codegen-ia32.cc', 'ia32/cpu-ia32.cc', 'ia32/disasm-ia32.cc',
+    'ia32/debug-ia32.cc', 'ia32/frames-ia32.cc', 'ia32/ic-ia32.cc',
+    'ia32/jump-target-ia32.cc', 'ia32/macro-assembler-ia32.cc',
+    'ia32/regexp-macro-assembler-ia32.cc', 'ia32/register-allocator-ia32.cc',
+    'ia32/stub-cache-ia32.cc', 'ia32/virtual-frame-ia32.cc'
+  ],
+  'arch:x64': [
+    'x64/assembler-x64.cc', 'x64/builtins-x64.cc', 'x64/cfg-x64.cc',
+    'x64/codegen-x64.cc', 'x64/cpu-x64.cc', 'x64/disasm-x64.cc',
+    'x64/debug-x64.cc', 'x64/frames-x64.cc', 'x64/ic-x64.cc',
+    'x64/jump-target-x64.cc', 'x64/macro-assembler-x64.cc',
+    'x64/regexp-macro-assembler-x64.cc', 'x64/register-allocator-x64.cc',
+    'x64/stub-cache-x64.cc', 'x64/virtual-frame-x64.cc'
+  ],
+  'simulator:arm': ['arm/simulator-arm.cc'],
+  'os:freebsd': ['platform-freebsd.cc', 'platform-posix.cc'],
+  'os:linux':   ['platform-linux.cc', 'platform-posix.cc'],
+  'os:android': ['platform-linux.cc', 'platform-posix.cc'],
+  'os:macos':   ['platform-macos.cc', 'platform-posix.cc'],
+  'os:nullos':  ['platform-nullos.cc'],
+  'os:win32':   ['platform-win32.cc'],
   'mode:release': [],
-  'mode:debug': ['objects-debug.cc', 'prettyprinter.cc']
+  'mode:debug': [
+    'objects-debug.cc', 'prettyprinter.cc', 'regexp-macro-assembler-tracer.cc'
+  ]
+}
+
+
+D8_FILES = {
+  'all': [
+    'd8.cc', 'd8-debug.cc'
+  ],
+  'os:linux': [
+    'd8-posix.cc'
+  ],
+  'os:macos': [
+    'd8-posix.cc'
+  ],
+  'os:android': [
+    'd8-posix.cc'
+  ],
+  'os:freebsd': [
+    'd8-posix.cc'
+  ],
+  'os:win32': [
+    'd8-windows.cc'
+  ],
+  'os:nullos': [
+    'd8-windows.cc'   # Empty implementation at the moment.
+  ],
+  'console:readline': [
+    'd8-readline.cc'
+  ]
 }
 
 
@@ -77,15 +134,7 @@ debug-delay.js
 mirror-delay.js
 date-delay.js
 regexp-delay.js
-'''.split()
-
-
-JSCRE_FILES = '''
-pcre_compile.cpp
-pcre_exec.cpp
-pcre_tables.cpp
-pcre_ucp_searchfuncs.cpp
-pcre_xclass.cpp
+json-delay.js
 '''.split()
 
 
@@ -99,23 +148,22 @@ def ConfigureObjectFiles():
   env.Replace(**context.flags['v8'])
   context.ApplyEnvOverrides(env)
   env['BUILDERS']['JS2C'] = Builder(action=js2c.JS2C)
-  env['BUILDERS']['Snapshot'] = Builder(action='$SOURCE $TARGET --logfile $LOGFILE')
+  env['BUILDERS']['Snapshot'] = Builder(action='$SOURCE $TARGET --logfile "$LOGFILE"')
 
   # Build the standard platform-independent source files.
   source_files = context.GetRelevantSources(SOURCES)
+
+  d8_files = context.GetRelevantSources(D8_FILES)
+  d8_js = env.JS2C('d8-js.cc', 'd8.js', TYPE='D8')
+  d8_js_obj = context.ConfigureObject(env, d8_js, CPPPATH=['.'])
+  d8_objs = [context.ConfigureObject(env, [d8_files]), d8_js_obj]
 
   # Combine the JavaScript library files into a single C++ file and
   # compile it.
   library_files = [s for s in LIBRARY_FILES]
   library_files.append('macros.py')
-  libraries_src, libraries_empty_src = env.JS2C(['libraries.cc', 'libraries-empty.cc'], library_files)
+  libraries_src, libraries_empty_src = env.JS2C(['libraries.cc', 'libraries-empty.cc'], library_files, TYPE='CORE')
   libraries_obj = context.ConfigureObject(env, libraries_src, CPPPATH=['.'])
-
-  # Build JSCRE.
-  jscre_env = env.Copy()
-  jscre_env.Replace(**context.flags['jscre'])
-  jscre_files = [join('third_party', 'jscre', s) for s in JSCRE_FILES]
-  jscre_obj = context.ConfigureObject(jscre_env, jscre_files)
 
   # Build dtoa.
   dtoa_env = env.Copy()
@@ -124,21 +172,26 @@ def ConfigureObjectFiles():
   dtoa_obj = context.ConfigureObject(dtoa_env, dtoa_files)
 
   source_objs = context.ConfigureObject(env, source_files)
-  non_snapshot_files = [jscre_obj, dtoa_obj, source_objs]
+  non_snapshot_files = [dtoa_obj, source_objs]
 
   # Create snapshot if necessary.
   empty_snapshot_obj = context.ConfigureObject(env, 'snapshot-empty.cc')
+  mksnapshot_env = env.Copy()
+  mksnapshot_env.Replace(**context.flags['mksnapshot'])
+  mksnapshot_src = 'mksnapshot.cc'
+  mksnapshot = mksnapshot_env.Program('mksnapshot', [mksnapshot_src, libraries_obj, non_snapshot_files, empty_snapshot_obj], PDB='mksnapshot.exe.pdb')
   if context.use_snapshot:
-    mksnapshot_src = 'mksnapshot.cc'
-    mksnapshot = env.Program('mksnapshot', [mksnapshot_src, libraries_obj, non_snapshot_files, empty_snapshot_obj], PDB='mksnapshot.exe.pdb')
-    snapshot_cc = env.Snapshot('snapshot.cc', mksnapshot, LOGFILE=File('snapshot.log').abspath)
+    if context.build_snapshot:
+      snapshot_cc = env.Snapshot('snapshot.cc', mksnapshot, LOGFILE=File('snapshot.log').abspath)
+    else:
+      snapshot_cc = Command('snapshot.cc', [], [])
     snapshot_obj = context.ConfigureObject(env, snapshot_cc, CPPPATH=['.'])
     libraries_obj = context.ConfigureObject(env, libraries_empty_src, CPPPATH=['.'])
   else:
     snapshot_obj = empty_snapshot_obj
+  library_objs = [non_snapshot_files, libraries_obj, snapshot_obj]
+  return (library_objs, d8_objs, [mksnapshot])
 
-  return [non_snapshot_files, libraries_obj, snapshot_obj]
 
-
-library_objects = ConfigureObjectFiles()
-Return('library_objects')
+(library_objs, d8_objs, mksnapshot) = ConfigureObjectFiles()
+Return('library_objs d8_objs mksnapshot')

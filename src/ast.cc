@@ -29,26 +29,29 @@
 
 #include "ast.h"
 #include "scopes.h"
+#include "string-stream.h"
 
-namespace v8 { namespace internal {
+namespace v8 {
+namespace internal {
 
 
 VariableProxySentinel VariableProxySentinel::this_proxy_(true);
 VariableProxySentinel VariableProxySentinel::identifier_proxy_(false);
 ValidLeftHandSideSentinel ValidLeftHandSideSentinel::instance_;
 Property Property::this_property_(VariableProxySentinel::this_proxy(), NULL, 0);
-Call Call::sentinel_(NULL, NULL, false, 0);
+Call Call::sentinel_(NULL, NULL, 0);
+CallEval CallEval::sentinel_(NULL, NULL, 0);
 
 
 // ----------------------------------------------------------------------------
 // All the Accept member functions for each syntax tree node type.
 
 #define DECL_ACCEPT(type)                \
-  void type::Accept(Visitor* v) {        \
+  void type::Accept(AstVisitor* v) {        \
     if (v->CheckStackOverflow()) return; \
     v->Visit##type(this);                \
   }
-NODE_LIST(DECL_ACCEPT)
+AST_NODE_LIST(DECL_ACCEPT)
 #undef DECL_ACCEPT
 
 
@@ -65,7 +68,7 @@ VariableProxy::VariableProxy(Handle<String> name,
   // names must be canonicalized for fast equality checks
   ASSERT(name->IsSymbol());
   // at least one access, otherwise no need for a VariableProxy
-  var_uses_.RecordAccess(1);
+  var_uses_.RecordRead(1);
 }
 
 
@@ -133,8 +136,12 @@ ObjectLiteral::Property::Property(Literal* key, Expression* value) {
   Object* k = *key->handle();
   if (k->IsSymbol() && Heap::Proto_symbol()->Equals(String::cast(k))) {
     kind_ = PROTOTYPE;
+  } else if (value_->AsMaterializedLiteral() != NULL) {
+    kind_ = MATERIALIZED_LITERAL;
+  } else if (value_->AsLiteral() != NULL) {
+    kind_ = CONSTANT;
   } else {
-    kind_ = value_->AsLiteral() == NULL ? COMPUTED : CONSTANT;
+    kind_ = COMPUTED;
   }
 }
 
@@ -146,28 +153,49 @@ ObjectLiteral::Property::Property(bool is_getter, FunctionLiteral* value) {
 }
 
 
-void LabelCollector::AddLabel(Label* label) {
-  // Add the label to the collector, but discard duplicates.
-  int length = labels_->length();
+bool ObjectLiteral::IsValidJSON() {
+  int length = properties()->length();
   for (int i = 0; i < length; i++) {
-    if (labels_->at(i) == label) return;
+    Property* prop = properties()->at(i);
+    if (!prop->value()->IsValidJSON())
+      return false;
   }
-  labels_->Add(label);
+  return true;
+}
+
+
+bool ArrayLiteral::IsValidJSON() {
+  int length = values()->length();
+  for (int i = 0; i < length; i++) {
+    if (!values()->at(i)->IsValidJSON())
+      return false;
+  }
+  return true;
+}
+
+
+void TargetCollector::AddTarget(BreakTarget* target) {
+  // Add the label to the collector, but discard duplicates.
+  int length = targets_->length();
+  for (int i = 0; i < length; i++) {
+    if (targets_->at(i) == target) return;
+  }
+  targets_->Add(target);
 }
 
 
 // ----------------------------------------------------------------------------
-// Implementation of Visitor
+// Implementation of AstVisitor
 
 
-void Visitor::VisitStatements(ZoneList<Statement*>* statements) {
+void AstVisitor::VisitStatements(ZoneList<Statement*>* statements) {
   for (int i = 0; i < statements->length(); i++) {
     Visit(statements->at(i));
   }
 }
 
 
-void Visitor::VisitExpressions(ZoneList<Expression*>* expressions) {
+void AstVisitor::VisitExpressions(ZoneList<Expression*>* expressions) {
   for (int i = 0; i < expressions->length(); i++) {
     // The variable statement visiting code may pass NULL expressions
     // to this code. Maybe this should be handled by introducing an
@@ -175,6 +203,308 @@ void Visitor::VisitExpressions(ZoneList<Expression*>* expressions) {
     // changes
     Expression* expression = expressions->at(i);
     if (expression != NULL) Visit(expression);
+  }
+}
+
+
+// ----------------------------------------------------------------------------
+// Regular expressions
+
+#define MAKE_ACCEPT(Name)                                            \
+  void* RegExp##Name::Accept(RegExpVisitor* visitor, void* data) {   \
+    return visitor->Visit##Name(this, data);                         \
+  }
+FOR_EACH_REG_EXP_TREE_TYPE(MAKE_ACCEPT)
+#undef MAKE_ACCEPT
+
+#define MAKE_TYPE_CASE(Name)                                         \
+  RegExp##Name* RegExpTree::As##Name() {                             \
+    return NULL;                                                     \
+  }                                                                  \
+  bool RegExpTree::Is##Name() { return false; }
+FOR_EACH_REG_EXP_TREE_TYPE(MAKE_TYPE_CASE)
+#undef MAKE_TYPE_CASE
+
+#define MAKE_TYPE_CASE(Name)                                        \
+  RegExp##Name* RegExp##Name::As##Name() {                          \
+    return this;                                                    \
+  }                                                                 \
+  bool RegExp##Name::Is##Name() { return true; }
+FOR_EACH_REG_EXP_TREE_TYPE(MAKE_TYPE_CASE)
+#undef MAKE_TYPE_CASE
+
+RegExpEmpty RegExpEmpty::kInstance;
+
+
+static Interval ListCaptureRegisters(ZoneList<RegExpTree*>* children) {
+  Interval result = Interval::Empty();
+  for (int i = 0; i < children->length(); i++)
+    result = result.Union(children->at(i)->CaptureRegisters());
+  return result;
+}
+
+
+Interval RegExpAlternative::CaptureRegisters() {
+  return ListCaptureRegisters(nodes());
+}
+
+
+Interval RegExpDisjunction::CaptureRegisters() {
+  return ListCaptureRegisters(alternatives());
+}
+
+
+Interval RegExpLookahead::CaptureRegisters() {
+  return body()->CaptureRegisters();
+}
+
+
+Interval RegExpCapture::CaptureRegisters() {
+  Interval self(StartRegister(index()), EndRegister(index()));
+  return self.Union(body()->CaptureRegisters());
+}
+
+
+Interval RegExpQuantifier::CaptureRegisters() {
+  return body()->CaptureRegisters();
+}
+
+
+bool RegExpAssertion::IsAnchored() {
+  return type() == RegExpAssertion::START_OF_INPUT;
+}
+
+
+bool RegExpAlternative::IsAnchored() {
+  ZoneList<RegExpTree*>* nodes = this->nodes();
+  for (int i = 0; i < nodes->length(); i++) {
+    RegExpTree* node = nodes->at(i);
+    if (node->IsAnchored()) { return true; }
+    if (node->max_match() > 0) { return false; }
+  }
+  return false;
+}
+
+
+bool RegExpDisjunction::IsAnchored() {
+  ZoneList<RegExpTree*>* alternatives = this->alternatives();
+  for (int i = 0; i < alternatives->length(); i++) {
+    if (!alternatives->at(i)->IsAnchored())
+      return false;
+  }
+  return true;
+}
+
+
+bool RegExpLookahead::IsAnchored() {
+  return is_positive() && body()->IsAnchored();
+}
+
+
+bool RegExpCapture::IsAnchored() {
+  return body()->IsAnchored();
+}
+
+
+// Convert regular expression trees to a simple sexp representation.
+// This representation should be different from the input grammar
+// in as many cases as possible, to make it more difficult for incorrect
+// parses to look as correct ones which is likely if the input and
+// output formats are alike.
+class RegExpUnparser: public RegExpVisitor {
+ public:
+  RegExpUnparser();
+  void VisitCharacterRange(CharacterRange that);
+  SmartPointer<const char> ToString() { return stream_.ToCString(); }
+#define MAKE_CASE(Name) virtual void* Visit##Name(RegExp##Name*, void* data);
+  FOR_EACH_REG_EXP_TREE_TYPE(MAKE_CASE)
+#undef MAKE_CASE
+ private:
+  StringStream* stream() { return &stream_; }
+  HeapStringAllocator alloc_;
+  StringStream stream_;
+};
+
+
+RegExpUnparser::RegExpUnparser() : stream_(&alloc_) {
+}
+
+
+void* RegExpUnparser::VisitDisjunction(RegExpDisjunction* that, void* data) {
+  stream()->Add("(|");
+  for (int i = 0; i <  that->alternatives()->length(); i++) {
+    stream()->Add(" ");
+    that->alternatives()->at(i)->Accept(this, data);
+  }
+  stream()->Add(")");
+  return NULL;
+}
+
+
+void* RegExpUnparser::VisitAlternative(RegExpAlternative* that, void* data) {
+  stream()->Add("(:");
+  for (int i = 0; i <  that->nodes()->length(); i++) {
+    stream()->Add(" ");
+    that->nodes()->at(i)->Accept(this, data);
+  }
+  stream()->Add(")");
+  return NULL;
+}
+
+
+void RegExpUnparser::VisitCharacterRange(CharacterRange that) {
+  stream()->Add("%k", that.from());
+  if (!that.IsSingleton()) {
+    stream()->Add("-%k", that.to());
+  }
+}
+
+
+
+void* RegExpUnparser::VisitCharacterClass(RegExpCharacterClass* that,
+                                          void* data) {
+  if (that->is_negated())
+    stream()->Add("^");
+  stream()->Add("[");
+  for (int i = 0; i < that->ranges()->length(); i++) {
+    if (i > 0) stream()->Add(" ");
+    VisitCharacterRange(that->ranges()->at(i));
+  }
+  stream()->Add("]");
+  return NULL;
+}
+
+
+void* RegExpUnparser::VisitAssertion(RegExpAssertion* that, void* data) {
+  switch (that->type()) {
+    case RegExpAssertion::START_OF_INPUT:
+      stream()->Add("@^i");
+      break;
+    case RegExpAssertion::END_OF_INPUT:
+      stream()->Add("@$i");
+      break;
+    case RegExpAssertion::START_OF_LINE:
+      stream()->Add("@^l");
+      break;
+    case RegExpAssertion::END_OF_LINE:
+      stream()->Add("@$l");
+       break;
+    case RegExpAssertion::BOUNDARY:
+      stream()->Add("@b");
+      break;
+    case RegExpAssertion::NON_BOUNDARY:
+      stream()->Add("@B");
+      break;
+  }
+  return NULL;
+}
+
+
+void* RegExpUnparser::VisitAtom(RegExpAtom* that, void* data) {
+  stream()->Add("'");
+  Vector<const uc16> chardata = that->data();
+  for (int i = 0; i < chardata.length(); i++) {
+    stream()->Add("%k", chardata[i]);
+  }
+  stream()->Add("'");
+  return NULL;
+}
+
+
+void* RegExpUnparser::VisitText(RegExpText* that, void* data) {
+  if (that->elements()->length() == 1) {
+    that->elements()->at(0).data.u_atom->Accept(this, data);
+  } else {
+    stream()->Add("(!");
+    for (int i = 0; i < that->elements()->length(); i++) {
+      stream()->Add(" ");
+      that->elements()->at(i).data.u_atom->Accept(this, data);
+    }
+    stream()->Add(")");
+  }
+  return NULL;
+}
+
+
+void* RegExpUnparser::VisitQuantifier(RegExpQuantifier* that, void* data) {
+  stream()->Add("(# %i ", that->min());
+  if (that->max() == RegExpTree::kInfinity) {
+    stream()->Add("- ");
+  } else {
+    stream()->Add("%i ", that->max());
+  }
+  stream()->Add(that->is_greedy() ? "g " : "n ");
+  that->body()->Accept(this, data);
+  stream()->Add(")");
+  return NULL;
+}
+
+
+void* RegExpUnparser::VisitCapture(RegExpCapture* that, void* data) {
+  stream()->Add("(^ ");
+  that->body()->Accept(this, data);
+  stream()->Add(")");
+  return NULL;
+}
+
+
+void* RegExpUnparser::VisitLookahead(RegExpLookahead* that, void* data) {
+  stream()->Add("(-> ");
+  stream()->Add(that->is_positive() ? "+ " : "- ");
+  that->body()->Accept(this, data);
+  stream()->Add(")");
+  return NULL;
+}
+
+
+void* RegExpUnparser::VisitBackReference(RegExpBackReference* that,
+                                         void* data) {
+  stream()->Add("(<- %i)", that->index());
+  return NULL;
+}
+
+
+void* RegExpUnparser::VisitEmpty(RegExpEmpty* that, void* data) {
+  stream()->Put('%');
+  return NULL;
+}
+
+
+SmartPointer<const char> RegExpTree::ToString() {
+  RegExpUnparser unparser;
+  Accept(&unparser, NULL);
+  return unparser.ToString();
+}
+
+
+RegExpDisjunction::RegExpDisjunction(ZoneList<RegExpTree*>* alternatives)
+    : alternatives_(alternatives) {
+  ASSERT(alternatives->length() > 1);
+  RegExpTree* first_alternative = alternatives->at(0);
+  min_match_ = first_alternative->min_match();
+  max_match_ = first_alternative->max_match();
+  for (int i = 1; i < alternatives->length(); i++) {
+    RegExpTree* alternative = alternatives->at(i);
+    min_match_ = Min(min_match_, alternative->min_match());
+    max_match_ = Max(max_match_, alternative->max_match());
+  }
+}
+
+
+RegExpAlternative::RegExpAlternative(ZoneList<RegExpTree*>* nodes)
+    : nodes_(nodes) {
+  ASSERT(nodes->length() > 1);
+  min_match_ = 0;
+  max_match_ = 0;
+  for (int i = 0; i < nodes->length(); i++) {
+    RegExpTree* node = nodes->at(i);
+    min_match_ += node->min_match();
+    int node_max_match = node->max_match();
+    if (kInfinity - max_match_ < node_max_match) {
+      max_match_ = kInfinity;
+    } else {
+      max_match_ += node->max_match();
+    }
   }
 }
 

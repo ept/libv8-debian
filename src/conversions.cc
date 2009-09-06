@@ -33,7 +33,8 @@
 #include "factory.h"
 #include "scanner.h"
 
-namespace v8 { namespace internal {
+namespace v8 {
+namespace internal {
 
 int HexValue(uc32 c) {
   if ('0' <= c && c <= '9')
@@ -75,15 +76,17 @@ static inline const char* GetCString(const char* str, int index) {
 
 
 static inline const char* GetCString(String* str, int index) {
-  char* result = NewArray<char>(str->length() + 1);
-  for (int i = index; i < str->length(); i++) {
-    if (str->Get(i) <= 127) {
-      result[i - index] = static_cast<char>(str->Get(i));
+  int length = str->length();
+  char* result = NewArray<char>(length + 1);
+  for (int i = index; i < length; i++) {
+    uc16 c = str->Get(i);
+    if (c <= 127) {
+      result[i - index] = static_cast<char>(c);
     } else {
       result[i - index] = 127;  // Force number parsing to fail.
     }
   }
-  result[str->length() - index] = '\0';
+  result[length - index] = '\0';
   return result;
 }
 
@@ -117,11 +120,14 @@ static inline bool SubStringEquals(const char* str,
 
 static inline bool SubStringEquals(String* str, int index, const char* other) {
   HandleScope scope;
-  int len = strlen(other);
-  int end = index + len < str->length() ? index + len : str->length();
+  int str_length = str->length();
+  int other_length = strlen(other);
+  int end = index + other_length < str_length ?
+            index + other_length :
+            str_length;
   Handle<String> slice =
       Factory::NewStringSlice(Handle<String>(str), index, end);
-  return slice->IsEqualTo(Vector<const char>(other, len));
+  return slice->IsEqualTo(Vector<const char>(other, other_length));
 }
 
 
@@ -321,7 +327,7 @@ static double InternalStringToDouble(S* str,
         index++;
       if (!SubStringEquals(str, index, "Infinity"))
         return JUNK_STRING_VALUE;
-      result = is_negative ? -INFINITY : INFINITY;
+      result = is_negative ? -V8_INFINITY : V8_INFINITY;
       index += 8;
     }
   }

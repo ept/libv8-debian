@@ -28,7 +28,8 @@
 #ifndef V8_SMART_POINTER_H_
 #define V8_SMART_POINTER_H_
 
-namespace v8 { namespace internal {
+namespace v8 {
+namespace internal {
 
 
 // A 'scoped array pointer' that calls DeleteArray on its pointer when the
@@ -86,11 +87,16 @@ class SmartPointer {
   // the copy constructor it removes the pointer in the original to avoid
   // double freeing.
   inline SmartPointer& operator=(const SmartPointer<T>& rhs) {
-    ASSERT(p == NULL);
+    ASSERT(is_empty());
     T* tmp = rhs.p;  // swap to handle self-assignment
     const_cast<SmartPointer<T>&>(rhs).p = NULL;
     p = tmp;
     return *this;
+  }
+
+
+  inline bool is_empty() {
+    return p == NULL;
   }
 
 

@@ -26,27 +26,25 @@
 // OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 #include <v8.h>
-#include <cstdlib>
-#include <cstring>
-#include <cstdio>
 #include "cctest.h"
+#include "debug.h"
 
 
 CcTest* CcTest::last_ = NULL;
 
 
-CcTest::CcTest(TestFunction* callback, const char* file,
-               const char* name, bool enabled)
-    : callback_(callback), name_(name), prev_(last_) {
+CcTest::CcTest(TestFunction* callback, const char* file, const char* name,
+               const char* dependency, bool enabled)
+    : callback_(callback), name_(name), dependency_(dependency), prev_(last_) {
   // Find the base name of this test (const_cast required on Windows).
   char *basename = strrchr(const_cast<char *>(file), '/');
   if (!basename) {
     basename = strrchr(const_cast<char *>(file), '\\');
   }
   if (!basename) {
-    basename = v8::internal::OS::StrDup(file);
+    basename = v8::internal::StrDup(file);
   } else {
-    basename = v8::internal::OS::StrDup(basename + 1);
+    basename = v8::internal::StrDup(basename + 1);
   }
   // Drop the extension, if there is one.
   char *extension = strrchr(basename, '.');
@@ -62,7 +60,12 @@ CcTest::CcTest(TestFunction* callback, const char* file,
 static void PrintTestList(CcTest* current) {
   if (current == NULL) return;
   PrintTestList(current->prev());
-  printf("%s/%s\n", current->file(), current->name());
+  if (current->dependency() != NULL) {
+    printf("%s/%s<%s\n",
+           current->file(), current->name(), current->dependency());
+  } else {
+    printf("%s/%s<\n", current->file(), current->name());
+  }
 }
 
 
@@ -77,7 +80,7 @@ int main(int argc, char* argv[]) {
       print_run_count = false;
 
     } else {
-      char* arg_copy = v8::internal::OS::StrDup(arg);
+      char* arg_copy = v8::internal::StrDup(arg);
       char* testname = strchr(arg_copy, '/');
       if (testname) {
         // Split the string in two by nulling the slash and then run
@@ -110,10 +113,11 @@ int main(int argc, char* argv[]) {
           test = test->prev();
         }
       }
-      free(arg_copy);
+      v8::internal::DeleteArray<char>(arg_copy);
     }
   }
   if (print_run_count && tests_run != 1)
     printf("Ran %i tests.\n", tests_run);
+  v8::V8::Dispose();
   return 0;
 }

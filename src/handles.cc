@@ -1,4 +1,4 @@
-// Copyright 2006-2008 the V8 project authors. All rights reserved.
+// Copyright 2009 the V8 project authors. All rights reserved.
 // Redistribution and use in source and binary forms, with or without
 // modification, are permitted provided that the following conditions are
 // met:
@@ -37,17 +37,71 @@
 #include "natives.h"
 #include "runtime.h"
 
-namespace v8 { namespace internal {
+namespace v8 {
+namespace internal {
 
-#define CALL_GC(RESULT)                                             \
-  {                                                                 \
-    Failure* __failure__ = Failure::cast(RESULT);                   \
-    if (!Heap::CollectGarbage(__failure__->requested(),             \
-                              __failure__->allocation_space())) {   \
-       /* TODO(1181417): Fix this. */                               \
-       V8::FatalProcessOutOfMemory("Handles");                      \
-    }                                                               \
+
+v8::ImplementationUtilities::HandleScopeData HandleScope::current_ =
+    { -1, NULL, NULL };
+
+
+int HandleScope::NumberOfHandles() {
+  int n = HandleScopeImplementer::instance()->Blocks()->length();
+  if (n == 0) return 0;
+  return ((n - 1) * kHandleBlockSize) +
+      (current_.next - HandleScopeImplementer::instance()->Blocks()->last());
+}
+
+
+Object** HandleScope::Extend() {
+  Object** result = current_.next;
+
+  ASSERT(result == current_.limit);
+  // Make sure there's at least one scope on the stack and that the
+  // top of the scope stack isn't a barrier.
+  if (current_.extensions < 0) {
+    Utils::ReportApiFailure("v8::HandleScope::CreateHandle()",
+                            "Cannot create a handle without a HandleScope");
+    return NULL;
   }
+  HandleScopeImplementer* impl = HandleScopeImplementer::instance();
+  // If there's more room in the last block, we use that. This is used
+  // for fast creation of scopes after scope barriers.
+  if (!impl->Blocks()->is_empty()) {
+    Object** limit = &impl->Blocks()->last()[kHandleBlockSize];
+    if (current_.limit != limit) {
+      current_.limit = limit;
+    }
+  }
+
+  // If we still haven't found a slot for the handle, we extend the
+  // current handle scope by allocating a new handle block.
+  if (result == current_.limit) {
+    // If there's a spare block, use it for growing the current scope.
+    result = impl->GetSpareOrNewBlock();
+    // Add the extension to the global list of blocks, but count the
+    // extension as part of the current scope.
+    impl->Blocks()->Add(result);
+    current_.extensions++;
+    current_.limit = &result[kHandleBlockSize];
+  }
+
+  return result;
+}
+
+
+void HandleScope::DeleteExtensions() {
+  ASSERT(current_.extensions != 0);
+  HandleScopeImplementer::instance()->DeleteExtensions(current_.extensions);
+}
+
+
+void HandleScope::ZapRange(Object** start, Object** end) {
+  if (start == NULL) return;
+  for (Object** p = start; p < end; p++) {
+    *reinterpret_cast<Address*>(p) = v8::internal::kHandleZapValue;
+  }
+}
 
 
 Handle<FixedArray> AddKeysFromJSArray(Handle<FixedArray> content,
@@ -62,11 +116,11 @@ Handle<FixedArray> UnionOfKeys(Handle<FixedArray> first,
 }
 
 
-Handle<JSGlobalObject> ReinitializeJSGlobalObject(
+Handle<JSGlobalProxy> ReinitializeJSGlobalProxy(
     Handle<JSFunction> constructor,
-    Handle<JSGlobalObject> global) {
-  CALL_HEAP_FUNCTION(Heap::ReinitializeJSGlobalObject(*constructor, *global),
-                     JSGlobalObject);
+    Handle<JSGlobalProxy> global) {
+  CALL_HEAP_FUNCTION(Heap::ReinitializeJSGlobalProxy(*constructor, *global),
+                     JSGlobalProxy);
 }
 
 
@@ -109,8 +163,12 @@ void SetExpectedNofPropertiesFromEstimate(Handle<JSFunction> func,
 }
 
 
-void NormalizeProperties(Handle<JSObject> object) {
-  CALL_HEAP_FUNCTION_VOID(object->NormalizeProperties());
+void NormalizeProperties(Handle<JSObject> object,
+                         PropertyNormalizationMode mode,
+                         int expected_additional_properties) {
+  CALL_HEAP_FUNCTION_VOID(object->NormalizeProperties(
+      mode,
+      expected_additional_properties));
 }
 
 
@@ -127,8 +185,7 @@ void TransformToFastProperties(Handle<JSObject> object,
 
 
 void FlattenString(Handle<String> string) {
-  if (string->IsFlat()) return;
-  CALL_HEAP_FUNCTION_VOID(string->Flatten());
+  CALL_HEAP_FUNCTION_VOID(string->TryFlattenIfNotFlat());
   ASSERT(string->IsFlat());
 }
 
@@ -159,13 +216,30 @@ Handle<Object> SetProperty(Handle<Object> object,
 }
 
 
-Handle<Object> IgnoreAttributesAndSetLocalProperty(Handle<JSObject> object,
-                           Handle<String> key,
-                           Handle<Object> value,
-                           PropertyAttributes attributes) {
+Handle<Object> ForceSetProperty(Handle<JSObject> object,
+                                Handle<Object> key,
+                                Handle<Object> value,
+                                PropertyAttributes attributes) {
+  CALL_HEAP_FUNCTION(
+      Runtime::ForceSetObjectProperty(object, key, value, attributes), Object);
+}
+
+
+Handle<Object> ForceDeleteProperty(Handle<JSObject> object,
+                                   Handle<Object> key) {
+  CALL_HEAP_FUNCTION(Runtime::ForceDeleteObjectProperty(object, key), Object);
+}
+
+
+Handle<Object> IgnoreAttributesAndSetLocalProperty(
+    Handle<JSObject> object,
+    Handle<String> key,
+    Handle<Object> value,
+    PropertyAttributes attributes) {
   CALL_HEAP_FUNCTION(object->
       IgnoreAttributesAndSetLocalProperty(*key, *value, attributes), Object);
 }
+
 
 Handle<Object> SetPropertyWithInterceptor(Handle<JSObject> object,
                                           Handle<String> key,
@@ -208,15 +282,52 @@ Handle<Object> GetPrototype(Handle<Object> obj) {
 }
 
 
+Handle<Object> GetHiddenProperties(Handle<JSObject> obj,
+                                   bool create_if_needed) {
+  Handle<String> key = Factory::hidden_symbol();
+
+  if (obj->HasFastProperties()) {
+    // If the object has fast properties, check whether the first slot
+    // in the descriptor array matches the hidden symbol. Since the
+    // hidden symbols hash code is zero (and no other string has hash
+    // code zero) it will always occupy the first entry if present.
+    DescriptorArray* descriptors = obj->map()->instance_descriptors();
+    if ((descriptors->number_of_descriptors() > 0) &&
+        (descriptors->GetKey(0) == *key) &&
+        descriptors->IsProperty(0)) {
+      ASSERT(descriptors->GetType(0) == FIELD);
+      return Handle<Object>(obj->FastPropertyAt(descriptors->GetFieldIndex(0)));
+    }
+  }
+
+  // Only attempt to find the hidden properties in the local object and not
+  // in the prototype chain.  Note that HasLocalProperty() can cause a GC in
+  // the general case in the presence of interceptors.
+  if (!obj->HasLocalProperty(*key)) {
+    // Hidden properties object not found. Allocate a new hidden properties
+    // object if requested. Otherwise return the undefined value.
+    if (create_if_needed) {
+      Handle<Object> hidden_obj = Factory::NewJSObject(Top::object_function());
+      return SetProperty(obj, key, hidden_obj, DONT_ENUM);
+    } else {
+      return Factory::undefined_value();
+    }
+  }
+  return GetProperty(obj, key);
+}
+
+
 Handle<Object> DeleteElement(Handle<JSObject> obj,
                              uint32_t index) {
-  CALL_HEAP_FUNCTION(obj->DeleteElement(index), Object);
+  CALL_HEAP_FUNCTION(obj->DeleteElement(index, JSObject::NORMAL_DELETION),
+                     Object);
 }
 
 
 Handle<Object> DeleteProperty(Handle<JSObject> obj,
                               Handle<String> prop) {
-  CALL_HEAP_FUNCTION(obj->DeleteProperty(*prop), Object);
+  CALL_HEAP_FUNCTION(obj->DeleteProperty(*prop, JSObject::NORMAL_DELETION),
+                     Object);
 }
 
 
@@ -233,12 +344,20 @@ Handle<String> SubString(Handle<String> str, int start, int end) {
 Handle<Object> SetElement(Handle<JSObject> object,
                           uint32_t index,
                           Handle<Object> value) {
+  if (object->HasPixelElements()) {
+    if (!value->IsSmi() && !value->IsHeapNumber() && !value->IsUndefined()) {
+      bool has_exception;
+      Handle<Object> number = Execution::ToNumber(value, &has_exception);
+      if (has_exception) return Handle<Object>();
+      value = number;
+    }
+  }
   CALL_HEAP_FUNCTION(object->SetElement(index, *value), Object);
 }
 
 
-Handle<JSObject> Copy(Handle<JSObject> obj, PretenureFlag pretenure) {
-  CALL_HEAP_FUNCTION(obj->Copy(pretenure), JSObject);
+Handle<JSObject> Copy(Handle<JSObject> obj) {
+  CALL_HEAP_FUNCTION(Heap::CopyJSObject(*obj), JSObject);
 }
 
 
@@ -248,7 +367,12 @@ Handle<JSObject> Copy(Handle<JSObject> obj, PretenureFlag pretenure) {
 // collector will call the weak callback on the global handle
 // associated with the wrapper and get rid of both the wrapper and the
 // handle.
-static void ClearWrapperCache(Persistent<v8::Object> handle, void*) {
+static void ClearWrapperCache(Persistent<v8::Value> handle, void*) {
+#ifdef ENABLE_HEAP_PROTECTION
+  // Weak reference callbacks are called as if from outside V8.  We
+  // need to reeenter to unprotect the heap.
+  VMState state(OTHER);
+#endif
   Handle<Object> cache = Utils::OpenHandle(*handle);
   JSValue* wrapper = JSValue::cast(*cache);
   Proxy* proxy = Script::cast(wrapper->value())->wrapper();
@@ -260,10 +384,10 @@ static void ClearWrapperCache(Persistent<v8::Object> handle, void*) {
 
 
 Handle<JSValue> GetScriptWrapper(Handle<Script> script) {
-  Handle<Object> cache(reinterpret_cast<Object**>(script->wrapper()->proxy()));
-  if (!cache.is_null()) {
+  if (script->wrapper()->proxy() != NULL) {
     // Return the script wrapper directly from the cache.
-    return Handle<JSValue>(JSValue::cast(*cache));
+    return Handle<JSValue>(
+        reinterpret_cast<JSValue**>(script->wrapper()->proxy()));
   }
 
   // Construct a new script wrapper.
@@ -283,8 +407,76 @@ Handle<JSValue> GetScriptWrapper(Handle<Script> script) {
 }
 
 
-#undef CALL_HEAP_FUNCTION
-#undef CALL_GC
+// Init line_ends array with code positions of line ends inside script
+// source.
+void InitScriptLineEnds(Handle<Script> script) {
+  if (!script->line_ends()->IsUndefined()) return;
+
+  if (!script->source()->IsString()) {
+    ASSERT(script->source()->IsUndefined());
+    script->set_line_ends(*(Factory::NewJSArray(0)));
+    ASSERT(script->line_ends()->IsJSArray());
+    return;
+  }
+
+  Handle<String> src(String::cast(script->source()));
+  const int src_len = src->length();
+  Handle<String> new_line = Factory::NewStringFromAscii(CStrVector("\n"));
+
+  // Pass 1: Identify line count.
+  int line_count = 0;
+  int position = 0;
+  while (position != -1 && position < src_len) {
+    position = Runtime::StringMatch(src, new_line, position);
+    if (position != -1) {
+      position++;
+    }
+    // Even if the last line misses a line end, it is counted.
+    line_count++;
+  }
+
+  // Pass 2: Fill in line ends positions
+  Handle<FixedArray> array = Factory::NewFixedArray(line_count);
+  int array_index = 0;
+  position = 0;
+  while (position != -1 && position < src_len) {
+    position = Runtime::StringMatch(src, new_line, position);
+    // If the script does not end with a line ending add the final end
+    // position as just past the last line ending.
+    array->set(array_index++,
+               Smi::FromInt(position != -1 ? position++ : src_len));
+  }
+  ASSERT(array_index == line_count);
+
+  Handle<JSArray> object = Factory::NewJSArrayWithElements(array);
+  script->set_line_ends(*object);
+  ASSERT(script->line_ends()->IsJSArray());
+}
+
+
+// Convert code position into line number.
+int GetScriptLineNumber(Handle<Script> script, int code_pos) {
+  InitScriptLineEnds(script);
+  AssertNoAllocation no_allocation;
+  JSArray* line_ends_array = JSArray::cast(script->line_ends());
+  const int line_ends_len = (Smi::cast(line_ends_array->length()))->value();
+
+  int line = -1;
+  if (line_ends_len > 0 &&
+      code_pos <= (Smi::cast(line_ends_array->GetElement(0)))->value()) {
+    line = 0;
+  } else {
+    for (int i = 1; i < line_ends_len; ++i) {
+      if ((Smi::cast(line_ends_array->GetElement(i - 1)))->value() < code_pos &&
+          code_pos <= (Smi::cast(line_ends_array->GetElement(i)))->value()) {
+        line = i;
+        break;
+      }
+    }
+  }
+
+  return line != -1 ? line + script->line_offset()->value() : line;
+}
 
 
 // Compute the property keys from the interceptor.
@@ -303,7 +495,7 @@ v8::Handle<v8::Array> GetKeysForNamedInterceptor(Handle<JSObject> receiver,
     LOG(ApiObjectAccess("interceptor-named-enum", *object));
     {
       // Leaving JavaScript.
-      VMState state(OTHER);
+      VMState state(EXTERNAL);
       result = enum_fun(info);
     }
   }
@@ -327,7 +519,7 @@ v8::Handle<v8::Array> GetKeysForIndexedInterceptor(Handle<JSObject> receiver,
     LOG(ApiObjectAccess("interceptor-indexed-enum", *object));
     {
       // Leaving JavaScript.
-      VMState state(OTHER);
+      VMState state(EXTERNAL);
       result = enum_fun(info);
     }
   }
@@ -359,17 +551,6 @@ Handle<FixedArray> GetKeysInFixedArrayFor(Handle<JSObject> object) {
         break;
       }
 
-      // Compute the property keys.
-      content = UnionOfKeys(content, GetEnumPropertyKeys(current));
-
-      // Add the property keys from the interceptor.
-      if (current->HasNamedInterceptor()) {
-        v8::Handle<v8::Array> result =
-            GetKeysForNamedInterceptor(object, current);
-        if (!result.IsEmpty())
-          content = AddKeysFromJSArray(content, v8::Utils::OpenHandle(*result));
-      }
-
       // Compute the element keys.
       Handle<FixedArray> element_keys =
           Factory::NewFixedArray(current->NumberOfEnumElements());
@@ -380,6 +561,17 @@ Handle<FixedArray> GetKeysInFixedArrayFor(Handle<JSObject> object) {
       if (current->HasIndexedInterceptor()) {
         v8::Handle<v8::Array> result =
             GetKeysForIndexedInterceptor(object, current);
+        if (!result.IsEmpty())
+          content = AddKeysFromJSArray(content, v8::Utils::OpenHandle(*result));
+      }
+
+      // Compute the property keys.
+      content = UnionOfKeys(content, GetEnumPropertyKeys(current));
+
+      // Add the property keys from the interceptor.
+      if (current->HasNamedInterceptor()) {
+        v8::Handle<v8::Array> result =
+            GetKeysForNamedInterceptor(object, current);
         if (!result.IsEmpty())
           content = AddKeysFromJSArray(content, v8::Utils::OpenHandle(*result));
       }
@@ -408,16 +600,17 @@ Handle<FixedArray> GetEnumPropertyKeys(Handle<JSObject> object) {
     int num_enum = object->NumberOfEnumProperties();
     Handle<FixedArray> storage = Factory::NewFixedArray(num_enum);
     Handle<FixedArray> sort_array = Factory::NewFixedArray(num_enum);
-    for (DescriptorReader r(object->map()->instance_descriptors());
-         !r.eos();
-         r.advance()) {
-      if (!r.IsTransition() && !r.IsDontEnum()) {
-        (*storage)->set(index, r.GetKey());
-        (*sort_array)->set(index, Smi::FromInt(r.GetDetails().index()));
+    Handle<DescriptorArray> descs =
+        Handle<DescriptorArray>(object->map()->instance_descriptors());
+    for (int i = 0; i < descs->number_of_descriptors(); i++) {
+      if (descs->IsProperty(i) && !descs->IsDontEnum(i)) {
+        (*storage)->set(index, descs->GetKey(i));
+        PropertyDetails details(descs->GetDetails(i));
+        (*sort_array)->set(index, Smi::FromInt(details.index()));
         index++;
       }
     }
-    (*storage)->SortPairs(*sort_array);
+    (*storage)->SortPairs(*sort_array, sort_array->length());
     Handle<FixedArray> bridge_storage =
         Factory::NewFixedArray(DescriptorArray::kEnumCacheBridgeLength);
     DescriptorArray* desc = object->map()->instance_descriptors();
@@ -435,10 +628,11 @@ Handle<FixedArray> GetEnumPropertyKeys(Handle<JSObject> object) {
 
 
 bool CompileLazyShared(Handle<SharedFunctionInfo> shared,
-                       ClearExceptionFlag flag) {
+                       ClearExceptionFlag flag,
+                       int loop_nesting) {
   // Compile the source information to a code object.
   ASSERT(!shared->is_compiled());
-  bool result = Compiler::CompileLazy(shared);
+  bool result = Compiler::CompileLazy(shared, loop_nesting);
   ASSERT(result != Top::has_pending_exception());
   if (!result && flag == CLEAR_EXCEPTION) Top::clear_pending_exception();
   return result;
@@ -448,19 +642,29 @@ bool CompileLazyShared(Handle<SharedFunctionInfo> shared,
 bool CompileLazy(Handle<JSFunction> function, ClearExceptionFlag flag) {
   // Compile the source information to a code object.
   Handle<SharedFunctionInfo> shared(function->shared());
-  return CompileLazyShared(shared, flag);
+  return CompileLazyShared(shared, flag, 0);
 }
 
 
+bool CompileLazyInLoop(Handle<JSFunction> function, ClearExceptionFlag flag) {
+  // Compile the source information to a code object.
+  Handle<SharedFunctionInfo> shared(function->shared());
+  return CompileLazyShared(shared, flag, 1);
+}
+
 OptimizedObjectForAddingMultipleProperties::
 OptimizedObjectForAddingMultipleProperties(Handle<JSObject> object,
+                                           int expected_additional_properties,
                                            bool condition) {
   object_ = object;
   if (condition && object_->HasFastProperties()) {
     // Normalize the properties of object to avoid n^2 behavior
-    // when extending the object multiple properties.
+    // when extending the object multiple properties. Indicate the number of
+    // properties to be added.
     unused_property_fields_ = object->map()->unused_property_fields();
-    NormalizeProperties(object_);
+    NormalizeProperties(object_,
+                        KEEP_INOBJECT_PROPERTIES,
+                        expected_additional_properties);
     has_been_transformed_ = true;
 
   } else {
@@ -478,14 +682,13 @@ OptimizedObjectForAddingMultipleProperties::
 }
 
 
-void LoadLazy(Handle<JSFunction> fun, bool* pending_exception) {
+void LoadLazy(Handle<JSObject> obj, bool* pending_exception) {
   HandleScope scope;
-  Handle<FixedArray> info(FixedArray::cast(fun->shared()->lazy_load_data()));
+  Handle<FixedArray> info(FixedArray::cast(obj->map()->constructor()));
   int index = Smi::cast(info->get(0))->value();
   ASSERT(index >= 0);
   Handle<Context> compile_context(Context::cast(info->get(1)));
   Handle<Context> function_context(Context::cast(info->get(2)));
-  Handle<Context> security_context(Context::cast(info->get(3)));
   Handle<Object> receiver(compile_context->global()->builtins());
 
   Vector<const char> name = Natives::GetScriptName(index);
@@ -513,6 +716,7 @@ void LoadLazy(Handle<JSFunction> fun, bool* pending_exception) {
   // We shouldn't get here if compiling the script failed.
   ASSERT(!boilerplate.is_null());
 
+#ifdef ENABLE_DEBUGGER_SUPPORT
   // When the debugger running in its own context touches lazy loaded
   // functions loading can be triggered. In that case ensure that the
   // execution of the boilerplate is in the correct context.
@@ -520,34 +724,44 @@ void LoadLazy(Handle<JSFunction> fun, bool* pending_exception) {
   if (!Debug::debug_context().is_null() &&
       Top::context() == *Debug::debug_context()) {
     Top::set_context(*compile_context);
-    Top::set_security_context(*security_context);
   }
+#endif
 
   // Reset the lazy load data before running the script to make sure
   // not to get recursive lazy loading.
-  fun->shared()->set_lazy_load_data(Heap::undefined_value());
+  obj->map()->set_needs_loading(false);
+  obj->map()->set_constructor(info->get(3));
 
   // Run the script.
   Handle<JSFunction> script_fun(
       Factory::NewFunctionFromBoilerplate(boilerplate, function_context));
   Execution::Call(script_fun, receiver, 0, NULL, pending_exception);
 
-  // If lazy loading failed, restore the unloaded state of fun.
-  if (*pending_exception) fun->shared()->set_lazy_load_data(*info);
+  // If lazy loading failed, restore the unloaded state of obj.
+  if (*pending_exception) {
+    obj->map()->set_needs_loading(true);
+    obj->map()->set_constructor(*info);
+  }
 }
 
 
-void SetupLazy(Handle<JSFunction> fun,
+void SetupLazy(Handle<JSObject> obj,
                int index,
                Handle<Context> compile_context,
-               Handle<Context> function_context,
-               Handle<Context> security_context) {
+               Handle<Context> function_context) {
   Handle<FixedArray> arr = Factory::NewFixedArray(4);
   arr->set(0, Smi::FromInt(index));
   arr->set(1, *compile_context);  // Compile in this context
   arr->set(2, *function_context);  // Set function context to this
-  arr->set(3, *security_context);  // Receiver for call
-  fun->shared()->set_lazy_load_data(*arr);
+  arr->set(3, obj->map()->constructor());  // Remember the constructor
+  Handle<Map> old_map(obj->map());
+  Handle<Map> new_map = Factory::CopyMapDropTransitions(old_map);
+  obj->set_map(*new_map);
+  new_map->set_needs_loading(true);
+  // Store the lazy loading info in the constructor field.  We'll
+  // reestablish the constructor from the fixed array after loading.
+  new_map->set_constructor(*arr);
+  ASSERT(!obj->IsLoaded());
 }
 
 } }  // namespace v8::internal

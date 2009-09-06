@@ -30,7 +30,8 @@
 #include "factory.h"
 #include "string-stream.h"
 
-namespace v8 { namespace internal {
+namespace v8 {
+namespace internal {
 
 static const int kMentionedObjectCacheMaxSize = 256;
 static List<HeapObject*, PreallocatedStorage>* debug_object_cache = NULL;
@@ -43,12 +44,6 @@ char* HeapStringAllocator::allocate(unsigned bytes) {
 }
 
 
-NoAllocationStringAllocator::NoAllocationStringAllocator(unsigned bytes) {
-  size_ = bytes;
-  space_ = NewArray<char>(bytes);
-}
-
-
 NoAllocationStringAllocator::NoAllocationStringAllocator(char* memory,
                                                          unsigned size) {
   size_ = size;
@@ -57,19 +52,26 @@ NoAllocationStringAllocator::NoAllocationStringAllocator(char* memory,
 
 
 bool StringStream::Put(char c) {
-  if (space() == 0) return false;
-  if (length_ >= capacity_ - 1) {
+  if (full()) return false;
+  ASSERT(length_ < capacity_);
+  // Since the trailing '\0' is not accounted for in length_ fullness is
+  // indicated by a difference of 1 between length_ and capacity_. Thus when
+  // reaching a difference of 2 we need to grow the buffer.
+  if (length_ == capacity_ - 2) {
     unsigned new_capacity = capacity_;
     char* new_buffer = allocator_->grow(&new_capacity);
     if (new_capacity > capacity_) {
       capacity_ = new_capacity;
       buffer_ = new_buffer;
     } else {
-      // Indicate truncation with dots.
-      memset(cursor(), '.', space());
-      length_ = capacity_;
-      buffer_[length_ - 2] = '\n';
-      buffer_[length_ - 1] = '\0';
+      // Reached the end of the available buffer.
+      ASSERT(capacity_ >= 5);
+      length_ = capacity_ - 1;  // Indicate fullness of the stream.
+      buffer_[length_ - 4] = '.';
+      buffer_[length_ - 3] = '.';
+      buffer_[length_ - 2] = '.';
+      buffer_[length_ - 1] = '\n';
+      buffer_[length_] = '\0';
       return false;
     }
   }
@@ -93,13 +95,12 @@ static bool IsControlChar(char c) {
 }
 
 
-void StringStream::Add(const char* format, Vector<FmtElm> elms) {
+void StringStream::Add(Vector<const char> format, Vector<FmtElm> elms) {
   // If we already ran out of space then return immediately.
-  if (space() == 0)
-    return;
+  if (full()) return;
   int offset = 0;
   int elm = 0;
-  while (format[offset] != '\0') {
+  while (offset < format.length()) {
     if (format[offset] != '%' || elm == elms.length()) {
       Put(format[offset]);
       offset++;
@@ -111,12 +112,11 @@ void StringStream::Add(const char* format, Vector<FmtElm> elms) {
     // Skip over the whole control character sequence until the
     // format element type
     temp[format_length++] = format[offset++];
-    // '\0' is not a control character so we don't have to
-    // explicitly check for the end of the string
-    while (IsControlChar(format[offset]))
+    while (offset < format.length() && IsControlChar(format[offset]))
       temp[format_length++] = format[offset++];
+    if (offset >= format.length())
+      return;
     char type = format[offset];
-    if (type == '\0') return;
     temp[format_length++] = type;
     temp[format_length] = '\0';
     offset++;
@@ -128,15 +128,48 @@ void StringStream::Add(const char* format, Vector<FmtElm> elms) {
       Add(value);
       break;
     }
+    case 'w': {
+      ASSERT_EQ(FmtElm::LC_STR, current.type_);
+      Vector<const uc16> value = *current.data_.u_lc_str_;
+      for (int i = 0; i < value.length(); i++)
+        Put(static_cast<char>(value[i]));
+      break;
+    }
     case 'o': {
       ASSERT_EQ(FmtElm::OBJ, current.type_);
       Object* obj = current.data_.u_obj_;
       PrintObject(obj);
       break;
     }
-    case 'i': case 'd': case 'u': case 'x': case 'c': case 'p': {
+    case 'k': {
+      ASSERT_EQ(FmtElm::INT, current.type_);
+      int value = current.data_.u_int_;
+      if (0x20 <= value && value <= 0x7F) {
+        Put(value);
+      } else if (value <= 0xff) {
+        Add("\\x%02x", value);
+      } else {
+        Add("\\u%04x", value);
+      }
+      break;
+    }
+    case 'i': case 'd': case 'u': case 'x': case 'c': case 'X': {
       int value = current.data_.u_int_;
       EmbeddedVector<char, 24> formatted;
+      int length = OS::SNPrintF(formatted, temp.start(), value);
+      Add(Vector<const char>(formatted.start(), length));
+      break;
+    }
+    case 'f': case 'g': case 'G': case 'e': case 'E': {
+      double value = current.data_.u_double_;
+      EmbeddedVector<char, 28> formatted;
+      OS::SNPrintF(formatted, temp.start(), value);
+      Add(formatted.start());
+      break;
+    }
+    case 'p': {
+      void* value = current.data_.u_pointer_;
+      EmbeddedVector<char, 20> formatted;
       OS::SNPrintF(formatted, temp.start(), value);
       Add(formatted.start());
       break;
@@ -147,10 +180,8 @@ void StringStream::Add(const char* format, Vector<FmtElm> elms) {
     }
   }
 
-  // Verify that the buffer is 0-terminated and doesn't contain any
-  // other 0-characters.
+  // Verify that the buffer is 0-terminated
   ASSERT(buffer_[length_] == '\0');
-  ASSERT(strlen(buffer_) == length_);
 }
 
 
@@ -181,6 +212,11 @@ void StringStream::PrintObject(Object* o) {
 
 
 void StringStream::Add(const char* format) {
+  Add(CStrVector(format));
+}
+
+
+void StringStream::Add(Vector<const char> format) {
   Add(format, Vector<FmtElm>::empty());
 }
 
@@ -188,14 +224,14 @@ void StringStream::Add(const char* format) {
 void StringStream::Add(const char* format, FmtElm arg0) {
   const char argc = 1;
   FmtElm argv[argc] = { arg0 };
-  Add(format, Vector<FmtElm>(argv, argc));
+  Add(CStrVector(format), Vector<FmtElm>(argv, argc));
 }
 
 
 void StringStream::Add(const char* format, FmtElm arg0, FmtElm arg1) {
   const char argc = 2;
   FmtElm argv[argc] = { arg0, arg1 };
-  Add(format, Vector<FmtElm>(argv, argc));
+  Add(CStrVector(format), Vector<FmtElm>(argv, argc));
 }
 
 
@@ -203,15 +239,23 @@ void StringStream::Add(const char* format, FmtElm arg0, FmtElm arg1,
                        FmtElm arg2) {
   const char argc = 3;
   FmtElm argv[argc] = { arg0, arg1, arg2 };
-  Add(format, Vector<FmtElm>(argv, argc));
+  Add(CStrVector(format), Vector<FmtElm>(argv, argc));
 }
 
 
-SmartPointer<char> StringStream::ToCString() {
+void StringStream::Add(const char* format, FmtElm arg0, FmtElm arg1,
+                       FmtElm arg2, FmtElm arg3) {
+  const char argc = 4;
+  FmtElm argv[argc] = { arg0, arg1, arg2, arg3 };
+  Add(CStrVector(format), Vector<FmtElm>(argv, argc));
+}
+
+
+SmartPointer<const char> StringStream::ToCString() {
   char* str = NewArray<char>(length_ + 1);
   memcpy(str, buffer_, length_);
   str[length_] = '\0';
-  return SmartPointer<char>(str);
+  return SmartPointer<const char>(str);
 }
 
 
@@ -300,10 +344,11 @@ void StringStream::PrintUsingMap(JSObject* js_object) {
     Add("<Invalid map>\n");
     return;
   }
-  for (DescriptorReader r(map->instance_descriptors()); !r.eos(); r.advance()) {
-    switch (r.type()) {
+  DescriptorArray* descs = map->instance_descriptors();
+  for (int i = 0; i < descs->number_of_descriptors(); i++) {
+    switch (descs->GetType(i)) {
       case FIELD: {
-        Object* key = r.GetKey();
+        Object* key = descs->GetKey(i);
         if (key->IsString() || key->IsNumber()) {
           int len = 3;
           if (key->IsString()) {
@@ -317,7 +362,7 @@ void StringStream::PrintUsingMap(JSObject* js_object) {
             key->ShortPrint();
           }
           Add(": ");
-          Object* value = js_object->FastPropertyAt(r.GetFieldIndex());
+          Object* value = js_object->FastPropertyAt(descs->GetFieldIndex(i));
           Add("%o\n", value);
         }
       }
@@ -420,19 +465,10 @@ void StringStream::PrintSecurityTokenIfChanged(Object* f) {
       Add("(Function context is outside heap)\n");
       return;
     }
-    GlobalObject* global = context->global();
-    if (!Heap::Contains(global)) {
-      Add("(Function context global is outside heap)\n");
-      return;
-    }
-    if (global->IsJSGlobalObject()) {
-      Object* token = JSGlobalObject::cast(global)->security_token();
-      if (token != current_security_token) {
-        Add("Security context: %o\n", token);
-        current_security_token = token;
-      }
-    } else {
-      Add("(No security context)\n");
+    Object* token = context->global_context()->security_token();
+    if (token != current_security_token) {
+      Add("Security context: %o\n", token);
+      current_security_token = token;
     }
   } else {
     Add("(Function context is corrupt)\n");
@@ -537,12 +573,10 @@ char* HeapStringAllocator::grow(unsigned* bytes) {
 }
 
 
+// Only grow once to the maximum allowable size.
 char* NoAllocationStringAllocator::grow(unsigned* bytes) {
-  unsigned new_bytes = *bytes * 2;
-  if (new_bytes > size_) {
-    new_bytes = size_;
-  }
-  *bytes = new_bytes;
+  ASSERT(size_ >= *bytes);
+  *bytes = size_;
   return space_;
 }
 

@@ -29,7 +29,8 @@
 #ifndef V8_BOOTSTRAPPER_H_
 #define V8_BOOTSTRAPPER_H_
 
-namespace v8 { namespace internal {
+namespace v8 {
+namespace internal {
 
 // The Boostrapper is the public interface for creating a JavaScript global
 // context.
@@ -46,7 +47,10 @@ class Bootstrapper : public AllStatic {
       v8::Handle<v8::ObjectTemplate> global_template,
       v8::ExtensionConfiguration* extensions);
 
-  // Traverses the pointers for memory manangment.
+  // Detach the environment from its outer global object.
+  static void DetachGlobal(Handle<Context> env);
+
+  // Traverses the pointers for memory management.
   static void Iterate(ObjectVisitor* v);
 
   // Accessors for the native scripts cache. Used in lazy loading.
@@ -58,12 +62,18 @@ class Bootstrapper : public AllStatic {
   // Append code that needs fixup at the end of boot strapping.
   static void AddFixup(Code* code, MacroAssembler* masm);
 
-  // Tells wheter boostrapping is active.
+  // Tells whether bootstrapping is active.
   static bool IsActive();
 
   // Encoding/decoding support for fixup flags.
   class FixupFlagsIsPCRelative: public BitField<bool, 0, 1> {};
-  class FixupFlagsArgumentsCount: public BitField<uint32_t, 1, 32-1> {};
+  class FixupFlagsUseCodeObject: public BitField<bool, 1, 1> {};
+  class FixupFlagsArgumentsCount: public BitField<uint32_t, 2, 32-2> {};
+
+  // Support for thread preemption.
+  static int ArchiveSpacePerThread();
+  static char* ArchiveState(char* to);
+  static char* RestoreState(char* from);
 };
 
 }}  // namespace v8::internal
