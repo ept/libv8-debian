@@ -27,10 +27,12 @@
 
 #include "v8.h"
 
+#include "bootstrapper.h"
 #include "debug.h"
 #include "scopeinfo.h"
 
-namespace v8 { namespace internal {
+namespace v8 {
+namespace internal {
 
 JSBuiltinsObject* Context::builtins() {
   GlobalObject* object = global();
@@ -60,17 +62,18 @@ Context* Context::global_context() {
 }
 
 
+JSObject* Context::global_proxy() {
+  return global_context()->global_proxy_object();
+}
+
+void Context::set_global_proxy(JSObject* object) {
+  global_context()->set_global_proxy_object(object);
+}
+
+
 Handle<Object> Context::Lookup(Handle<String> name, ContextLookupFlags flags,
                                int* index_, PropertyAttributes* attributes) {
   Handle<Context> context(this);
-
-  // The context must be in frame slot 0 (if not debugging).
-  if (kDebug && !Debug::InDebugger()) {
-    StackFrameLocator locator;
-    ASSERT(context->fcontext() ==
-           Context::cast(
-               locator.FindJavaScriptFrame(0)->context())->fcontext());
-  }
 
   bool follow_context_chain = (flags & FOLLOW_CONTEXT_CHAIN) != 0;
   *index_ = -1;
@@ -90,19 +93,23 @@ Handle<Object> Context::Lookup(Handle<String> name, ContextLookupFlags flags,
     }
 
     // check extension/with object
-    Handle<JSObject> context_ext(context->extension());
-    if (*context_ext != NULL) {
-      if ((flags & FOLLOW_PROTOTYPE_CHAIN) == 0) {
-        *attributes = context_ext->GetLocalPropertyAttribute(*name);
+    if (context->has_extension()) {
+      Handle<JSObject> extension = Handle<JSObject>(context->extension());
+      // Context extension objects needs to behave as if they have no
+      // prototype.  So even if we want to follow prototype chains, we
+      // need to only do a local lookup for context extension objects.
+      if ((flags & FOLLOW_PROTOTYPE_CHAIN) == 0 ||
+          extension->IsJSContextExtensionObject()) {
+        *attributes = extension->GetLocalPropertyAttribute(*name);
       } else {
-        *attributes = context_ext->GetPropertyAttribute(*name);
+        *attributes = extension->GetPropertyAttribute(*name);
       }
       if (*attributes != ABSENT) {
         // property found
         if (FLAG_trace_contexts) {
-          PrintF("=> found property in context object %p\n", *context_ext);
+          PrintF("=> found property in context object %p\n", *extension);
         }
-        return context_ext;
+        return extension;
       }
     }
 
@@ -128,10 +135,12 @@ Handle<Object> Context::Lookup(Handle<String> name, ContextLookupFlags flags,
         // declared variables that were introduced through declaration nodes)
         // must not appear here.
         switch (mode) {
-          case Variable::INTERNAL :  // fall through
-          case Variable::VAR      : *attributes = NONE; break;
-          case Variable::CONST    : *attributes = READ_ONLY; break;
-          case Variable::DYNAMIC  : UNREACHABLE(); break;
+          case Variable::INTERNAL:  // fall through
+          case Variable::VAR: *attributes = NONE; break;
+          case Variable::CONST: *attributes = READ_ONLY; break;
+          case Variable::DYNAMIC: UNREACHABLE(); break;
+          case Variable::DYNAMIC_GLOBAL: UNREACHABLE(); break;
+          case Variable::DYNAMIC_LOCAL: UNREACHABLE(); break;
           case Variable::TEMPORARY: UNREACHABLE(); break;
         }
         return context;
@@ -140,7 +149,7 @@ Handle<Object> Context::Lookup(Handle<String> name, ContextLookupFlags flags,
       // check parameter locals in context
       int param_index = ScopeInfo<>::ParameterIndex(*code, *name);
       if (param_index >= 0) {
-        // slot found
+        // slot found.
         int index =
             ScopeInfo<>::ContextSlotIndex(*code,
                                           Heap::arguments_shadow_symbol(),
@@ -175,11 +184,10 @@ Handle<Object> Context::Lookup(Handle<String> name, ContextLookupFlags flags,
     // proceed with enclosing context
     if (context->IsGlobalContext()) {
       follow_context_chain = false;
-    } else if (context->previous() != NULL) {
-      context = Handle<Context>(context->previous());
-    } else {
-      ASSERT(context->is_function_context());
+    } else if (context->is_function_context()) {
       context = Handle<Context>(Context::cast(context->closure()->context()));
+    } else {
+      context = Handle<Context>(context->previous());
     }
   } while (follow_context_chain);
 
@@ -187,8 +195,59 @@ Handle<Object> Context::Lookup(Handle<String> name, ContextLookupFlags flags,
   if (FLAG_trace_contexts) {
     PrintF("=> no property/slot found\n");
   }
-  return Handle<Object>(reinterpret_cast<JSObject*>(NULL));
+  return Handle<Object>::null();
 }
 
+
+bool Context::GlobalIfNotShadowedByEval(Handle<String> name) {
+  Context* context = this;
+
+  // Check that there is no local with the given name in contexts
+  // before the global context and check that there are no context
+  // extension objects (conservative check for with statements).
+  while (!context->IsGlobalContext()) {
+    // Check if the context is a potentially a with context.
+    if (context->has_extension()) return false;
+
+    // Not a with context so it must be a function context.
+    ASSERT(context->is_function_context());
+
+    // Check non-parameter locals.
+    Handle<Code> code(context->closure()->code());
+    Variable::Mode mode;
+    int index = ScopeInfo<>::ContextSlotIndex(*code, *name, &mode);
+    ASSERT(index < 0 || index >= MIN_CONTEXT_SLOTS);
+    if (index >= 0) return false;
+
+    // Check parameter locals.
+    int param_index = ScopeInfo<>::ParameterIndex(*code, *name);
+    if (param_index >= 0) return false;
+
+    // Check context only holding the function name variable.
+    index = ScopeInfo<>::FunctionContextSlotIndex(*code, *name);
+    if (index >= 0) return false;
+    context = Context::cast(context->closure()->context());
+  }
+
+  // No local or potential with statement found so the variable is
+  // global unless it is shadowed by an eval-introduced variable.
+  return true;
+}
+
+
+#ifdef DEBUG
+bool Context::IsBootstrappingOrContext(Object* object) {
+  // During bootstrapping we allow all objects to pass as
+  // contexts. This is necessary to fix circular dependencies.
+  return Bootstrapper::IsActive() || object->IsContext();
+}
+
+
+bool Context::IsBootstrappingOrGlobalObject(Object* object) {
+  // During bootstrapping we allow all objects to pass as global
+  // objects. This is necessary to fix circular dependencies.
+  return Bootstrapper::IsActive() || object->IsGlobalObject();
+}
+#endif
 
 } }  // namespace v8::internal

@@ -28,19 +28,29 @@
 #ifndef V8_FACTORY_H_
 #define V8_FACTORY_H_
 
+#include "globals.h"
 #include "heap.h"
+#include "zone-inl.h"
 
-namespace v8 { namespace internal {
+namespace v8 {
+namespace internal {
 
 
 // Interface for handle based allocation.
 
 class Factory : public AllStatic {
  public:
-  // Allocate a new fixed array.
+  // Allocate a new fixed array with undefined entries.
   static Handle<FixedArray> NewFixedArray(
       int size,
       PretenureFlag pretenure = NOT_TENURED);
+
+  // Allocate a new fixed array with non-existing entries (the hole).
+  static Handle<FixedArray> NewFixedArrayWithHoles(int size);
+
+  static Handle<NumberDictionary> NewNumberDictionary(int at_least_space_for);
+
+  static Handle<StringDictionary> NewStringDictionary(int at_least_space_for);
 
   static Handle<DescriptorArray> NewDescriptorArray(int number_of_descriptors);
 
@@ -82,7 +92,8 @@ class Factory : public AllStatic {
       Vector<const char> str,
       PretenureFlag pretenure = NOT_TENURED);
 
-  static Handle<String> NewStringFromTwoByte(Vector<const uc16> str);
+  static Handle<String> NewStringFromTwoByte(Vector<const uc16> str,
+      PretenureFlag pretenure = NOT_TENURED);
 
   // Allocates and partially initializes a TwoByte String. The characters of
   // the string are uninitialized. Currently used in regexp code only, where
@@ -97,7 +108,9 @@ class Factory : public AllStatic {
 
   // Create a new sliced string object which represents a substring of a
   // backing string.
-  static Handle<String> NewStringSlice(Handle<String> str, int begin, int end);
+  static Handle<String> NewStringSlice(Handle<String> str,
+                                       int begin,
+                                       int end);
 
   // Creates a new external String object.  There are two String encodings
   // in the system: ASCII and two byte.  Unlike other String types, it does
@@ -117,9 +130,10 @@ class Factory : public AllStatic {
 
   // Create a 'with' context.
   static Handle<Context> NewWithContext(Handle<Context> previous,
-                                        Handle<JSObject> extension);
+                                        Handle<JSObject> extension,
+                                        bool is_catch_context);
 
-  // Return the Symbol maching the passed in string.
+  // Return the Symbol matching the passed in string.
   static Handle<String> SymbolFromString(Handle<String> value);
 
   // Allocate a new struct.  The struct is pretenured (allocated directly in
@@ -138,13 +152,22 @@ class Factory : public AllStatic {
   // the old generation).
   static Handle<Proxy> NewProxy(const AccessorDescriptor* proxy);
 
-  static Handle<ByteArray> NewByteArray(int length);
+  static Handle<ByteArray> NewByteArray(int length,
+                                        PretenureFlag pretenure = NOT_TENURED);
+
+  static Handle<PixelArray> NewPixelArray(int length,
+      uint8_t* external_pointer,
+      PretenureFlag pretenure = NOT_TENURED);
 
   static Handle<Map> NewMap(InstanceType type, int instance_size);
 
   static Handle<JSObject> NewFunctionPrototype(Handle<JSFunction> function);
 
-  static Handle<Map> CopyMap(Handle<Map> map);
+  static Handle<Map> CopyMapDropDescriptors(Handle<Map> map);
+
+  // Copy the map adding more inobject properties if possible without
+  // overflowing the instance size.
+  static Handle<Map> CopyMap(Handle<Map> map, int extra_inobject_props);
 
   static Handle<Map> CopyMapDropTransitions(Handle<Map> map);
 
@@ -155,6 +178,7 @@ class Factory : public AllStatic {
                                   PretenureFlag pretenure = NOT_TENURED);
 
   static Handle<Object> NewNumberFromInt(int value);
+  static Handle<Object> NewNumberFromUint(uint32_t value);
 
   // These objects are used by the api to create env-independent data
   // structures in the heap.
@@ -167,17 +191,12 @@ class Factory : public AllStatic {
   static Handle<JSObject> NewJSObject(Handle<JSFunction> constructor,
                                       PretenureFlag pretenure = NOT_TENURED);
 
+  // Global objects are pretenured.
+  static Handle<GlobalObject> NewGlobalObject(Handle<JSFunction> constructor);
+
   // JS objects are pretenured when allocated by the bootstrapper and
   // runtime.
   static Handle<JSObject> NewJSObjectFromMap(Handle<Map> map);
-
-  // Allocate a JS object representing an object literal.  The object is
-  // pretenured (allocated directly in the old generation).
-  static Handle<JSObject> NewObjectLiteral(int expected_number_of_properties);
-
-  // Allocate a JS array representing an array literal.  The array is
-  // pretenured (allocated directly in the old generation).
-  static Handle<JSArray> NewArrayLiteral(int length);
 
   // JS arrays are pretenured when allocated by the parser.
   static Handle<JSArray> NewJSArray(int init_length,
@@ -196,8 +215,10 @@ class Factory : public AllStatic {
       Handle<JSFunction> boilerplate,
       Handle<Context> context);
 
-  static Handle<Code> NewCode(const CodeDesc& desc, ScopeInfo<>* sinfo,
-                              Code::Flags flags);
+  static Handle<Code> NewCode(const CodeDesc& desc,
+                              ZoneScopeInfo* sinfo,
+                              Code::Flags flags,
+                              Handle<Object> self_reference);
 
   static Handle<Code> CopyCode(Handle<Code> code);
 
@@ -265,41 +286,76 @@ class Factory : public AllStatic {
       Handle<Object> value,
       PropertyAttributes attributes);
 
-  static Handle<JSFunction> CreateApiFunction(Handle<FunctionTemplateInfo> data,
-                                              bool is_global = false);
+  enum ApiInstanceType {
+    JavaScriptObject,
+    InnerGlobalObject,
+    OuterGlobalObject
+  };
+
+  static Handle<JSFunction> CreateApiFunction(
+      Handle<FunctionTemplateInfo> data,
+      ApiInstanceType type = JavaScriptObject);
 
   static Handle<JSFunction> InstallMembers(Handle<JSFunction> function);
 
   // Installs interceptors on the instance.  'desc' is a function template,
   // and instance is an object instance created by the function of this
-  // function tempalte.
+  // function template.
   static void ConfigureInstance(Handle<FunctionTemplateInfo> desc,
                                 Handle<JSObject> instance,
                                 bool* pending_exception);
 
-#define ROOT_ACCESSOR(type, name) \
-  static Handle<type> name() { return Handle<type>(&Heap::name##_); }
+#define ROOT_ACCESSOR(type, name, camel_name)                                  \
+  static inline Handle<type> name() {                                          \
+    return Handle<type>(bit_cast<type**, Object**>(                            \
+        &Heap::roots_[Heap::k##camel_name##RootIndex]));                       \
+  }
   ROOT_LIST(ROOT_ACCESSOR)
 #undef ROOT_ACCESSOR_ACCESSOR
 
 #define SYMBOL_ACCESSOR(name, str) \
-  static Handle<String> name() { return Handle<String>(&Heap::name##_); }
+  static inline Handle<String> name() {                                        \
+    return Handle<String>(bit_cast<String**, Object**>(                        \
+        &Heap::roots_[Heap::k##name##RootIndex]));                             \
+  }
   SYMBOL_LIST(SYMBOL_ACCESSOR)
 #undef SYMBOL_ACCESSOR
 
+  static Handle<String> hidden_symbol() {
+    return Handle<String>(&Heap::hidden_symbol_);
+  }
+
   static Handle<SharedFunctionInfo> NewSharedFunctionInfo(Handle<String> name);
 
-  static Handle<Dictionary> DictionaryAtNumberPut(Handle<Dictionary>,
-                                                  uint32_t key,
-                                                  Handle<Object> value);
+  static Handle<NumberDictionary> DictionaryAtNumberPut(
+      Handle<NumberDictionary>,
+      uint32_t key,
+      Handle<Object> value);
 
+#ifdef ENABLE_DEBUGGER_SUPPORT
   static Handle<DebugInfo> NewDebugInfo(Handle<SharedFunctionInfo> shared);
-
+#endif
 
   // Return a map using the map cache in the global context.
   // The key the an ordered set of property names.
   static Handle<Map> ObjectLiteralMapFromCache(Handle<Context> context,
                                                Handle<FixedArray> keys);
+
+  // Creates a new FixedArray that holds the data associated with the
+  // atom regexp and stores it in the regexp.
+  static void SetRegExpAtomData(Handle<JSRegExp> regexp,
+                                JSRegExp::Type type,
+                                Handle<String> source,
+                                JSRegExp::Flags flags,
+                                Handle<Object> match_pattern);
+
+  // Creates a new FixedArray that holds the data associated with the
+  // irregexp regexp and stores it in the regexp.
+  static void SetRegExpIrregexpData(Handle<JSRegExp> regexp,
+                                    JSRegExp::Type type,
+                                    Handle<String> source,
+                                    JSRegExp::Flags flags,
+                                    int capture_count);
 
  private:
   static Handle<JSFunction> NewFunctionHelper(Handle<String> name,

@@ -35,43 +35,83 @@
 // Include the declaration of the architecture defined class CodeGenerator.
 // The contract  to the shared code is that the the CodeGenerator is a subclass
 // of Visitor and that the following methods are available publicly:
-// CodeGenerator::MakeCode
-// CodeGenerator::SetFunctionInfo
-// CodeGenerator::AddDeferred
-// CodeGenerator::masm
+//   MakeCode
+//   SetFunctionInfo
+//   masm
+//   frame
+//   has_valid_frame
+//   SetFrame
+//   DeleteFrame
+//   allocator
+//   AddDeferred
+//   in_spilled_code
+//   set_in_spilled_code
 //
 // These methods are either used privately by the shared code or implemented as
 // shared code:
-// CodeGenerator::CodeGenerator
-// CodeGenerator::~CodeGenerator
-// CodeGenerator::ProcessDeferred
-// CodeGenerator::GenCode
-// CodeGenerator::BuildBoilerplate
-// CodeGenerator::ComputeCallInitialize
-// CodeGenerator::ProcessDeclarations
-// CodeGenerator::DeclareGlobals
-// CodeGenerator::CheckForInlineRuntimeCall
-// CodeGenerator::GenerateFastCaseSwitchStatement
-// CodeGenerator::GenerateFastCaseSwitchCases
-// CodeGenerator::TryGenerateFastCaseSwitchStatement
-// CodeGenerator::GenerateFastCaseSwitchJumpTable
-// CodeGenerator::FastCaseSwitchMinCaseCount
-// CodeGenerator::FastCaseSwitchMaxOverheadFactor
+//   CodeGenerator
+//   ~CodeGenerator
+//   ProcessDeferred
+//   GenCode
+//   BuildBoilerplate
+//   ComputeCallInitialize
+//   ComputeCallInitializeInLoop
+//   ProcessDeclarations
+//   DeclareGlobals
+//   FindInlineRuntimeLUT
+//   CheckForInlineRuntimeCall
+//   PatchInlineRuntimeEntry
+//   CodeForFunctionPosition
+//   CodeForReturnPosition
+//   CodeForStatementPosition
+//   CodeForSourcePosition
 
-#if defined(ARM)
-#include "codegen-arm.h"
+
+// Mode to overwrite BinaryExpression values.
+enum OverwriteMode { NO_OVERWRITE, OVERWRITE_LEFT, OVERWRITE_RIGHT };
+
+// Types of uncatchable exceptions.
+enum UncatchableExceptionType { OUT_OF_MEMORY, TERMINATION };
+
+
+#if V8_TARGET_ARCH_IA32
+#include "ia32/codegen-ia32.h"
+#elif V8_TARGET_ARCH_X64
+#include "x64/codegen-x64.h"
+#elif V8_TARGET_ARCH_ARM
+#include "arm/codegen-arm.h"
 #else
-#include "codegen-ia32.h"
+#error Unsupported target architecture.
 #endif
 
-namespace v8 { namespace internal {
+#include "register-allocator.h"
+
+namespace v8 {
+namespace internal {
 
 
-// Use lazy compilation; defaults to true.
-// NOTE: Do not remove non-lazy compilation until we can properly
-//       install extensions with lazy compilation enabled. At the
-//       moment, this doesn't work for the extensions in Google3,
-//       and we can only run the tests with --nolazy.
+// Code generation can be nested.  Code generation scopes form a stack
+// of active code generators.
+class CodeGeneratorScope BASE_EMBEDDED {
+ public:
+  explicit CodeGeneratorScope(CodeGenerator* cgen) {
+    previous_ = top_;
+    top_ = cgen;
+  }
+
+  ~CodeGeneratorScope() {
+    top_ = previous_;
+  }
+
+  static CodeGenerator* Current() {
+    ASSERT(top_ != NULL);
+    return top_;
+  }
+
+ private:
+  static CodeGenerator* top_;
+  CodeGenerator* previous_;
+};
 
 
 // Deferred code objects are small pieces of code that are compiled
@@ -79,40 +119,56 @@ namespace v8 { namespace internal {
 // paths thereby avoiding expensive jumps around uncommon code parts.
 class DeferredCode: public ZoneObject {
  public:
-  explicit DeferredCode(CodeGenerator* generator);
+  DeferredCode();
   virtual ~DeferredCode() { }
 
   virtual void Generate() = 0;
 
-  MacroAssembler* masm() const { return masm_; }
-  CodeGenerator* generator() const { return generator_; }
-
-  Label* enter() { return &enter_; }
-  Label* exit() { return &exit_; }
+  MacroAssembler* masm() { return masm_; }
 
   int statement_position() const { return statement_position_; }
   int position() const { return position_; }
+
+  Label* entry_label() { return &entry_label_; }
+  Label* exit_label() { return &exit_label_; }
 
 #ifdef DEBUG
   void set_comment(const char* comment) { comment_ = comment; }
   const char* comment() const { return comment_; }
 #else
-  inline void set_comment(const char* comment) { }
+  void set_comment(const char* comment) { }
   const char* comment() const { return ""; }
 #endif
 
+  inline void Jump();
+  inline void Branch(Condition cc);
+  void BindExit() { masm_->bind(&exit_label_); }
+
+  void SaveRegisters();
+  void RestoreRegisters();
+
  protected:
-  // The masm_ field is manipulated when compiling stubs with the
-  // BEGIN_STUB and END_STUB macros. For that reason, it cannot be
-  // constant.
   MacroAssembler* masm_;
 
  private:
-  CodeGenerator* const generator_;
-  Label enter_;
-  Label exit_;
+  // Constants indicating special actions.  They should not be multiples
+  // of kPointerSize so they will not collide with valid offsets from
+  // the frame pointer.
+  static const int kIgnore = -1;
+  static const int kPush = 1;
+
+  // This flag is ored with a valid offset from the frame pointer, so
+  // it should fit in the low zero bits of a valid offset.
+  static const int kSyncedFlag = 2;
+
   int statement_position_;
   int position_;
+
+  Label entry_label_;
+  Label exit_label_;
+
+  int registers_[RegisterAllocator::kNumRegisters];
+
 #ifdef DEBUG
   const char* comment_;
 #endif
@@ -171,16 +227,60 @@ class StackCheckStub : public CodeStub {
 };
 
 
-class UnarySubStub : public CodeStub {
+class InstanceofStub: public CodeStub {
  public:
-  UnarySubStub() { }
+  InstanceofStub() { }
+
+  void Generate(MacroAssembler* masm);
 
  private:
-  Major MajorKey() { return UnarySub; }
+  Major MajorKey() { return Instanceof; }
   int MinorKey() { return 0; }
+};
+
+
+class UnarySubStub : public CodeStub {
+ public:
+  explicit UnarySubStub(bool overwrite)
+      : overwrite_(overwrite) { }
+
+ private:
+  bool overwrite_;
+  Major MajorKey() { return UnarySub; }
+  int MinorKey() { return overwrite_ ? 1 : 0; }
   void Generate(MacroAssembler* masm);
 
   const char* GetName() { return "UnarySubStub"; }
+};
+
+
+class CompareStub: public CodeStub {
+ public:
+  CompareStub(Condition cc, bool strict) : cc_(cc), strict_(strict) { }
+
+  void Generate(MacroAssembler* masm);
+
+ private:
+  Condition cc_;
+  bool strict_;
+
+  Major MajorKey() { return Compare; }
+
+  int MinorKey();
+
+  // Branch to the label if the given object isn't a symbol.
+  void BranchIfNonSymbol(MacroAssembler* masm,
+                         Label* label,
+                         Register object,
+                         Register scratch);
+
+#ifdef DEBUG
+  void Print() {
+    PrintF("CompareStub (cc %d), (strict %s)\n",
+           static_cast<int>(cc_),
+           strict_ ? "true" : "false");
+  }
+#endif
 };
 
 
@@ -194,11 +294,14 @@ class CEntryStub : public CodeStub {
   void GenerateBody(MacroAssembler* masm, bool is_debug_break);
   void GenerateCore(MacroAssembler* masm,
                     Label* throw_normal_exception,
+                    Label* throw_termination_exception,
                     Label* throw_out_of_memory_exception,
                     StackFrame::Type frame_type,
-                    bool do_gc);
+                    bool do_gc,
+                    bool always_allocate_scope);
   void GenerateThrowTOS(MacroAssembler* masm);
-  void GenerateThrowOutOfMemory(MacroAssembler* masm);
+  void GenerateThrowUncatchable(MacroAssembler* masm,
+                                UncatchableExceptionType type);
 
  private:
   Major MajorKey() { return CEntry; }

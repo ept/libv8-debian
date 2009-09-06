@@ -29,7 +29,8 @@
 
 #include "v8.h"
 
-namespace v8 { namespace internal {
+namespace v8 {
+namespace internal {
 
 
 void* Malloced::New(size_t size) {
@@ -80,6 +81,16 @@ void AllStatic::operator delete(void* p) {
 
 char* StrDup(const char* str) {
   int length = strlen(str);
+  char* result = NewArray<char>(length + 1);
+  memcpy(result, str, length * kCharSize);
+  result[length] = '\0';
+  return result;
+}
+
+
+char* StrNDup(const char* str, size_t n) {
+  size_t length = strlen(str);
+  if (n < length) length = n;
   char* result = NewArray<char>(length + 1);
   memcpy(result, str, length * kCharSize);
   result[length] = '\0';

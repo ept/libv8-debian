@@ -29,8 +29,10 @@
 #define V8_PARSER_H_
 
 #include "scanner.h"
+#include "allocation.h"
 
-namespace v8 { namespace internal {
+namespace v8 {
+namespace internal {
 
 
 class ParserMessage : public Malloced {
@@ -141,14 +143,20 @@ FunctionLiteral* MakeAST(bool compile_in_global_context,
                          ScriptDataImpl* pre_data);
 
 
-ScriptDataImpl* PreParse(unibrow::CharacterStream* stream,
+ScriptDataImpl* PreParse(Handle<String> source,
+                         unibrow::CharacterStream* stream,
                          v8::Extension* extension);
+
+
+bool ParseRegExp(FlatStringReader* input,
+                 bool multiline,
+                 RegExpCompileData* result);
 
 
 // Support for doing lazy compilation. The script is the script containing full
 // source of the script where the function is declared. The start_position and
 // end_position specifies the part of the script source which has the source
-// for the function decleration in the form:
+// for the function declaration in the form:
 //
 //    (<formal parameters>) { <function body> }
 //
@@ -159,6 +167,35 @@ FunctionLiteral* MakeLazyAST(Handle<Script> script,
                              int start_position,
                              int end_position,
                              bool is_expression);
+
+
+// Support for handling complex values (array and object literals) that
+// can be fully handled at compile time.
+class CompileTimeValue: public AllStatic {
+ public:
+  enum Type {
+    OBJECT_LITERAL,
+    ARRAY_LITERAL
+  };
+
+  static bool IsCompileTimeValue(Expression* expression);
+
+  // Get the value as a compile time value.
+  static Handle<FixedArray> GetValue(Expression* expression);
+
+  // Get the type of a compile time value returned by GetValue().
+  static Type GetType(Handle<FixedArray> value);
+
+  // Get the elements array of a compile time value returned by GetValue().
+  static Handle<FixedArray> GetElements(Handle<FixedArray> value);
+
+ private:
+  static const int kTypeSlot = 0;
+  static const int kElementsSlot = 1;
+
+  DISALLOW_IMPLICIT_CONSTRUCTORS(CompileTimeValue);
+};
+
 
 } }  // namespace v8::internal
 

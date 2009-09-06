@@ -25,26 +25,108 @@
 // (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
 // OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
+// jsminify this file, js2c: jsmin
+
 // Touch the RegExp and Date functions to make sure that date-delay.js and
 // regexp-delay.js has been loaded. This is required as the mirrors use
-// functions within these files through the builtins object. See the
-// function DateToISO8601_ as an example.
+// functions within these files through the builtins object.
 RegExp;
 Date;
 
 
-function MakeMirror(value) {
-  if (IS_UNDEFINED(value)) return new UndefinedMirror();
-  if (IS_NULL(value)) return new NullMirror();
-  if (IS_BOOLEAN(value)) return new BooleanMirror(value);
-  if (IS_NUMBER(value)) return new NumberMirror(value);
-  if (IS_STRING(value)) return new StringMirror(value);
-  if (IS_ARRAY(value)) return new ArrayMirror(value);
-  if (IS_DATE(value)) return new DateMirror(value);
-  if (IS_FUNCTION(value)) return new FunctionMirror(value);
-  if (IS_REGEXP(value)) return new RegExpMirror(value);
-  if (IS_ERROR(value)) return new ErrorMirror(value);
-  return new ObjectMirror(value);
+// Handle id counters.
+var next_handle_ = 0;
+var next_transient_handle_ = -1;
+
+// Mirror cache.
+var mirror_cache_ = [];
+
+
+/**
+ * Clear the mirror handle cache.
+ */
+function ClearMirrorCache() {
+  next_handle_ = 0;
+  mirror_cache_ = [];
+}
+
+
+/**
+ * Returns the mirror for a specified value or object.
+ *
+ * @param {value or Object} value the value or object to retreive the mirror for
+ * @param {boolean} transient indicate whether this object is transient and
+ *    should not be added to the mirror cache. The default is not transient.
+ * @returns {Mirror} the mirror reflects the passed value or object
+ */
+function MakeMirror(value, opt_transient) {
+  var mirror;
+
+  // Look for non transient mirrors in the mirror cache.
+  if (!opt_transient) {
+    for (id in mirror_cache_) {
+      mirror = mirror_cache_[id];
+      if (mirror.value() === value) {
+        return mirror;
+      }
+      // Special check for NaN as NaN == NaN is false.
+      if (mirror.isNumber() && isNaN(mirror.value()) &&
+          typeof value == 'number' && isNaN(value)) {
+        return mirror;
+      }
+    }
+  }
+  
+  if (IS_UNDEFINED(value)) {
+    mirror = new UndefinedMirror();
+  } else if (IS_NULL(value)) {
+    mirror = new NullMirror();
+  } else if (IS_BOOLEAN(value)) {
+    mirror = new BooleanMirror(value);
+  } else if (IS_NUMBER(value)) {
+    mirror = new NumberMirror(value);
+  } else if (IS_STRING(value)) {
+    mirror = new StringMirror(value);
+  } else if (IS_ARRAY(value)) {
+    mirror = new ArrayMirror(value);
+  } else if (IS_DATE(value)) {
+    mirror = new DateMirror(value);
+  } else if (IS_FUNCTION(value)) {
+    mirror = new FunctionMirror(value);
+  } else if (IS_REGEXP(value)) {
+    mirror = new RegExpMirror(value);
+  } else if (IS_ERROR(value)) {
+    mirror = new ErrorMirror(value);
+  } else if (IS_SCRIPT(value)) {
+    mirror = new ScriptMirror(value);
+  } else {
+    mirror = new ObjectMirror(value, OBJECT_TYPE, opt_transient);
+  }
+
+  mirror_cache_[mirror.handle()] = mirror;
+  return mirror;
+}
+
+
+/**
+ * Returns the mirror for a specified mirror handle.
+ *
+ * @param {number} handle the handle to find the mirror for
+ * @returns {Mirror or undefiend} the mirror with the requested handle or
+ *     undefined if no mirror with the requested handle was found
+ */
+function LookupMirror(handle) {
+  return mirror_cache_[handle];
+}
+
+  
+/**
+ * Returns the mirror for the undefined value.
+ *
+ * @returns {Mirror} the mirror reflects the undefined value
+ */
+function GetUndefinedMirror() {
+  return MakeMirror(void 0);
 }
 
 
@@ -81,9 +163,10 @@ const FUNCTION_TYPE = 'function';
 const REGEXP_TYPE = 'regexp';
 const ERROR_TYPE = 'error';
 const PROPERTY_TYPE = 'property';
-const ACCESSOR_TYPE = 'accessor';
 const FRAME_TYPE = 'frame';
 const SCRIPT_TYPE = 'script';
+const CONTEXT_TYPE = 'context';
+const SCOPE_TYPE = 'scope';
 
 // Maximum length when sending strings through the JSON protocol.
 const kMaxProtocolStringLength = 80;
@@ -106,13 +189,19 @@ PropertyType.ConstantTransition = 6;
 PropertyType.NullDescriptor     = 7;
 
 
-
 // Different attributes for a property.
 PropertyAttribute = {};
 PropertyAttribute.None       = NONE;
 PropertyAttribute.ReadOnly   = READ_ONLY;
 PropertyAttribute.DontEnum   = DONT_ENUM;
 PropertyAttribute.DontDelete = DONT_DELETE;
+
+
+// A copy of the scope types from runtime.cc.
+ScopeType = { Global: 0,
+              Local: 1,
+              With: 2,
+              Closure: 3 };
 
 
 // Mirror hierarchy:
@@ -123,15 +212,13 @@ PropertyAttribute.DontDelete = DONT_DELETE;
 //       - NumberMirror
 //       - StringMirror
 //       - ObjectMirror
-//       - FunctionMirror
-//         - UnresolvedFunctionMirror
-//       - ArrayMirror
-//       - DateMirror
-//       - RegExpMirror
-//       - ErrorMirror
+//         - FunctionMirror
+//           - UnresolvedFunctionMirror
+//         - ArrayMirror
+//         - DateMirror
+//         - RegExpMirror
+//         - ErrorMirror
 //     - PropertyMirror
-//       - InterceptorPropertyMirror
-//     - AccessorMirror
 //     - FrameMirror
 //     - ScriptMirror
 
@@ -149,6 +236,15 @@ function Mirror(type) {
 Mirror.prototype.type = function() {
   return this.type_;
 };
+
+
+/**
+ * Check whether the mirror reflects a value.
+ * @returns {boolean} True if the mirror reflects a value.
+ */
+Mirror.prototype.isValue = function() {
+  return this instanceof ValueMirror;
+}
 
 
 /**
@@ -269,25 +365,6 @@ Mirror.prototype.isProperty = function() {
 
 
 /**
- * Check whether the mirror reflects a property from an interceptor.
- * @returns {boolean} True if the mirror reflects a property from an
- *     interceptor
- */
-Mirror.prototype.isInterceptorProperty = function() {
-  return this instanceof InterceptorPropertyMirror;
-}
-
-
-/**
- * Check whether the mirror reflects an accessor.
- * @returns {boolean} True if the mirror reflects an accessor
- */
-Mirror.prototype.isAccessor = function() {
-  return this instanceof AccessorMirror;
-}
-
-
-/**
  * Check whether the mirror reflects a stack frame.
  * @returns {boolean} True if the mirror reflects a stack frame
  */
@@ -296,29 +373,47 @@ Mirror.prototype.isFrame = function() {
 }
 
 
-Mirror.prototype.fillJSONType_ = function(content) {
-  content.push(MakeJSONPair_('type', StringToJSON_(this.type())));
-};
-
-
-Mirror.prototype.fillJSON_ = function(content) {
-  this.fillJSONType_(content);
-};
+/**
+ * Check whether the mirror reflects a script.
+ * @returns {boolean} True if the mirror reflects a script
+ */
+Mirror.prototype.isScript = function() {
+  return this instanceof ScriptMirror;
+}
 
 
 /**
- * Serialize object in JSON format. For the basic mirrors this includes only
- * the type in the following format.
- *   {"type":"<type name>"}
- * For specialized mirrors inheriting from the base Mirror
- * @param {boolean} details Indicate level of details to include
- * @return {string} JSON serialization
+ * Check whether the mirror reflects a context.
+ * @returns {boolean} True if the mirror reflects a context
  */
-Mirror.prototype.toJSONProtocol = function(details, propertiesKind, interceptorPropertiesKind) {
-  var content = new Array();
-  this.fillJSON_(content, details, propertiesKind, interceptorPropertiesKind);
-  content.push(MakeJSONPair_('text', StringToJSON_(this.toText())));
-  return ArrayToJSONObject_(content);
+Mirror.prototype.isContext = function() {
+  return this instanceof ContextMirror;
+}
+
+
+/**
+ * Check whether the mirror reflects a scope.
+ * @returns {boolean} True if the mirror reflects a scope
+ */
+Mirror.prototype.isScope = function() {
+  return this instanceof ScopeMirror;
+}
+
+
+/**
+ * Allocate a handle id for this object.
+ */
+Mirror.prototype.allocateHandle_ = function() {
+  this.handle_ = next_handle_++;
+}
+
+
+/**
+ * Allocate a transient handle id for this object. Transient handles are
+ * negative.
+ */
+Mirror.prototype.allocateTransientHandle_ = function() {
+  this.handle_ = next_transient_handle_--;
 }
 
 
@@ -332,14 +427,26 @@ Mirror.prototype.toText = function() {
  * Base class for all value mirror objects.
  * @param {string} type The type of the mirror
  * @param {value} value The value reflected by this mirror
+ * @param {boolean} transient indicate whether this object is transient with a
+ *    transient handle
  * @constructor
  * @extends Mirror
  */
-function ValueMirror(type, value) {
+function ValueMirror(type, value, transient) {
   Mirror.call(this, type);
   this.value_ = value;
+  if (!transient) {
+    this.allocateHandle_();
+  } else {
+    this.allocateTransientHandle_();
+  }
 }
 inherits(ValueMirror, Mirror);
+
+
+Mirror.prototype.handle = function() {
+  return this.handle_;
+};
 
 
 /**
@@ -356,7 +463,7 @@ ValueMirror.prototype.isPrimitive = function() {
 };
 
 
- /**
+/**
  * Get the actual value reflected by this mirror.
  * @return {value} The value reflected by this mirror
  */
@@ -409,12 +516,6 @@ function BooleanMirror(value) {
 inherits(BooleanMirror, ValueMirror);
 
 
-BooleanMirror.prototype.fillJSON_ = function(content, details) {
-  BooleanMirror.super_.fillJSONType_.call(this, content);
-  content.push(MakeJSONPair_('value', BooleanToJSON_(this.value_)));
-}
-
-
 BooleanMirror.prototype.toText = function() {
   return this.value_ ? 'true' : 'false';
 }
@@ -430,12 +531,6 @@ function NumberMirror(value) {
   ValueMirror.call(this, NUMBER_TYPE, value);
 }
 inherits(NumberMirror, ValueMirror);
-
-
-NumberMirror.prototype.fillJSON_ = function(content, details) {
-  NumberMirror.super_.fillJSONType_.call(this, content);
-  content.push(MakeJSONPair_('value', NumberToJSON_(this.value_)));
-}
 
 
 NumberMirror.prototype.toText = function() {
@@ -460,21 +555,6 @@ StringMirror.prototype.length = function() {
 };
 
 
-StringMirror.prototype.fillJSON_ = function(content, details) {
-  StringMirror.super_.fillJSONType_.call(this, content);
-  content.push(MakeJSONPair_('length', NumberToJSON_(this.length())));
-  if (this.length() > kMaxProtocolStringLength) {
-    content.push(MakeJSONPair_('fromIndex', NumberToJSON_(0)));
-    content.push(MakeJSONPair_('toIndex',
-                               NumberToJSON_(kMaxProtocolStringLength)));
-    var str = this.value_.substring(0, kMaxProtocolStringLength);
-    content.push(MakeJSONPair_('value', StringToJSON_(str)));
-  } else {
-    content.push(MakeJSONPair_('value', StringToJSON_(this.value_)));
-  }
-}
-
-
 StringMirror.prototype.toText = function() {
   if (this.length() > kMaxProtocolStringLength) {
     return this.value_.substring(0, kMaxProtocolStringLength) +
@@ -488,17 +568,19 @@ StringMirror.prototype.toText = function() {
 /**
  * Mirror object for objects.
  * @param {object} value The object reflected by this mirror
+ * @param {boolean} transient indicate whether this object is transient with a
+ *    transient handle
  * @constructor
  * @extends ValueMirror
  */
-function ObjectMirror(value, type) {
-  ValueMirror.call(this, type || OBJECT_TYPE, value);
+function ObjectMirror(value, type, transient) {
+  ValueMirror.call(this, type || OBJECT_TYPE, value, transient);
 }
 inherits(ObjectMirror, ValueMirror);
 
 
 ObjectMirror.prototype.className = function() {
-  return %ClassOf(this.value_);
+  return %_ClassOf(this.value_);
 };
 
 
@@ -513,7 +595,7 @@ ObjectMirror.prototype.prototypeObject = function() {
 
 
 ObjectMirror.prototype.protoObject = function() {
-  return MakeMirror(%GetPrototype(this.value_));
+  return MakeMirror(%DebugGetPrototype(this.value_));
 };
 
 
@@ -546,13 +628,39 @@ ObjectMirror.prototype.propertyNames = function(kind, limit) {
   var propertyNames;
   var elementNames;
   var total = 0;
+  
+  // Find all the named properties.
   if (kind & PropertyKind.Named) {
+    // Get the local property names.
     propertyNames = %DebugLocalPropertyNames(this.value_);
     total += propertyNames.length;
+
+    // Get names for named interceptor properties if any.
+    if (this.hasNamedInterceptor() && (kind & PropertyKind.Named)) {
+      var namedInterceptorNames =
+          %DebugNamedInterceptorPropertyNames(this.value_);
+      if (namedInterceptorNames) {
+        propertyNames = propertyNames.concat(namedInterceptorNames);
+        total += namedInterceptorNames.length;
+      }
+    }
   }
+
+  // Find all the indexed properties.
   if (kind & PropertyKind.Indexed) {
-    elementNames = %DebugLocalElementNames(this.value_)
+    // Get the local element names.
+    elementNames = %DebugLocalElementNames(this.value_);
     total += elementNames.length;
+
+    // Get names for indexed interceptor properties.
+    if (this.hasIndexedInterceptor() && (kind & PropertyKind.Indexed)) {
+      var indexedInterceptorNames =
+          %DebugIndexedInterceptorElementNames(this.value_);
+      if (indexedInterceptorNames) {
+        elementNames = elementNames.concat(indexedInterceptorNames);
+        total += indexedInterceptorNames.length;
+      }
+    }
   }
   limit = Math.min(limit || total, total);
 
@@ -596,99 +704,14 @@ ObjectMirror.prototype.properties = function(kind, limit) {
 };
 
 
-/**
- * Return the interceptor property names for this object.
- * @param {number} kind Indicate whether named, indexed or both kinds of
- *     interceptor properties are requested
- * @param {number} limit Limit the number of names returend to the specified
-       value
- * @return {Array} interceptor property names for this object
- */
-ObjectMirror.prototype.interceptorPropertyNames = function(kind, limit) {
-  // Find kind.
-  kind = kind || PropertyKind.Named | PropertyKind.Indexed;
-  var namedInterceptorNames;
-  var indexedInterceptorNames;
-
-  // Get names for named interceptor properties.
-  if (this.hasNamedInterceptor() && kind & PropertyKind.Named) {
-    namedInterceptorNames = %DebugNamedInterceptorPropertyNames(this.value_);
-  }
-
-  // Get names for indexed interceptor properties.
-  if (this.hasIndexedInterceptor() && kind & PropertyKind.Indexed) {
-    indexedInterceptorNames = %DebugIndexedInterceptorElementNames(this.value_);
-  }
-
-  // Return either retult or both concattenated.
-  if (namedInterceptorNames && indexedInterceptorNames) {
-    return namedInterceptorNames.concat(indexedInterceptorNames);
-  } else if (namedInterceptorNames) {
-    return namedInterceptorNames;
-  } else if (indexedInterceptorNames) {
-    return indexedInterceptorNames;
-  } else {
-    return new Array(0);
-  }
-};
-
-
-/**
- * Return interceptor properties this object.
- * @param {number} opt_kind Indicate whether named, indexed or both kinds of
- *     interceptor properties are requested
- * @param {Array} opt_names Limit the number of properties returned to the
-       specified value
- * @return {Array} properties this object as an array of PropertyMirror objects
- */
-ObjectMirror.prototype.interceptorProperties = function(opt_kind, opt_names) {
-  // Find kind.
-  var kind = opt_kind || PropertyKind.Named | PropertyKind.Indexed;
-  var namedInterceptorProperties;
-  var indexedInterceptorProperties;
-
-  // Get values for named interceptor properties.
-  if (kind & PropertyKind.Named) {
-    var names = opt_names || this.interceptorPropertyNames(PropertyKind.Named);
-    namedInterceptorProperties = new Array(names.length);
-    for (i = 0; i < names.length; i++) {
-      var value = %DebugNamedInterceptorPropertyValue(this.value_, names[i]);
-      namedInterceptorProperties[i] = new InterceptorPropertyMirror(this, names[i], value);
-    }
-  }
-
-  // Get values for indexed interceptor properties.
-  if (kind & PropertyKind.Indexed) {
-    var names = opt_names || this.interceptorPropertyNames(PropertyKind.Indexed);
-    indexedInterceptorProperties = new Array(names.length);
-    for (i = 0; i < names.length; i++) {
-      // Don't try to get the value if the name is not a number.
-      if (IS_NUMBER(names[i])) {
-        var value = %DebugIndexedInterceptorElementValue(this.value_, names[i]);
-        indexedInterceptorProperties[i] = new InterceptorPropertyMirror(this, names[i], value);
-      }
-    }
-  }
-
-  // Return either result or both concattenated.
-  if (namedInterceptorProperties && indexedInterceptorProperties) {
-    return namedInterceptorProperties.concat(indexedInterceptorProperties);
-  } else if (namedInterceptorProperties) {
-    return namedInterceptorProperties;
-  } else {
-    return indexedInterceptorProperties;
-  }
-};
-
-
 ObjectMirror.prototype.property = function(name) {
-  var details = %DebugGetLocalPropertyDetails(this.value_, %ToString(name));
+  var details = %DebugGetPropertyDetails(this.value_, %ToString(name));
   if (details) {
-    return new PropertyMirror(this, name, details[0], details[1]);
+    return new PropertyMirror(this, name, details);
   }
 
   // Nothing found.
-  return new UndefinedMirror();
+  return GetUndefinedMirror();
 };
 
 
@@ -715,69 +738,27 @@ ObjectMirror.prototype.lookupProperty = function(value) {
   }
 
   // Nothing found.
-  return new UndefinedMirror();
+  return GetUndefinedMirror();
 };
 
 
 /**
  * Returns objects which has direct references to this object
- * @param {number} opt_max_instances Optional parameter specifying the maximum
- *     number of instances to return.
+ * @param {number} opt_max_objects Optional parameter specifying the maximum
+ *     number of referencing objects to return.
  * @return {Array} The objects which has direct references to this object.
  */
-ObjectMirror.prototype.referencedBy = function(opt_max_instances) {
-  // Find all objects constructed from this function.
-  var result = %DebugReferencedBy(this.value_, Mirror.prototype, opt_max_instances || 0);
+ObjectMirror.prototype.referencedBy = function(opt_max_objects) {
+  // Find all objects with direct references to this object.
+  var result = %DebugReferencedBy(this.value_,
+                                  Mirror.prototype, opt_max_objects || 0);
 
-  // Make mirrors for all the instances found.
+  // Make mirrors for all the references found.
   for (var i = 0; i < result.length; i++) {
     result[i] = MakeMirror(result[i]);
   }
 
   return result;
-};
-
-
-ObjectMirror.prototype.fillJSONProperties_ = function(content, kind, name, details) {
-  var propertyNames = this.propertyNames(kind);
-  var x = new Array(propertyNames.length);
-  for (var i = 0; i < propertyNames.length; i++) {
-    x[i] = this.property(propertyNames[i]).toJSONProtocol(details);
-  }
-  content.push(MakeJSONPair_(name || 'properties', ArrayToJSONArray_(x)));
-};
-
-
-ObjectMirror.prototype.fillJSONInterceptorProperties_ = function(content, kind, name, details) {
-  var propertyNames = this.interceptorPropertyNames(kind);
-  var x = new Array(propertyNames.length);
-  for (var i = 0; i < propertyNames.length; i++) {
-    x[i] = properties[i].toJSONProtocol(details);
-  }
-  content.push(MakeJSONPair_(name || 'interceptorProperties', ArrayToJSONArray_(x)));
-};
-
-
-ObjectMirror.prototype.fillJSON_ = function(content, details, propertiesKind, interceptorPropertiesKind) {
-  ObjectMirror.super_.fillJSONType_.call(this, content);
-  content.push(MakeJSONPair_('className', StringToJSON_(this.className())));
-  if (details) {
-    content.push(MakeJSONPair_('constructorFunction', this.constructorFunction().toJSONProtocol(false)));
-    content.push(MakeJSONPair_('protoObject', this.protoObject().toJSONProtocol(false)));
-    content.push(MakeJSONPair_('prototypeObject', this.prototypeObject().toJSONProtocol(false)));
-  }
-  if (details) {
-    this.fillJSONProperties_(content, propertiesKind)
-    if (interceptorPropertiesKind) {
-      this.fillJSONInterceptorProperties_(content, interceptorPropertiesKind)
-    }
-  }
-  if (this.hasNamedInterceptor()) {
-    content.push(MakeJSONPair_('namedInterceptor', BooleanToJSON_(true)));
-  }
-  if (this.hasIndexedInterceptor()) {
-    content.push(MakeJSONPair_('indexedInterceptor', BooleanToJSON_(true)));
-  }
 };
 
 
@@ -829,6 +810,15 @@ FunctionMirror.prototype.name = function() {
 
 
 /**
+ * Returns the inferred name of the function.
+ * @return {string} Name of the function
+ */
+FunctionMirror.prototype.inferredName = function() {
+  return %FunctionGetInferredName(this.value_);
+};
+
+
+/**
  * Returns the source code for the function.
  * @return {string or undefined} The source code for the function. If the
  *     function is not resolved undefined will be returned.
@@ -837,8 +827,6 @@ FunctionMirror.prototype.source = function() {
   // Return source if function is resolved. Otherwise just fall through to
   // return undefined.
   if (this.resolved()) {
-    // This builtins function is context independant (only uses runtime
-    // calls and typeof.
     return builtins.FunctionSourceString(this.value_);
   }
 };
@@ -855,7 +843,7 @@ FunctionMirror.prototype.script = function() {
   if (this.resolved()) {
     var script = %FunctionGetScript(this.value_);
     if (script) {
-      return new ScriptMirror(script);
+      return MakeMirror(script);
     }
   }
 };
@@ -882,21 +870,6 @@ FunctionMirror.prototype.constructedBy = function(opt_max_instances) {
     return [];
   }
 };
-
-
-FunctionMirror.prototype.fillJSON_ = function(content, details) {
-  // Fill JSON properties from parent (ObjectMirror).
-  FunctionMirror.super_.fillJSON_.call(this, content, details);
-  // Add function specific properties.
-  content.push(MakeJSONPair_('name', StringToJSON_(this.name())));
-  content.push(MakeJSONPair_('resolved', BooleanToJSON_(this.resolved())));
-  if (details && this.resolved()) {
-    content.push(MakeJSONPair_('source', StringToJSON_(this.source())));
-  }
-  if (this.script()) {
-    content.push(MakeJSONPair_('script', this.script().toJSONProtocol()));
-  }
-}
 
 
 FunctionMirror.prototype.toText = function() {
@@ -928,22 +901,27 @@ UnresolvedFunctionMirror.prototype.className = function() {
 
 
 UnresolvedFunctionMirror.prototype.constructorFunction = function() {
-  return new UndefinedMirror();
+  return GetUndefinedMirror();
 };
 
 
 UnresolvedFunctionMirror.prototype.prototypeObject = function() {
-  return new UndefinedMirror();
+  return GetUndefinedMirror();
 };
 
 
 UnresolvedFunctionMirror.prototype.protoObject = function() {
-  return new UndefinedMirror();
+  return GetUndefinedMirror();
 };
 
 
 UnresolvedFunctionMirror.prototype.name = function() {
   return this.value_;
+};
+
+
+UnresolvedFunctionMirror.prototype.inferredName = function() {
+  return undefined;
 };
 
 
@@ -975,28 +953,16 @@ ArrayMirror.prototype.indexedPropertiesFromRange = function(opt_from_index, opt_
   if (from_index > to_index) return new Array();
   var values = new Array(to_index - from_index + 1);
   for (var i = from_index; i <= to_index; i++) {
-    var details = %DebugGetLocalPropertyDetails(this.value_, %ToString(i));
+    var details = %DebugGetPropertyDetails(this.value_, %ToString(i));
     var value;
     if (details) {
-      value = new PropertyMirror(this, i, details[0], details[1]);
+      value = new PropertyMirror(this, i, details);
     } else {
-      value = new UndefinedMirror();
+      value = GetUndefinedMirror();
     }
     values[i - from_index] = value;
   }
   return values;
-}
-
-
-ArrayMirror.prototype.fillJSON_ = function(content, details) {
-  // Fill JSON as for parent (ObjectMirror) but just with named properties.
-  ArrayMirror.super_.fillJSON_.call(this, content, details, PropertyKind.Named);
-  // Fill indexed properties seperately.
-  if (details) {
-    this.fillJSONProperties_(content, PropertyKind.Indexed, 'indexedProperties')
-  }
-  // Add the array length.
-  content.push(MakeJSONPair_('length', NumberToJSON_(this.length())));
 }
 
 
@@ -1012,16 +978,9 @@ function DateMirror(value) {
 inherits(DateMirror, ObjectMirror);
 
 
-DateMirror.prototype.fillJSON_ = function(content, details) {
-  // Fill JSON properties from parent (ObjectMirror).
-  DateMirror.super_.fillJSON_.call(this, content, details);
-  // Add date specific properties.
-  content.push(MakeJSONPair_('value', DateToJSON_(this.value_)));
-}
-
-
 DateMirror.prototype.toText = function() {
-  return DateToISO8601_(this.value_);
+  var s = JSON.stringify(this.value_);
+  return s.substring(1, s.length - 1);  // cut quotes
 }
 
 
@@ -1073,17 +1032,6 @@ RegExpMirror.prototype.multiline = function() {
 };
 
 
-RegExpMirror.prototype.fillJSON_ = function(content, details) {
-  // Fill JSON properties from parent (ObjectMirror).
-  RegExpMirror.super_.fillJSON_.call(this, content, details);
-  // Add regexp specific properties.
-  content.push(MakeJSONPair_('source', StringToJSON_(this.source())));
-  content.push(MakeJSONPair_('global', BooleanToJSON_(this.global())));
-  content.push(MakeJSONPair_('ignoreCase', BooleanToJSON_(this.ignoreCase())));
-  content.push(MakeJSONPair_('multiline', BooleanToJSON_(this.multiline())));
-}
-
-
 RegExpMirror.prototype.toText = function() {
   // Simpel to text which is used when on specialization in subclass.
   return "/" + this.source() + "/";
@@ -1111,14 +1059,6 @@ ErrorMirror.prototype.message = function() {
 };
 
 
-ErrorMirror.prototype.fillJSON_ = function(content, details) {
-  // Fill JSON properties from parent (ObjectMirror).
-  ErrorMirror.super_.fillJSON_.call(this, content, details);
-  // Add error specific properties.
-  content.push(MakeJSONPair_('message', StringToJSON_(this.message())));
-}
-
-
 ErrorMirror.prototype.toText = function() {
   // Use the same text representation as in messages.js.
   var text;
@@ -1135,16 +1075,21 @@ ErrorMirror.prototype.toText = function() {
  * Base mirror object for properties.
  * @param {ObjectMirror} mirror The mirror object having this property
  * @param {string} name The name of the property
- * @param {Object} value The value of the property
+ * @param {Array} details Details about the property
  * @constructor
  * @extends Mirror
  */
-function PropertyMirror(mirror, name, value, details) {
+function PropertyMirror(mirror, name, details) {
   Mirror.call(this, PROPERTY_TYPE);
   this.mirror_ = mirror;
   this.name_ = name;
-  this.value_ = value;
-  this.details_ = details;
+  this.value_ = details[0];
+  this.details_ = details[1];
+  if (details.length > 2) {
+    this.exception_ = details[2]
+    this.getter_ = details[3];
+    this.setter_ = details[4];
+  }
 }
 inherits(PropertyMirror, Mirror);
 
@@ -1180,14 +1125,16 @@ PropertyMirror.prototype.isIndexed = function() {
 
 
 PropertyMirror.prototype.value = function() {
-  if (this.propertyType() == PropertyType.Callbacks) {
-    // TODO(1242933): AccessorMirror should have getter/setter values.
-    return new AccessorMirror();
-  } else if (this.type() == PropertyType.Interceptor) {
-    return new UndefinedMirror();
-  } else {
-    return MakeMirror(this.value_);
-  }
+  return MakeMirror(this.value_, false);
+}
+
+
+/**
+ * Returns whether this property value is an exception.
+ * @return {booolean} True if this property value is an exception
+ */
+PropertyMirror.prototype.isException = function() {
+  return this.exception_ ? true : false;
 }
 
 
@@ -1206,97 +1153,62 @@ PropertyMirror.prototype.insertionIndex = function() {
 }
 
 
-PropertyMirror.prototype.fillJSON_ = function(content, details) {
-  content.push(MakeJSONPair_('name', StringToJSON_(this.name())));
-  content.push(MakeJSONPair_('value', this.value().toJSONProtocol(details)));
-  if (this.attributes() != PropertyAttribute.None) {
-    content.push(MakeJSONPair_('attributes', NumberToJSON_(this.attributes())));
-  }
-  if (this.propertyType() != PropertyType.Normal) {
-    content.push(MakeJSONPair_('propertyType', NumberToJSON_(this.propertyType())));
-  }
+/**
+ * Returns whether this property has a getter defined through __defineGetter__.
+ * @return {booolean} True if this property has a getter
+ */
+PropertyMirror.prototype.hasGetter = function() {
+  return this.getter_ ? true : false;
 }
 
 
 /**
- * Mirror object for interceptor named properties.
- * @param {ObjectMirror} mirror The mirror object having this property
- * @param {String} name The name of the property
- * @param {value} value The value of the property
- * @constructor
- * @extends PropertyMirror
+ * Returns whether this property has a setter defined through __defineSetter__.
+ * @return {booolean} True if this property has a setter
  */
-function InterceptorPropertyMirror(mirror, name, value) {
-  PropertyMirror.call(this, mirror, name, value, PropertyType.Interceptor);
-}
-inherits(InterceptorPropertyMirror, PropertyMirror);
-
-
-/**
- * Mirror object for property accessors.
- * @param {Function} getter The getter function for this accessor
- * @param {Function} setter The setter function for this accessor
- * @constructor
- * @extends Mirror
- */
-function AccessorMirror(getter, setter) {
-  Mirror.call(this, ACCESSOR_TYPE);
-  this.getter_ = getter;
-  this.setter_ = setter;
-}
-inherits(AccessorMirror, Mirror);
-
-
-/**
- * Returns whether this accessor is native or not. A native accessor is either
- * a VM buildin or provided through the API. A non native accessor is defined
- * in JavaScript using the __defineGetter__ and/or __defineGetter__ functions.
- * @return {boolean} True is the accessor is native
- */
-AccessorMirror.prototype.isNative = function() {
-  return IS_UNDEFINED(this.getter_) && IS_UNDEFINED(this.setter_);
+PropertyMirror.prototype.hasSetter = function() {
+  return this.setter_ ? true : false;
 }
 
 
 /**
- * Returns a mirror for the function of a non native getter.
- * @return {FunctionMirror} Function mirror for the getter set using
- *     __defineGetter__.
+ * Returns the getter for this property defined through __defineGetter__.
+ * @return {Mirror} FunctionMirror reflecting the getter function or
+ *     UndefinedMirror if there is no getter for this property
  */
-AccessorMirror.prototype.getter = function(details) {
-  return MakeMirror(this.getter_);
-}
-
-
-/**
- * Returns a mirror for the function of a non native setter.
- * @return {FunctionMirror} Function mirror for the getter set using
- *     __defineSetter__.
- */
-AccessorMirror.prototype.setter = function(details) {
-  return MakeMirror(this.setter_);
-}
-
-
-/**
- * Serialize the accessor mirror into JSON format. For accessor it has the
- * following format.
- *   {"type":"accessor",
-      "native:"<boolean>,
-      "getter":<function mirror JSON serialization>,
-      "setter":<function mirror JSON serialization>}
- * For specialized mirrors inheriting from the base Mirror
- * @param {boolean} details Indicate level of details to include
- * @return {string} JSON serialization
- */
-AccessorMirror.prototype.fillJSON_ = function(content, details) {
-  AccessorMirror.super_.fillJSONType_.call(this, content);
-  if (this.isNative()) {
-    content.push(MakeJSONPair_('native', BooleanToJSON_(true)));
+PropertyMirror.prototype.getter = function() {
+  if (this.hasGetter()) {
+    return MakeMirror(this.getter_);
   } else {
-    content.push(MakeJSONPair_('getter', this.getter().toJSONProtocol(false)));
-    content.push(MakeJSONPair_('setter', this.setter().toJSONProtocol(false)));
+    return GetUndefinedMirror();
   }
+}
+
+
+/**
+ * Returns the setter for this property defined through __defineSetter__.
+ * @return {Mirror} FunctionMirror reflecting the setter function or
+ *     UndefinedMirror if there is no setter for this property
+ */
+PropertyMirror.prototype.setter = function() {
+  if (this.hasSetter()) {
+    return MakeMirror(this.setter_);
+  } else {
+    return GetUndefinedMirror();
+  }
+}
+
+
+/**
+ * Returns whether this property is natively implemented by the host or a set
+ * through JavaScript code.
+ * @return {boolean} True if the property is 
+ *     UndefinedMirror if there is no setter for this property
+ */
+PropertyMirror.prototype.isNative = function() {
+  return (this.propertyType() == PropertyType.Interceptor) ||
+         ((this.propertyType() == PropertyType.Callbacks) &&
+          !this.hasGetter() && !this.hasSetter());
 }
 
 
@@ -1427,6 +1339,11 @@ FrameDetails.prototype.localValue = function(index) {
 }
 
 
+FrameDetails.prototype.scopeCount = function() {
+  return %GetScopeCount(this.break_id_, this.frameId());
+}
+
+
 /**
  * Mirror object for stack frames.
  * @param {number} break_id The break id in the VM for which this frame is
@@ -1457,7 +1374,7 @@ FrameMirror.prototype.func = function() {
   // value returned from the VM might be a string if the function for the
   // frame is unresolved.
   if (IS_FUNCTION(f)) {
-    return new FunctionMirror(f);
+    return MakeMirror(f);
   } else {
     return new UnresolvedFunctionMirror(f);
   }
@@ -1516,7 +1433,8 @@ FrameMirror.prototype.sourcePosition = function() {
 
 FrameMirror.prototype.sourceLocation = function() {
   if (this.func().resolved() && this.func().script()) {
-    return this.func().script().locationFromPosition(this.sourcePosition());
+    return this.func().script().locationFromPosition(this.sourcePosition(),
+                                                     true);
   }
 };
 
@@ -1551,52 +1469,21 @@ FrameMirror.prototype.sourceLineText = function() {
 };
 
 
+FrameMirror.prototype.scopeCount = function() {
+  return this.details_.scopeCount();
+};
+
+
+FrameMirror.prototype.scope = function(index) {
+  return new ScopeMirror(this, index);
+};
+
+
 FrameMirror.prototype.evaluate = function(source, disable_break) {
   var result = %DebugEvaluate(this.break_id_, this.details_.frameId(),
                               source, Boolean(disable_break));
   return MakeMirror(result);
 };
-
-
-FrameMirror.prototype.fillJSON_ = function(content, details) {
-  FrameMirror.super_.fillJSONType_.call(this, content);
-  content.push(MakeJSONPair_('index', NumberToJSON_(this.index())));
-  content.push(MakeJSONPair_('receiver', this.receiver().toJSONProtocol(false)));
-  content.push(MakeJSONPair_('func', this.func().toJSONProtocol(false)));
-  content.push(MakeJSONPair_('constructCall', BooleanToJSON_(this.isConstructCall())));
-  content.push(MakeJSONPair_('debuggerFrame', BooleanToJSON_(this.isDebuggerFrame())));
-  var x = new Array(this.argumentCount());
-  for (var i = 0; i < this.argumentCount(); i++) {
-    arg = new Array();
-    var argument_name = this.argumentName(i)
-    if (argument_name) {
-      arg.push(MakeJSONPair_('name', StringToJSON_(argument_name)));
-    }
-    arg.push(MakeJSONPair_('value', this.argumentValue(i).toJSONProtocol(false)));
-    x[i] = ArrayToJSONObject_(arg);
-  }
-  content.push(MakeJSONPair_('arguments', ArrayToJSONArray_(x)));
-  var x = new Array(this.localCount());
-  for (var i = 0; i < this.localCount(); i++) {
-    var name = MakeJSONPair_('name', StringToJSON_(this.localName(i)));
-    var value = MakeJSONPair_('value', this.localValue(i).toJSONProtocol(false));
-    x[i] = '{' + name + ',' + value + '}';
-  }
-  content.push(MakeJSONPair_('locals', ArrayToJSONArray_(x)));
-  content.push(MakeJSONPair_('position', NumberToJSON_(this.sourcePosition())));
-  var line = this.sourceLine();
-  if (!IS_UNDEFINED(line)) {
-    content.push(MakeJSONPair_('line', NumberToJSON_(line)));
-  }
-  var column = this.sourceColumn();
-  if (!IS_UNDEFINED(column)) {
-    content.push(MakeJSONPair_('column', NumberToJSON_(column)));
-  }
-  var source_line_text = this.sourceLineText();
-  if (!IS_UNDEFINED(source_line_text)) {
-    content.push(MakeJSONPair_('sourceLineText', StringToJSON_(source_line_text)));
-  }
-}
 
 
 FrameMirror.prototype.invocationText = function() {
@@ -1618,7 +1505,7 @@ FrameMirror.prototype.invocationText = function() {
     }
     // Try to find the function as a property in the receiver. Include the
     // prototype chain in the lookup.
-    var property = new UndefinedMirror();
+    var property = GetUndefinedMirror();
     if (!receiver.isUndefined()) {
       for (var r = receiver; !r.isNull() && property.isUndefined(); r = r.protoObject()) {
         property = r.lookupProperty(func);
@@ -1735,6 +1622,70 @@ FrameMirror.prototype.toText = function(opt_locals) {
 }
 
 
+const kScopeDetailsTypeIndex = 0;
+const kScopeDetailsObjectIndex = 1;
+
+function ScopeDetails(frame, index) {
+  this.break_id_ = frame.break_id_;
+  this.details_ = %GetScopeDetails(frame.break_id_,
+                                   frame.details_.frameId(),
+                                   index);
+}
+
+
+ScopeDetails.prototype.type = function() {
+  %CheckExecutionState(this.break_id_);
+  return this.details_[kScopeDetailsTypeIndex];
+}
+
+
+ScopeDetails.prototype.object = function() {
+  %CheckExecutionState(this.break_id_);
+  return this.details_[kScopeDetailsObjectIndex];
+}
+
+
+/**
+ * Mirror object for scope.
+ * @param {FrameMirror} frame The frame this scope is a part of
+ * @param {number} index The scope index in the frame
+ * @constructor
+ * @extends Mirror
+ */
+function ScopeMirror(frame, index) {
+  Mirror.call(this, SCOPE_TYPE);
+  this.frame_index_ = frame.index_;
+  this.scope_index_ = index;
+  this.details_ = new ScopeDetails(frame, index);
+}
+inherits(ScopeMirror, Mirror);
+
+
+ScopeMirror.prototype.frameIndex = function() {
+  return this.frame_index_;
+};
+
+
+ScopeMirror.prototype.scopeIndex = function() {
+  return this.scope_index_;
+};
+
+
+ScopeMirror.prototype.scopeType = function() {
+  return this.details_.type();
+};
+
+
+ScopeMirror.prototype.scopeObject = function() {
+  // For local and closure scopes create a transient mirror as these objects are
+  // created on the fly materializing the local or closure scopes and
+  // therefore will not preserve identity.
+  var transient = this.scopeType() == ScopeType.Local ||
+                  this.scopeType() == ScopeType.Closure;
+  return MakeMirror(this.details_.object(), transient);
+};
+
+
 /**
  * Mirror object for script source.
  * @param {Script} script The script object
@@ -1744,12 +1695,29 @@ FrameMirror.prototype.toText = function(opt_locals) {
 function ScriptMirror(script) {
   Mirror.call(this, SCRIPT_TYPE);
   this.script_ = script;
+  this.context_ = new ContextMirror(script.context_data);
+  this.allocateHandle_();
 }
 inherits(ScriptMirror, Mirror);
 
 
+ScriptMirror.prototype.value = function() {
+  return this.script_;
+};
+
+
 ScriptMirror.prototype.name = function() {
   return this.script_.name;
+};
+
+
+ScriptMirror.prototype.id = function() {
+  return this.script_.id;
+};
+
+
+ScriptMirror.prototype.source = function() {
+  return this.script_.source;
 };
 
 
@@ -1763,8 +1731,18 @@ ScriptMirror.prototype.columnOffset = function() {
 };
 
 
+ScriptMirror.prototype.data = function() {
+  return this.script_.data;
+};
+
+
 ScriptMirror.prototype.scriptType = function() {
   return this.script_.type;
+};
+
+
+ScriptMirror.prototype.compilationType = function() {
+  return this.script_.compilation_type;
 };
 
 
@@ -1773,8 +1751,9 @@ ScriptMirror.prototype.lineCount = function() {
 };
 
 
-ScriptMirror.prototype.locationFromPosition = function(position) {
-  return this.script_.locationFromPosition(position);
+ScriptMirror.prototype.locationFromPosition = function(
+    position, include_resource_offset) {
+  return this.script_.locationFromPosition(position, include_resource_offset);
 }
 
 
@@ -1783,16 +1762,23 @@ ScriptMirror.prototype.sourceSlice = function (opt_from_line, opt_to_line) {
 }
 
 
-ScriptMirror.prototype.fillJSON_ = function(content, details) {
-  ScriptMirror.super_.fillJSONType_.call(this, content);
-  if (this.name()) {
-    content.push(MakeJSONPair_('name', StringToJSON_(this.name())));
+ScriptMirror.prototype.context = function() {
+  return this.context_;
+};
+
+
+ScriptMirror.prototype.evalFromFunction = function() {
+  return MakeMirror(this.script_.eval_from_function);
+};
+
+
+ScriptMirror.prototype.evalFromLocation = function() {
+  var eval_from_function = this.evalFromFunction();
+  if (!eval_from_function.isUndefined()) {
+    var position = this.script_.eval_from_position;
+    return eval_from_function.script().locationFromPosition(position, true);
   }
-  content.push(MakeJSONPair_('lineOffset', NumberToJSON_(this.lineOffset())));
-  content.push(MakeJSONPair_('columnOffset', NumberToJSON_(this.columnOffset())));
-  content.push(MakeJSONPair_('lineCount', NumberToJSON_(this.lineCount())));
-  content.push(MakeJSONPair_('scriptType', NumberToJSON_(this.scriptType())));
-}
+};
 
 
 ScriptMirror.prototype.toText = function() {
@@ -1811,114 +1797,482 @@ ScriptMirror.prototype.toText = function() {
 }
 
 
-function MakeJSONPair_(name, value) {
-  return '"' + name + '":' + value;
+/**
+ * Mirror object for context.
+ * @param {Object} data The context data
+ * @constructor
+ * @extends Mirror
+ */
+function ContextMirror(data) {
+  Mirror.call(this, CONTEXT_TYPE);
+  this.data_ = data;
+  this.allocateHandle_();
 }
+inherits(ContextMirror, Mirror);
 
 
-function ArrayToJSONObject_(content) {
-  return '{' + content.join(',') + '}';
-}
-
-
-function ArrayToJSONArray_(content) {
-  return '[' + content.join(',') + ']';
-}
-
-
-function BooleanToJSON_(value) {
-  return String(value); 
-}
-
-
-function NumberToJSON_(value) {
-  return String(value); 
-}
-
-
-// Mapping of some control characters to avoid the \uXXXX syntax for most
-// commonly used control cahracters.
-const ctrlCharMap_ = {
-  '\b': '\\b',
-  '\t': '\\t',
-  '\n': '\\n',
-  '\f': '\\f',
-  '\r': '\\r',
-  '"' : '\\"',
-  '\\': '\\\\'
+ContextMirror.prototype.data = function() {
+  return this.data_;
 };
 
 
-// Regular expression testing for ", \ and control characters (0x00 - 0x1F).
-const ctrlCharTest_ = new RegExp('["\\\\\x00-\x1F]');
-
-
-// Regular expression matching ", \ and control characters (0x00 - 0x1F)
-// globally.
-const ctrlCharMatch_ = new RegExp('["\\\\\x00-\x1F]', 'g');
-
-
 /**
- * Convert a String to its JSON representation (see http://www.json.org/). To
- * avoid depending on the String object this method calls the functions in
- * string.js directly and not through the value.
- * @param {String} value The String value to format as JSON
- * @return {string} JSON formatted String value
+ * Returns a mirror serializer
+ *
+ * @param {boolean} details Set to true to include details
+ * @param {Object} options Options comtrolling the serialization
+ *     The following options can be set:
+ *       includeSource: include ths full source of scripts
+ * @returns {MirrorSerializer} mirror serializer
  */
-function StringToJSON_(value) {
-  // Check for" , \ and control characters (0x00 - 0x1F). No need to call
-  // RegExpTest as ctrlchar is constructed using RegExp.
-  if (ctrlCharTest_.test(value)) {
-    // Replace ", \ and control characters (0x00 - 0x1F).
-    return '"' +
-      value.replace(ctrlCharMatch_, function (char) {
-        // Use charmap if possible.
-        var mapped = ctrlCharMap_[char];
-        if (mapped) return mapped;
-        mapped = char.charCodeAt();
-        // Convert control character to unicode escape sequence.
-        return '\\u00' +
-          %NumberToRadixString(Math.floor(mapped / 16), 16) +
-          %NumberToRadixString(mapped % 16, 16);
-      })
-    + '"';
-  }
-
-  // Simple string with no special characters.
-  return '"' + value + '"';
+function MakeMirrorSerializer(details, options) {
+  return new JSONProtocolSerializer(details, options);
 }
 
 
 /**
- * Convert a Date to ISO 8601 format. To avoid depending on the Date object
- * this method calls the functions in date.js directly and not through the
- * value.
- * @param {Date} value The Date value to format as JSON
- * @return {string} JSON formatted Date value
+ * Object for serializing a mirror objects and its direct references.
+ * @param {boolean} details Indicates whether to include details for the mirror
+ *     serialized
+ * @constructor
  */
-function DateToISO8601_(value) {
-  function f(n) {
-    return n < 10 ? '0' + n : n;
-  }
-  function g(n) {
-    return n < 10 ? '00' + n : n < 100 ? '0' + n : n;
-  }
-  return builtins.GetUTCFullYearFrom(value)         + '-' +
-          f(builtins.GetUTCMonthFrom(value) + 1)    + '-' +
-          f(builtins.GetUTCDateFrom(value))         + 'T' +
-          f(builtins.GetUTCHoursFrom(value))        + ':' +
-          f(builtins.GetUTCMinutesFrom(value))      + ':' +
-          f(builtins.GetUTCSecondsFrom(value))      + '.' +
-          g(builtins.GetUTCMillisecondsFrom(value)) + 'Z';
+function JSONProtocolSerializer(details, options) {
+  this.details_ = details;
+  this.options_ = options;
+  this.mirrors_ = [ ];
 }
 
+
 /**
- * Convert a Date to ISO 8601 format. To avoid depending on the Date object
- * this method calls the functions in date.js directly and not through the
- * value.
- * @param {Date} value The Date value to format as JSON
- * @return {string} JSON formatted Date value
+ * Returns a serialization of an object reference. The referenced object are
+ * added to the serialization state.
+ *
+ * @param {Mirror} mirror The mirror to serialize
+ * @returns {String} JSON serialization
  */
-function DateToJSON_(value) {
-  return '"' + DateToISO8601_(value) + '"';
+JSONProtocolSerializer.prototype.serializeReference = function(mirror) {
+  return this.serialize_(mirror, true, true);
+}
+
+
+/**
+ * Returns a serialization of an object value. The referenced objects are
+ * added to the serialization state.
+ *
+ * @param {Mirror} mirror The mirror to serialize
+ * @returns {String} JSON serialization
+ */
+JSONProtocolSerializer.prototype.serializeValue = function(mirror) {
+  var json = this.serialize_(mirror, false, true);
+  return json;
+}
+
+
+/**
+ * Returns a serialization of all the objects referenced.
+ *
+ * @param {Mirror} mirror The mirror to serialize.
+ * @returns {Array.<Object>} Array of the referenced objects converted to
+ *     protcol objects.
+ */
+JSONProtocolSerializer.prototype.serializeReferencedObjects = function() {
+  // Collect the protocol representation of the referenced objects in an array.
+  var content = [];
+  
+  // Get the number of referenced objects.
+  var count = this.mirrors_.length;
+  
+  for (var i = 0; i < count; i++) {
+    content.push(this.serialize_(this.mirrors_[i], false, false));
+  }
+
+  return content;
+}
+
+
+JSONProtocolSerializer.prototype.includeSource_ = function() {
+  return this.options_ && this.options_.includeSource;
+}
+
+
+JSONProtocolSerializer.prototype.inlineRefs_ = function() {
+  return this.options_ && this.options_.inlineRefs;
+}
+
+
+JSONProtocolSerializer.prototype.add_ = function(mirror) {
+  // If this mirror is already in the list just return.
+  for (var i = 0; i < this.mirrors_.length; i++) {
+    if (this.mirrors_[i] === mirror) {
+      return;
+    }
+  }
+  
+  // Add the mirror to the list of mirrors to be serialized.
+  this.mirrors_.push(mirror);
+}
+
+
+/**
+ * Formats mirror object to protocol reference object with some data that can
+ * be used to display the value in debugger.
+ * @param {Mirror} mirror Mirror to serialize.
+ * @return {Object} Protocol reference object.
+ */
+JSONProtocolSerializer.prototype.serializeReferenceWithDisplayData_ = 
+    function(mirror) {
+  var o = {};
+  o.ref = mirror.handle();
+  o.type = mirror.type();
+  switch (mirror.type()) {
+    case UNDEFINED_TYPE:
+    case NULL_TYPE:
+    case BOOLEAN_TYPE:
+    case NUMBER_TYPE:
+      o.value = mirror.value();
+      break;
+    case STRING_TYPE:
+      // Limit string length.
+      o.value = mirror.toText();
+      break;
+    case FUNCTION_TYPE:
+      o.name = mirror.name();
+      o.inferredName = mirror.inferredName();
+      if (mirror.script()) {
+        o.scriptId = mirror.script().id();
+      }
+      break;
+    case ERROR_TYPE:
+    case REGEXP_TYPE:
+      o.value = mirror.toText();
+      break;
+    case OBJECT_TYPE:
+      o.className = mirror.className();
+      break;
+  }
+  return o;
+};
+
+
+JSONProtocolSerializer.prototype.serialize_ = function(mirror, reference,
+                                                       details) {
+  // If serializing a reference to a mirror just return the reference and add
+  // the mirror to the referenced mirrors.
+  if (reference &&
+      (mirror.isValue() || mirror.isScript() || mirror.isContext())) {
+    if (this.inlineRefs_() && mirror.isValue()) {
+      return this.serializeReferenceWithDisplayData_(mirror);
+    } else {
+      this.add_(mirror);
+      return {'ref' : mirror.handle()};
+    }
+  }
+  
+  // Collect the JSON property/value pairs.
+  var content = {};
+
+  // Add the mirror handle.
+  if (mirror.isValue() || mirror.isScript() || mirror.isContext()) {
+    content.handle = mirror.handle();
+  }
+
+  // Always add the type.
+  content.type = mirror.type();
+
+  switch (mirror.type()) {
+    case UNDEFINED_TYPE:
+    case NULL_TYPE:
+      // Undefined and null are represented just by their type.
+      break;
+
+    case BOOLEAN_TYPE:
+      // Boolean values are simply represented by their value.
+      content.value = mirror.value();
+      break;
+
+    case NUMBER_TYPE:
+      // Number values are simply represented by their value.
+      content.value = NumberToJSON_(mirror.value());
+      break;
+
+    case STRING_TYPE:
+      // String values might have their value cropped to keep down size.
+      if (mirror.length() > kMaxProtocolStringLength) {
+        var str = mirror.value().substring(0, kMaxProtocolStringLength);
+        content.value = str;
+        content.fromIndex = 0;
+        content.toIndex = kMaxProtocolStringLength;
+      } else {
+        content.value = mirror.value();
+      }
+      content.length = mirror.length();
+      break;
+
+    case OBJECT_TYPE:
+    case FUNCTION_TYPE:
+    case ERROR_TYPE:
+    case REGEXP_TYPE:
+      // Add object representation.
+      this.serializeObject_(mirror, content, details);
+      break;
+
+    case PROPERTY_TYPE:
+      throw new Error('PropertyMirror cannot be serialized independeltly')
+      break;
+
+    case FRAME_TYPE:
+      // Add object representation.
+      this.serializeFrame_(mirror, content);
+      break;
+
+    case SCOPE_TYPE:
+      // Add object representation.
+      this.serializeScope_(mirror, content);
+      break;
+
+    case SCRIPT_TYPE:
+      // Script is represented by id, name and source attributes.
+      if (mirror.name()) {
+        content.name = mirror.name();
+      }
+      content.id = mirror.id();
+      content.lineOffset = mirror.lineOffset();
+      content.columnOffset = mirror.columnOffset();
+      content.lineCount = mirror.lineCount();
+      if (mirror.data()) {
+        content.data = mirror.data();
+      }
+      if (this.includeSource_()) {
+        content.source = mirror.source();
+      } else {
+        var sourceStart = mirror.source().substring(0, 80);
+        content.sourceStart = sourceStart;
+      }
+      content.sourceLength = mirror.source().length;
+      content.scriptType = mirror.scriptType();
+      content.compilationType = mirror.compilationType();
+      // For compilation type eval emit information on the script from which
+      // eval was called if a script is present.
+      if (mirror.compilationType() == 1 &&
+          mirror.evalFromFunction().script()) {
+        content.evalFromScript =
+            this.serializeReference(mirror.evalFromFunction().script());
+        var evalFromLocation = mirror.evalFromLocation()
+        content.evalFromLocation = { line: evalFromLocation.line,
+                                     column: evalFromLocation.column}
+      }
+      if (mirror.context()) {
+        content.context = this.serializeReference(mirror.context());
+      }
+      break;
+
+    case CONTEXT_TYPE:
+      content.data = mirror.data();
+      break;
+  }
+
+  // Always add the text representation.
+  content.text = mirror.toText();
+  
+  // Create and return the JSON string.
+  return content;
+}
+
+
+/**
+ * Serialize object information to the following JSON format.
+ *
+ *   {"className":"<class name>",
+ *    "constructorFunction":{"ref":<number>},
+ *    "protoObject":{"ref":<number>},
+ *    "prototypeObject":{"ref":<number>},
+ *    "namedInterceptor":<boolean>,
+ *    "indexedInterceptor":<boolean>,
+ *    "properties":[<properties>]}
+ */
+JSONProtocolSerializer.prototype.serializeObject_ = function(mirror, content,
+                                                             details) {
+  // Add general object properties.
+  content.className = mirror.className();
+  content.constructorFunction =
+      this.serializeReference(mirror.constructorFunction());
+  content.protoObject = this.serializeReference(mirror.protoObject());
+  content.prototypeObject = this.serializeReference(mirror.prototypeObject());
+
+  // Add flags to indicate whether there are interceptors.
+  if (mirror.hasNamedInterceptor()) {
+    content.namedInterceptor = true;
+  }
+  if (mirror.hasIndexedInterceptor()) {
+    content.indexedInterceptor = true;
+  }
+  
+  // Add function specific properties.
+  if (mirror.isFunction()) {
+    // Add function specific properties.
+    content.name = mirror.name();
+    if (!IS_UNDEFINED(mirror.inferredName())) {
+      content.inferredName = mirror.inferredName();
+    }
+    content.resolved = mirror.resolved();
+    if (mirror.resolved()) {
+      content.source = mirror.source();
+    }
+    if (mirror.script()) {
+      content.script = this.serializeReference(mirror.script());
+    }
+  }
+
+  // Add date specific properties.
+  if (mirror.isDate()) {
+    // Add date specific properties.
+    content.value = mirror.value();
+  }
+
+  // Add actual properties - named properties followed by indexed properties.
+  var propertyNames = mirror.propertyNames(PropertyKind.Named);
+  var propertyIndexes = mirror.propertyNames(PropertyKind.Indexed);
+  var p = new Array(propertyNames.length + propertyIndexes.length);
+  for (var i = 0; i < propertyNames.length; i++) {
+    var propertyMirror = mirror.property(propertyNames[i]);
+    p[i] = this.serializeProperty_(propertyMirror);
+    if (details) {
+      this.add_(propertyMirror.value());
+    }
+  }
+  for (var i = 0; i < propertyIndexes.length; i++) {
+    var propertyMirror = mirror.property(propertyIndexes[i]);
+    p[propertyNames.length + i] = this.serializeProperty_(propertyMirror);
+    if (details) {
+      this.add_(propertyMirror.value());
+    }
+  }
+  content.properties = p;
+}
+
+
+/**
+ * Serialize property information to the following JSON format for building the
+ * array of properties.
+ *
+ *   {"name":"<property name>",
+ *    "attributes":<number>,
+ *    "propertyType":<number>,
+ *    "ref":<number>}
+ *
+ * If the attribute for the property is PropertyAttribute.None it is not added.
+ * If the propertyType for the property is PropertyType.Normal it is not added.
+ * Here are a couple of examples.
+ *
+ *   {"name":"hello","ref":1}
+ *   {"name":"length","attributes":7,"propertyType":3,"ref":2}
+ *
+ * @param {PropertyMirror} propertyMirror The property to serialize.
+ * @returns {Object} Protocol object representing the property.
+ */
+JSONProtocolSerializer.prototype.serializeProperty_ = function(propertyMirror) {
+  var result = {};
+  
+  result.name = propertyMirror.name();
+  var propertyValue = propertyMirror.value();
+  if (this.inlineRefs_() && propertyValue.isValue()) {
+    result.value = this.serializeReferenceWithDisplayData_(propertyValue);
+  } else {
+    if (propertyMirror.attributes() != PropertyAttribute.None) {
+      result.attributes = propertyMirror.attributes();
+    }
+    if (propertyMirror.propertyType() != PropertyType.Normal) {
+      result.propertyType = propertyMirror.propertyType();
+    }
+    result.ref = propertyValue.handle();
+  }
+  return result;
+}
+
+
+JSONProtocolSerializer.prototype.serializeFrame_ = function(mirror, content) {
+  content.index = mirror.index();
+  content.receiver = this.serializeReference(mirror.receiver());
+  var func = mirror.func();
+  content.func = this.serializeReference(func);
+  if (func.script()) {
+    content.script = this.serializeReference(func.script());
+  }
+  content.constructCall = mirror.isConstructCall();
+  content.debuggerFrame = mirror.isDebuggerFrame();
+  var x = new Array(mirror.argumentCount());
+  for (var i = 0; i < mirror.argumentCount(); i++) {
+    var arg = {};
+    var argument_name = mirror.argumentName(i)
+    if (argument_name) {
+      arg.name = argument_name;
+    }
+    arg.value = this.serializeReference(mirror.argumentValue(i));
+    x[i] = arg;
+  }
+  content.arguments = x;
+  var x = new Array(mirror.localCount());
+  for (var i = 0; i < mirror.localCount(); i++) {
+    var local = {};
+    local.name = mirror.localName(i);
+    local.value = this.serializeReference(mirror.localValue(i));
+    x[i] = local;
+  }
+  content.locals = x;
+  content.position = mirror.sourcePosition();
+  var line = mirror.sourceLine();
+  if (!IS_UNDEFINED(line)) {
+    content.line = line;
+  }
+  var column = mirror.sourceColumn();
+  if (!IS_UNDEFINED(column)) {
+    content.column = column;
+  }
+  var source_line_text = mirror.sourceLineText();
+  if (!IS_UNDEFINED(source_line_text)) {
+    content.sourceLineText = source_line_text;
+  }
+  
+  content.scopes = [];
+  for (var i = 0; i < mirror.scopeCount(); i++) {
+    var scope = mirror.scope(i);
+    content.scopes.push({
+      type: scope.scopeType(),
+      index: i
+    });
+  }
+}
+
+
+JSONProtocolSerializer.prototype.serializeScope_ = function(mirror, content) {
+  content.index = mirror.scopeIndex();
+  content.frameIndex = mirror.frameIndex();
+  content.type = mirror.scopeType();
+  content.object = this.inlineRefs_() ?
+                   this.serializeValue(mirror.scopeObject()) :
+                   this.serializeReference(mirror.scopeObject());
+}
+
+
+/**
+ * Convert a number to a protocol value. For all finite numbers the number
+ * itself is returned. For non finite numbers NaN, Infinite and
+ * -Infinite the string representation "NaN", "Infinite" or "-Infinite"
+ * (not including the quotes) is returned.
+ *
+ * @param {number} value The number value to convert to a protocol value.
+ * @returns {number|string} Protocol value.
+ */
+function NumberToJSON_(value) {
+  if (isNaN(value)) {
+    return 'NaN';
+  }
+  if (!isFinite(value)) {
+    if (value > 0) {
+      return 'Infinity';
+    } else {
+      return '-Infinity';
+    }
+  }
+  return value; 
 }

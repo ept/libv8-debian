@@ -31,7 +31,8 @@
 #include "scopes.h"
 #include "variables.h"
 
-namespace v8 { namespace internal {
+namespace v8 {
+namespace internal {
 
 // ----------------------------------------------------------------------------
 // Implementation UseCount.
@@ -85,6 +86,23 @@ void UseCount::Print() {
 
 
 // ----------------------------------------------------------------------------
+// Implementation SmiAnalysis.
+
+
+const char* SmiAnalysis::Type2String(SmiAnalysis* type) {
+  switch (type->kind_) {
+    case UNKNOWN:
+      return "UNKNOWN";
+    case LIKELY_SMI:
+      return "LIKELY_SMI";
+    default:
+      UNREACHABLE();
+  }
+  return "UNREACHABLE";
+}
+
+
+// ----------------------------------------------------------------------------
 // Implementation Variable.
 
 
@@ -93,6 +111,8 @@ const char* Variable::Mode2String(Mode mode) {
     case VAR: return "VAR";
     case CONST: return "CONST";
     case DYNAMIC: return "DYNAMIC";
+    case DYNAMIC_GLOBAL: return "DYNAMIC_GLOBAL";
+    case DYNAMIC_LOCAL: return "DYNAMIC_LOCAL";
     case INTERNAL: return "INTERNAL";
     case TEMPORARY: return "TEMPORARY";
   }
@@ -120,12 +140,13 @@ Variable::Variable(Scope* scope,
                    Handle<String> name,
                    Mode mode,
                    bool is_valid_LHS,
-                   bool is_this)
+                   Kind kind)
   : scope_(scope),
     name_(name),
     mode_(mode),
     is_valid_LHS_(is_valid_LHS),
-    is_this_(is_this),
+    kind_(kind),
+    local_if_not_shadowed_(NULL),
     is_accessed_from_inner_scope_(false),
     rewrite_(NULL) {
   // names must be canonicalized for fast equality checks
@@ -138,6 +159,5 @@ bool Variable::is_global() const {
   // activation frame.
   return mode_ != TEMPORARY && scope_ != NULL && scope_->is_global_scope();
 }
-
 
 } }  // namespace v8::internal

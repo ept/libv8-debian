@@ -1,4 +1,4 @@
-// Copyright 2007-2008 the V8 project authors. All rights reserved.
+// Copyright 2009 the V8 project authors. All rights reserved.
 // Redistribution and use in source and binary forms, with or without
 // modification, are permitted provided that the following conditions are
 // met:
@@ -30,7 +30,8 @@
 #include "api.h"
 #include "global-handles.h"
 
-namespace v8 { namespace internal {
+namespace v8 {
+namespace internal {
 
 class GlobalHandles::Node : public Malloced {
  public:
@@ -96,6 +97,7 @@ class GlobalHandles::Node : public Malloced {
   // Make this handle weak.
   void MakeWeak(void* parameter, WeakReferenceCallback callback) {
     LOG(HandleEvent("GlobalHandle::MakeWeak", handle().location()));
+    ASSERT(state_ != DESTROYED);
     if (state_ != WEAK && !IsNearDeath()) {
       GlobalHandles::number_of_weak_handles_++;
       if (object_->IsJSGlobalObject()) {
@@ -109,6 +111,7 @@ class GlobalHandles::Node : public Malloced {
 
   void ClearWeakness() {
     LOG(HandleEvent("GlobalHandle::ClearWeakness", handle().location()));
+    ASSERT(state_ != DESTROYED);
     if (state_ == WEAK || IsNearDeath()) {
       GlobalHandles::number_of_weak_handles_--;
       if (object_->IsJSGlobalObject()) {
@@ -141,8 +144,8 @@ class GlobalHandles::Node : public Malloced {
   // Returns the callback for this weak handle.
   WeakReferenceCallback callback() { return callback_; }
 
-  void PostGarbageCollectionProcessing() {
-    if (state_ != Node::PENDING) return;
+  bool PostGarbageCollectionProcessing() {
+    if (state_ != Node::PENDING) return false;
     LOG(HandleEvent("GlobalHandle::Processing", handle().location()));
     void* par = parameter();
     state_ = NEAR_DEATH;
@@ -150,9 +153,19 @@ class GlobalHandles::Node : public Malloced {
     // The callback function is resolved as late as possible to preserve old
     // behavior.
     WeakReferenceCallback func = callback();
-    if (func != NULL) {
-      func(v8::Persistent<v8::Object>(ToApi<v8::Object>(handle())), par);
+    if (func == NULL) return false;
+
+    v8::Persistent<v8::Object> object = ToApi<v8::Object>(handle());
+    {
+      // Forbid reuse of destroyed nodes as they might be already deallocated.
+      // It's fine though to reuse nodes that were destroyed in weak callback
+      // as those cannot be deallocated until we are back from the callback.
+      set_first_free(NULL);
+      // Leaving V8.
+      VMState state(EXTERNAL);
+      func(object, par);
     }
+    return true;
   }
 
   // Place the handle address first to avoid offset computation.
@@ -251,7 +264,7 @@ void GlobalHandles::IterateWeakRoots(ObjectVisitor* v) {
 }
 
 
-void GlobalHandles::MarkWeakRoots(WeakSlotCallback f) {
+void GlobalHandles::IdentifyWeakHandles(WeakSlotCallback f) {
   for (Node* current = head_; current != NULL; current = current->next()) {
     if (current->state_ == Node::WEAK) {
       if (f(&current->object_)) {
@@ -263,15 +276,26 @@ void GlobalHandles::MarkWeakRoots(WeakSlotCallback f) {
 }
 
 
+int post_gc_processing_count = 0;
+
 void GlobalHandles::PostGarbageCollectionProcessing() {
   // Process weak global handle callbacks. This must be done after the
   // GC is completely done, because the callbacks may invoke arbitrary
   // API functions.
   // At the same time deallocate all DESTROYED nodes
   ASSERT(Heap::gc_state() == Heap::NOT_IN_GC);
+  const int initial_post_gc_processing_count = ++post_gc_processing_count;
   Node** p = &head_;
   while (*p != NULL) {
-    (*p)->PostGarbageCollectionProcessing();
+    if ((*p)->PostGarbageCollectionProcessing()) {
+      if (initial_post_gc_processing_count != post_gc_processing_count) {
+        // Weak callback triggered another GC and another round of
+        // PostGarbageCollection processing.  The current node might
+        // have been deleted in that round, so we need to bail out (or
+        // restart the processing).
+        break;
+      }
+    }
     if ((*p)->state_ == Node::DESTROYED) {
       // Delete the link.
       Node* node = *p;
@@ -350,29 +374,26 @@ void GlobalHandles::Print() {
 
 #endif
 
-List<ObjectGroup*> GlobalHandles::object_groups_(4);
+List<ObjectGroup*>* GlobalHandles::ObjectGroups() {
+  // Lazily initialize the list to avoid startup time static constructors.
+  static List<ObjectGroup*> groups(4);
+  return &groups;
+}
 
-void GlobalHandles::AddToGroup(void* id, Object** handle) {
-  for (int i = 0; i < object_groups_.length(); i++) {
-    ObjectGroup* entry = object_groups_[i];
-    if (entry->id_ == id) {
-      entry->objects_.Add(handle);
-      return;
-    }
-  }
-
-  // not found
-  ObjectGroup* new_entry = new ObjectGroup(id);
-  new_entry->objects_.Add(handle);
-  object_groups_.Add(new_entry);
+void GlobalHandles::AddGroup(Object*** handles, size_t length) {
+  ObjectGroup* new_entry = new ObjectGroup(length);
+  for (size_t i = 0; i < length; ++i)
+    new_entry->objects_.Add(handles[i]);
+  ObjectGroups()->Add(new_entry);
 }
 
 
 void GlobalHandles::RemoveObjectGroups() {
-  for (int i = 0; i< object_groups_.length(); i++) {
-    delete object_groups_[i];
+  List<ObjectGroup*>* object_groups = ObjectGroups();
+  for (int i = 0; i< object_groups->length(); i++) {
+    delete object_groups->at(i);
   }
-  object_groups_.Clear();
+  object_groups->Clear();
 }
 
 

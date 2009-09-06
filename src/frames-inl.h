@@ -29,24 +29,23 @@
 #define V8_FRAMES_INL_H_
 
 #include "frames.h"
-#if defined(ARM) || defined (__arm__) || defined(__thumb__)
-#include "frames-arm.h"
+
+#if V8_TARGET_ARCH_IA32
+#include "ia32/frames-ia32.h"
+#elif V8_TARGET_ARCH_X64
+#include "x64/frames-x64.h"
+#elif V8_TARGET_ARCH_ARM
+#include "arm/frames-arm.h"
 #else
-#include "frames-ia32.h"
+#error Unsupported target architecture.
 #endif
 
-
-namespace v8 { namespace internal {
+namespace v8 {
+namespace internal {
 
 
 inline Address StackHandler::address() const {
-  // NOTE: There's an obvious problem with the address of the NULL
-  // stack handler. Right now, it benefits us that the subtraction
-  // leads to a very high address (above everything else on the
-  // stack), but maybe we should stop relying on it?
-  const int displacement = StackHandlerConstants::kAddressDisplacement;
-  Address address = reinterpret_cast<Address>(const_cast<StackHandler*>(this));
-  return address + displacement;
+  return reinterpret_cast<Address>(const_cast<StackHandler*>(this));
 }
 
 
@@ -65,13 +64,7 @@ inline bool StackHandler::includes(Address address) const {
 
 inline void StackHandler::Iterate(ObjectVisitor* v) const {
   // Stack handlers do not contain any pointers that need to be
-  // traversed. The only field that have to worry about is the code
-  // field which is unused and should always be uninitialized.
-#ifdef DEBUG
-  const int offset = StackHandlerConstants::kCodeOffset;
-  Object* code = Memory::Object_at(address() + offset);
-  ASSERT(Smi::cast(code)->value() == StackHandler::kCodeNotPresent);
-#endif
+  // traversed.
 }
 
 
@@ -119,11 +112,6 @@ inline Object* StandardFrame::context() const {
 }
 
 
-inline Address StandardFrame::caller_sp() const {
-  return pp();
-}
-
-
 inline Address StandardFrame::caller_fp() const {
   return Memory::Address_at(fp() + StandardFrameConstants::kCallerFPOffset);
 }
@@ -140,8 +128,9 @@ inline Address StandardFrame::ComputePCAddress(Address fp) {
 
 
 inline bool StandardFrame::IsArgumentsAdaptorFrame(Address fp) {
-  int context = Memory::int_at(fp + StandardFrameConstants::kContextOffset);
-  return context == ArgumentsAdaptorFrame::SENTINEL;
+  Object* marker =
+      Memory::Object_at(fp + StandardFrameConstants::kContextOffset);
+  return marker == Smi::FromInt(StackFrame::ARGUMENTS_ADAPTOR);
 }
 
 
@@ -154,13 +143,13 @@ inline bool StandardFrame::IsConstructFrame(Address fp) {
 
 inline Object* JavaScriptFrame::receiver() const {
   const int offset = JavaScriptFrameConstants::kReceiverOffset;
-  return Memory::Object_at(pp() + offset);
+  return Memory::Object_at(caller_sp() + offset);
 }
 
 
 inline void JavaScriptFrame::set_receiver(Object* value) {
   const int offset = JavaScriptFrameConstants::kReceiverOffset;
-  Memory::Object_at(pp() + offset) = value;
+  Memory::Object_at(caller_sp() + offset) = value;
 }
 
 
@@ -169,7 +158,15 @@ inline bool JavaScriptFrame::has_adapted_arguments() const {
 }
 
 
-inline JavaScriptFrame* JavaScriptFrameIterator::frame() const {
+inline Object* JavaScriptFrame::function() const {
+  Object* result = function_slot_object();
+  ASSERT(result->IsJSFunction());
+  return result;
+}
+
+
+template<typename Iterator>
+inline JavaScriptFrame* JavaScriptFrameIteratorTemp<Iterator>::frame() const {
   // TODO(1233797): The frame hierarchy needs to change. It's
   // problematic that we can't use the safe-cast operator to cast to
   // the JavaScript frame type, because we may encounter arguments
@@ -177,6 +174,39 @@ inline JavaScriptFrame* JavaScriptFrameIterator::frame() const {
   StackFrame* frame = iterator_.frame();
   ASSERT(frame->is_java_script() || frame->is_arguments_adaptor());
   return static_cast<JavaScriptFrame*>(frame);
+}
+
+
+template<typename Iterator>
+JavaScriptFrameIteratorTemp<Iterator>::JavaScriptFrameIteratorTemp(
+    StackFrame::Id id) {
+  while (!done()) {
+    Advance();
+    if (frame()->id() == id) return;
+  }
+}
+
+
+template<typename Iterator>
+void JavaScriptFrameIteratorTemp<Iterator>::Advance() {
+  do {
+    iterator_.Advance();
+  } while (!iterator_.done() && !iterator_.frame()->is_java_script());
+}
+
+
+template<typename Iterator>
+void JavaScriptFrameIteratorTemp<Iterator>::AdvanceToArgumentsFrame() {
+  if (!frame()->has_adapted_arguments()) return;
+  iterator_.Advance();
+  ASSERT(iterator_.frame()->is_arguments_adaptor());
+}
+
+
+template<typename Iterator>
+void JavaScriptFrameIteratorTemp<Iterator>::Reset() {
+  iterator_.Reset();
+  if (!done()) Advance();
 }
 
 

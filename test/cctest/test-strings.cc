@@ -9,8 +9,10 @@
 
 #include "v8.h"
 
+#include "api.h"
 #include "factory.h"
 #include "cctest.h"
+#include "zone-inl.h"
 
 unsigned int seed = 123;
 
@@ -48,6 +50,8 @@ static const int SUPER_DEEP_DEPTH = 80 * 1024;
 
 static void InitializeBuildingBlocks(
     Handle<String> building_blocks[NUMBER_OF_BUILDING_BLOCKS]) {
+  // A list of pointers that we don't have any interest in cleaning up.
+  // If they are reachable from a root then leak detection won't complain.
   for (int i = 0; i < NUMBER_OF_BUILDING_BLOCKS; i++) {
     int len = gen() % 16;
     if (len > 14) {
@@ -80,7 +84,7 @@ static void InitializeBuildingBlocks(
       }
       case 2: {
         class Resource: public v8::String::ExternalStringResource,
-                        public Malloced {
+                        public ZoneObject {
          public:
           explicit Resource(Vector<const uc16> string): data_(string.start()) {
             length_ = string.length();
@@ -92,7 +96,7 @@ static void InitializeBuildingBlocks(
           const uc16* data_;
           size_t length_;
         };
-        uc16* buf = NewArray<uc16>(len);
+        uc16* buf = Zone::NewArray<uc16>(len);
         for (int j = 0; j < len; j++) {
           buf[j] = gen() % 65536;
         }
@@ -113,6 +117,7 @@ static void InitializeBuildingBlocks(
         for (int j = 0; j < len; j++) {
           CHECK_EQ(buf[j], building_blocks[i]->Get(j));
         }
+        DeleteArray<char>(buf);
         break;
       }
     }
@@ -125,9 +130,9 @@ static Handle<String> ConstructLeft(
     int depth) {
   Handle<String> answer = Factory::NewStringFromAscii(CStrVector(""));
   for (int i = 0; i < depth; i++) {
-    answer =
-        Factory::NewConsString(answer,
-                               building_blocks[i % NUMBER_OF_BUILDING_BLOCKS]);
+    answer = Factory::NewConsString(
+        answer,
+        building_blocks[i % NUMBER_OF_BUILDING_BLOCKS]);
   }
   return answer;
 }
@@ -138,9 +143,9 @@ static Handle<String> ConstructRight(
     int depth) {
   Handle<String> answer = Factory::NewStringFromAscii(CStrVector(""));
   for (int i = depth - 1; i >= 0; i--) {
-    answer =
-        Factory::NewConsString(building_blocks[i % NUMBER_OF_BUILDING_BLOCKS],
-                               answer);
+    answer = Factory::NewConsString(
+        building_blocks[i % NUMBER_OF_BUILDING_BLOCKS],
+        answer);
   }
   return answer;
 }
@@ -150,7 +155,7 @@ static Handle<String> ConstructBalancedHelper(
     Handle<String> building_blocks[NUMBER_OF_BUILDING_BLOCKS],
     int from,
     int to) {
-  ASSERT(to > from);
+  CHECK(to > from);
   if (to - from == 1) {
     return building_blocks[from % NUMBER_OF_BUILDING_BLOCKS];
   }
@@ -159,9 +164,11 @@ static Handle<String> ConstructBalancedHelper(
         building_blocks[from % NUMBER_OF_BUILDING_BLOCKS],
         building_blocks[(from+1) % NUMBER_OF_BUILDING_BLOCKS]);
   }
-  return Factory::NewConsString(
-    ConstructBalancedHelper(building_blocks, from, from + ((to - from) / 2)),
-    ConstructBalancedHelper(building_blocks, from + ((to - from) / 2), to));
+  Handle<String> part1 =
+    ConstructBalancedHelper(building_blocks, from, from + ((to - from) / 2));
+  Handle<String> part2 =
+    ConstructBalancedHelper(building_blocks, from + ((to - from) / 2), to);
+  return Factory::NewConsString(part1, part2);
 }
 
 
@@ -209,6 +216,7 @@ TEST(Traverse) {
   InitializeVM();
   v8::HandleScope scope;
   Handle<String> building_blocks[NUMBER_OF_BUILDING_BLOCKS];
+  ZoneScope zone(DELETE_ON_EXIT);
   InitializeBuildingBlocks(building_blocks);
   Handle<String> flat = ConstructBalanced(building_blocks);
   FlattenString(flat);
@@ -262,7 +270,9 @@ TEST(Traverse) {
 static Handle<String> SliceOf(Handle<String> underlying) {
   int start = gen() % underlying->length();
   int end = start + gen() % (underlying->length() - start);
-  return Factory::NewStringSlice(underlying, start, end);
+  return Factory::NewStringSlice(underlying,
+                                 start,
+                                 end);
 }
 
 
@@ -270,7 +280,7 @@ static Handle<String> ConstructSliceTree(
     Handle<String> building_blocks[NUMBER_OF_BUILDING_BLOCKS],
     int from,
     int to) {
-  ASSERT(to > from);
+  CHECK(to > from);
   if (to - from <= 1)
     return SliceOf(building_blocks[from % NUMBER_OF_BUILDING_BLOCKS]);
   if (to - from == 2) {
@@ -282,9 +292,11 @@ static Handle<String> ConstructSliceTree(
       rhs = SliceOf(rhs);
     return Factory::NewConsString(lhs, rhs);
   }
-  Handle<String> branch = Factory::NewConsString(
-    ConstructBalancedHelper(building_blocks, from, from + ((to - from) / 2)),
-    ConstructBalancedHelper(building_blocks, from + ((to - from) / 2), to));
+  Handle<String> part1 =
+    ConstructBalancedHelper(building_blocks, from, from + ((to - from) / 2));
+  Handle<String> part2 =
+    ConstructBalancedHelper(building_blocks, from + ((to - from) / 2), to);
+  Handle<String> branch = Factory::NewConsString(part1, part2);
   if (gen() % 2 == 0)
     return branch;
   return(SliceOf(branch));
@@ -296,6 +308,7 @@ TEST(Slice) {
   InitializeVM();
   v8::HandleScope scope;
   Handle<String> building_blocks[NUMBER_OF_BUILDING_BLOCKS];
+  ZoneScope zone(DELETE_ON_EXIT);
   InitializeBuildingBlocks(building_blocks);
 
   seed = 42;
@@ -332,6 +345,7 @@ TEST(DeepAscii) {
   for (int i = 0; i < 500; i++) {
     TraverseFirst(flat_string, string, DEEP_ASCII_DEPTH);
   }
+  DeleteArray<char>(foo);
 }
 
 
@@ -373,4 +387,130 @@ TEST(Utf8Conversion) {
     for (int j = lengths[i]; j < 11; j++)
       CHECK_EQ(kNoChar, buffer[j]);
   }
+}
+
+
+class TwoByteResource: public v8::String::ExternalStringResource {
+ public:
+  TwoByteResource(const uint16_t* data, size_t length, bool* destructed)
+      : data_(data), length_(length), destructed_(destructed) {
+    CHECK_NE(destructed, NULL);
+    *destructed_ = false;
+  }
+
+  virtual ~TwoByteResource() {
+    CHECK_NE(destructed_, NULL);
+    CHECK(!*destructed_);
+    *destructed_ = true;
+  }
+
+  const uint16_t* data() const { return data_; }
+  size_t length() const { return length_; }
+
+ private:
+  const uint16_t* data_;
+  size_t length_;
+  bool* destructed_;
+};
+
+
+// Regression test case for http://crbug.com/9746. The problem was
+// that when we marked objects reachable only through weak pointers,
+// we ended up keeping a sliced symbol alive, even though we already
+// invoked the weak callback on the underlying external string thus
+// deleting its resource.
+TEST(Regress9746) {
+  InitializeVM();
+
+  // Setup lengths that guarantee we'll get slices instead of simple
+  // flat strings.
+  static const int kFullStringLength = String::kMinNonFlatLength * 2;
+  static const int kSliceStringLength = String::kMinNonFlatLength + 1;
+
+  uint16_t* source = new uint16_t[kFullStringLength];
+  for (int i = 0; i < kFullStringLength; i++) source[i] = '1';
+  char* key = new char[kSliceStringLength];
+  for (int i = 0; i < kSliceStringLength; i++) key[i] = '1';
+  Vector<const char> key_vector(key, kSliceStringLength);
+
+  // Allocate an external string resource that keeps track of when it
+  // is destructed.
+  bool resource_destructed = false;
+  TwoByteResource* resource =
+      new TwoByteResource(source, kFullStringLength, &resource_destructed);
+
+  {
+    v8::HandleScope scope;
+
+    // Allocate an external string resource and external string. We
+    // have to go through the API to get the weak handle and the
+    // automatic destruction going.
+    Handle<String> string =
+        v8::Utils::OpenHandle(*v8::String::NewExternal(resource));
+
+    // Create a slice of the external string.
+    Handle<String> slice =
+        Factory::NewStringSlice(string, 0, kSliceStringLength);
+    CHECK_EQ(kSliceStringLength, slice->length());
+    CHECK(StringShape(*slice).IsSliced());
+
+    // Make sure the slice ends up in old space so we can morph it
+    // into a symbol.
+    while (Heap::InNewSpace(*slice)) {
+      Heap::PerformScavenge();
+    }
+
+    // Force the slice into the symbol table.
+    slice = Factory::SymbolFromString(slice);
+    CHECK(slice->IsSymbol());
+    CHECK(StringShape(*slice).IsSliced());
+
+    Handle<String> buffer(Handle<SlicedString>::cast(slice)->buffer());
+    CHECK(StringShape(*buffer).IsExternal());
+    CHECK(buffer->IsTwoByteRepresentation());
+
+    // Finally, base a script on the slice of the external string and
+    // get its wrapper. This allocates yet another weak handle that
+    // indirectly refers to the external string.
+    Handle<Script> script = Factory::NewScript(slice);
+    Handle<JSObject> wrapper = GetScriptWrapper(script);
+  }
+
+  // When we collect all garbage, we cannot get rid of the sliced
+  // symbol entry in the symbol table because it is used by the script
+  // kept alive by the weak wrapper. Make sure we don't destruct the
+  // external string.
+  Heap::CollectAllGarbage(false);
+  CHECK(!resource_destructed);
+
+  {
+    v8::HandleScope scope;
+
+    // Make sure the sliced symbol is still in the table.
+    Handle<String> symbol = Factory::LookupSymbol(key_vector);
+    CHECK(StringShape(*symbol).IsSliced());
+
+    // Make sure the buffer is still a two-byte external string.
+    Handle<String> buffer(Handle<SlicedString>::cast(symbol)->buffer());
+    CHECK(StringShape(*buffer).IsExternal());
+    CHECK(buffer->IsTwoByteRepresentation());
+  }
+
+  // Forcing another garbage collection should let us get rid of the
+  // slice from the symbol table. The external string remains in the
+  // heap until the next GC.
+  Heap::CollectAllGarbage(false);
+  CHECK(!resource_destructed);
+  v8::HandleScope scope;
+  Handle<String> key_string = Factory::NewStringFromAscii(key_vector);
+  String* out;
+  CHECK(!Heap::LookupSymbolIfExists(*key_string, &out));
+
+  // Forcing yet another garbage collection must allow us to finally
+  // get rid of the external string.
+  Heap::CollectAllGarbage(false);
+  CHECK(resource_destructed);
+
+  delete[] source;
+  delete[] key;
 }

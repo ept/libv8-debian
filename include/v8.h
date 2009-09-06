@@ -41,18 +41,28 @@
 #include <stdio.h>
 
 #ifdef _WIN32
+// When compiling on MinGW stdint.h is available.
+#ifdef __MINGW32__
+#include <stdint.h>
+#else  // __MINGW32__
+typedef signed char int8_t;
+typedef unsigned char uint8_t;
+typedef short int16_t;  // NOLINT
+typedef unsigned short uint16_t;  // NOLINT
 typedef int int32_t;
 typedef unsigned int uint32_t;
-typedef unsigned short uint16_t;  // NOLINT
-typedef long long int64_t;  // NOLINT
+typedef __int64 int64_t;
+typedef unsigned __int64 uint64_t;
+// intptr_t and friends are defined in crtdefs.h through stdio.h.
+#endif  // __MINGW32__
 
 // Setup for Windows DLL export/import. When building the V8 DLL the
 // BUILDING_V8_SHARED needs to be defined. When building a program which uses
 // the V8 DLL USING_V8_SHARED needs to be defined. When either building the V8
 // static library or building a program which uses the V8 static library neither
 // BUILDING_V8_SHARED nor USING_V8_SHARED should be defined.
-// The reason for having both EXPORT and EXPORT_INLINE is that classes which
-// have their code inside this header file needs to have __declspec(dllexport)
+// The reason for having both V8EXPORT and V8EXPORT_INLINE is that classes which
+// have their code inside this header file need to have __declspec(dllexport)
 // when building the DLL but cannot have __declspec(dllimport) when building
 // a program which uses the DLL.
 #if defined(BUILDING_V8_SHARED) && defined(USING_V8_SHARED)
@@ -61,30 +71,29 @@ typedef long long int64_t;  // NOLINT
 #endif
 
 #ifdef BUILDING_V8_SHARED
-#define EXPORT __declspec(dllexport)
-#define EXPORT_INLINE __declspec(dllexport)
+#define V8EXPORT __declspec(dllexport)
+#define V8EXPORT_INLINE __declspec(dllexport)
 #elif USING_V8_SHARED
-#define EXPORT __declspec(dllimport)
-#define EXPORT_INLINE
+#define V8EXPORT __declspec(dllimport)
+#define V8EXPORT_INLINE
 #else
-#define EXPORT
-#define EXPORT_INLINE
+#define V8EXPORT
+#define V8EXPORT_INLINE
 #endif  // BUILDING_V8_SHARED
 
 #else  // _WIN32
 
 #include <stdint.h>
 
-// Setup for Linux shared library export. There is no need to destinguish
-// neither between building or using the V8 shared library nor between using
-// the shared or static V8 library as there is on Windows. Therefore there is
-// no checking of BUILDING_V8_SHARED and USING_V8_SHARED.
-#if defined(__GNUC__) && (__GNUC__ >= 4)
-#define EXPORT __attribute__ ((visibility("default")))
-#define EXPORT_INLINE __attribute__ ((visibility("default")))
+// Setup for Linux shared library export. There is no need to distinguish
+// between building or using the V8 shared library, but we should not
+// export symbols when we are building a static library.
+#if defined(__GNUC__) && (__GNUC__ >= 4) && defined(V8_SHARED)
+#define V8EXPORT __attribute__ ((visibility("default")))
+#define V8EXPORT_INLINE __attribute__ ((visibility("default")))
 #else  // defined(__GNUC__) && (__GNUC__ >= 4)
-#define EXPORT
-#define EXPORT_INLINE
+#define V8EXPORT
+#define V8EXPORT_INLINE
 #endif  // defined(__GNUC__) && (__GNUC__ >= 4)
 
 #endif  // _WIN32
@@ -118,6 +127,12 @@ class FunctionTemplate;
 class ObjectTemplate;
 class Data;
 
+namespace internal {
+
+class Object;
+
+}
+
 
 // --- W e a k  H a n d l e s
 
@@ -128,7 +143,7 @@ class Data;
  * \param object the weak global object to be reclaimed by the garbage collector
  * \param parameter the value passed in when making the weak global object
  */
-typedef void (*WeakReferenceCallback)(Persistent<Object> object,
+typedef void (*WeakReferenceCallback)(Persistent<Value> object,
                                       void* parameter);
 
 
@@ -164,13 +179,13 @@ typedef void (*WeakReferenceCallback)(Persistent<Object> object,
  * behind the scenes and the same rules apply to these values as to
  * their handles.
  */
-template <class T> class EXPORT_INLINE Handle {
+template <class T> class V8EXPORT_INLINE Handle {
  public:
 
   /**
    * Creates an empty handle.
    */
-  Handle();
+  inline Handle();
 
   /**
    * Creates a new handle for the specified value.
@@ -200,11 +215,11 @@ template <class T> class EXPORT_INLINE Handle {
   /**
    * Returns true if the handle is empty.
    */
-  bool IsEmpty() { return val_ == 0; }
+  bool IsEmpty() const { return val_ == 0; }
 
-  T* operator->();
+  T* operator->() const { return val_; }
 
-  T* operator*();
+  T* operator*() const { return val_; }
 
   /**
    * Sets the handle to be empty. IsEmpty() will then return true.
@@ -217,9 +232,9 @@ template <class T> class EXPORT_INLINE Handle {
    * to which they refer are identical.
    * The handles' references are not checked.
    */
-  template <class S> bool operator==(Handle<S> that) {
-    void** a = reinterpret_cast<void**>(**this);
-    void** b = reinterpret_cast<void**>(*that);
+  template <class S> bool operator==(Handle<S> that) const {
+    internal::Object** a = reinterpret_cast<internal::Object**>(**this);
+    internal::Object** b = reinterpret_cast<internal::Object**>(*that);
     if (a == 0) return b == 0;
     if (b == 0) return false;
     return *a == *b;
@@ -231,12 +246,16 @@ template <class T> class EXPORT_INLINE Handle {
    * the objects to which they refer are different.
    * The handles' references are not checked.
    */
-  template <class S> bool operator!=(Handle<S> that) {
+  template <class S> bool operator!=(Handle<S> that) const {
     return !operator==(that);
   }
 
   template <class S> static inline Handle<T> Cast(Handle<S> that) {
+#ifdef V8_ENABLE_CHECKS
+    // If we're going to perform the type check then we have to check
+    // that the handle isn't empty before doing the checked cast.
     if (that.IsEmpty()) return Handle<T>();
+#endif
     return Handle<T>(T::Cast(*that));
   }
 
@@ -252,9 +271,9 @@ template <class T> class EXPORT_INLINE Handle {
  * handle scope are destroyed when the handle scope is destroyed.  Hence it
  * is not necessary to explicitly deallocate local handles.
  */
-template <class T> class EXPORT_INLINE Local : public Handle<T> {
+template <class T> class V8EXPORT_INLINE Local : public Handle<T> {
  public:
-  Local();
+  inline Local();
   template <class S> inline Local(Local<S> that)
       : Handle<T>(reinterpret_cast<T*>(*that)) {
     /**
@@ -266,7 +285,11 @@ template <class T> class EXPORT_INLINE Local : public Handle<T> {
   }
   template <class S> inline Local(S* that) : Handle<T>(that) { }
   template <class S> static inline Local<T> Cast(Local<S> that) {
+#ifdef V8_ENABLE_CHECKS
+    // If we're going to perform the type check then we have to check
+    // that the handle isn't empty before doing the checked cast.
     if (that.IsEmpty()) return Local<T>();
+#endif
     return Local<T>(T::Cast(*that));
   }
 
@@ -274,7 +297,7 @@ template <class T> class EXPORT_INLINE Local : public Handle<T> {
    *  The referee is kept alive by the local handle even when
    *  the original handle is destroyed/disposed.
    */
-  static Local<T> New(Handle<T> that);
+  inline static Local<T> New(Handle<T> that);
 };
 
 
@@ -295,14 +318,14 @@ template <class T> class EXPORT_INLINE Local : public Handle<T> {
  * different storage cells but rather two references to the same
  * storage cell.
  */
-template <class T> class EXPORT_INLINE Persistent : public Handle<T> {
+template <class T> class V8EXPORT_INLINE Persistent : public Handle<T> {
  public:
 
   /**
    * Creates an empty persistent handle that doesn't point to any
    * storage cell.
    */
-  Persistent();
+  inline Persistent();
 
   /**
    * Creates a persistent handle for the same storage cell as the
@@ -327,11 +350,19 @@ template <class T> class EXPORT_INLINE Persistent : public Handle<T> {
 
   template <class S> inline Persistent(S* that) : Handle<T>(that) { }
 
+  /**
+   * "Casts" a plain handle which is known to be a persistent handle
+   * to a persistent handle.
+   */
   template <class S> explicit inline Persistent(Handle<S> that)
       : Handle<T>(*that) { }
 
   template <class S> static inline Persistent<T> Cast(Persistent<S> that) {
+#ifdef V8_ENABLE_CHECKS
+    // If we're going to perform the type check then we have to check
+    // that the handle isn't empty before doing the checked cast.
     if (that.IsEmpty()) return Persistent<T>();
+#endif
     return Persistent<T>(T::Cast(*that));
   }
 
@@ -339,7 +370,7 @@ template <class T> class EXPORT_INLINE Persistent : public Handle<T> {
    * Creates a new persistent handle for an existing local or
    * persistent handle.
    */
-  static Persistent<T> New(Handle<T> that);
+  inline static Persistent<T> New(Handle<T> that);
 
   /**
    * Releases the storage cell referenced by this persistent handle.
@@ -347,7 +378,7 @@ template <class T> class EXPORT_INLINE Persistent : public Handle<T> {
    * This handle's reference, and any any other references to the storage
    * cell remain and IsEmpty will still return false.
    */
-  void Dispose();
+  inline void Dispose();
 
   /**
    * Make the reference to this object weak.  When only weak handles
@@ -355,20 +386,20 @@ template <class T> class EXPORT_INLINE Persistent : public Handle<T> {
    * callback to the given V8::WeakReferenceCallback function, passing
    * it the object reference and the given parameters.
    */
-  void MakeWeak(void* parameters, WeakReferenceCallback callback);
+  inline void MakeWeak(void* parameters, WeakReferenceCallback callback);
 
   /** Clears the weak reference to this object.*/
-  void ClearWeak();
+  inline void ClearWeak();
 
   /**
    *Checks if the handle holds the only reference to an object.
    */
-  bool IsNearDeath();
+  inline bool IsNearDeath() const;
 
   /**
    * Returns true if the handle's reference is weak.
    */
-  bool IsWeak();
+  inline bool IsWeak() const;
 
  private:
   friend class ImplementationUtilities;
@@ -390,21 +421,13 @@ template <class T> class EXPORT_INLINE Persistent : public Handle<T> {
  * handle and may deallocate it.  The behavior of accessing a handle
  * for which the handle scope has been deleted is undefined.
  */
-class EXPORT HandleScope {
+class V8EXPORT HandleScope {
  public:
-  HandleScope() : previous_(current_), is_closed_(false) {
-    current_.extensions = 0;
-  }
+  HandleScope();
 
-  ~HandleScope() {
-    // TODO(1245391): In a perfect world, there would be a way of not
-    // having to check for explicitly closed scopes maybe through
-    // subclassing HandleScope?
-    if (!is_closed_) RestorePreviousState();
-  }
+  ~HandleScope();
 
   /**
-   * TODO(1245391): Consider introducing a subclass for this.
    * Closes the handle scope and returns the value as a handle in the
    * previous scope, which is the new current scope after the call.
    */
@@ -418,7 +441,7 @@ class EXPORT HandleScope {
   /**
    * Creates a new handle with the given value.
    */
-  static void** CreateHandle(void* value);
+  static internal::Object** CreateHandle(internal::Object* value);
 
  private:
   // Make it impossible to create heap-allocated or illegal handle
@@ -428,41 +451,25 @@ class EXPORT HandleScope {
   void* operator new(size_t size);
   void operator delete(void*, size_t);
 
-  class EXPORT Data {
+  // This Data class is accessible internally through a typedef in the
+  // ImplementationUtilities class.
+  class V8EXPORT Data {
    public:
     int extensions;
-    void** next;
-    void** limit;
+    internal::Object** next;
+    internal::Object** limit;
     inline void Initialize() {
       extensions = -1;
       next = limit = NULL;
     }
   };
 
-  static Data current_;
-  const Data previous_;
+  Data previous_;
 
-  /**
-   * Re-establishes the previous scope state. Should be called only
-   * once, and only for the current scope.
-   */
-  void RestorePreviousState() {
-    if (current_.extensions > 0) DeleteExtensions();
-    current_ = previous_;
-#ifdef DEBUG
-    ZapRange(current_.next, current_.limit);
-#endif
-  }
-
-  // TODO(1245391): Consider creating a subclass for this.
+  // Allow for the active closing of HandleScopes which allows to pass a handle
+  // from the HandleScope being closed to the next top most HandleScope.
   bool is_closed_;
-  void** RawClose(void** value);
-
-  /** Deallocates any extensions used by the current scope.*/
-  static void DeleteExtensions();
-
-  // Zaps the handles in the half-open interval [start, end).
-  static void ZapRange(void** start, void** end);
+  internal::Object** RawClose(internal::Object** value);
 
   friend class ImplementationUtilities;
 };
@@ -474,7 +481,7 @@ class EXPORT HandleScope {
 /**
  * The superclass of values and API object templates.
  */
-class EXPORT Data {
+class V8EXPORT Data {
  private:
   Data();
 };
@@ -486,7 +493,7 @@ class EXPORT Data {
  * compiling it, and can be stored between compilations.  When script
  * data is given to the compile method compilation will be faster.
  */
-class EXPORT ScriptData {  // NOLINT
+class V8EXPORT ScriptData {  // NOLINT
  public:
   virtual ~ScriptData() { }
   static ScriptData* PreCompile(const char* input, int length);
@@ -500,7 +507,7 @@ class EXPORT ScriptData {  // NOLINT
 /**
  * The origin, within a file, of a script.
  */
-class EXPORT ScriptOrigin {
+class V8EXPORT ScriptOrigin {
  public:
   ScriptOrigin(Handle<Value> resource_name,
                Handle<Integer> resource_line_offset = Handle<Integer>(),
@@ -508,9 +515,9 @@ class EXPORT ScriptOrigin {
       : resource_name_(resource_name),
         resource_line_offset_(resource_line_offset),
         resource_column_offset_(resource_column_offset) { }
-  inline Handle<Value> ResourceName();
-  inline Handle<Integer> ResourceLineOffset();
-  inline Handle<Integer> ResourceColumnOffset();
+  inline Handle<Value> ResourceName() const;
+  inline Handle<Integer> ResourceLineOffset() const;
+  inline Handle<Integer> ResourceColumnOffset() const;
  private:
   Handle<Value> resource_name_;
   Handle<Integer> resource_line_offset_;
@@ -521,13 +528,39 @@ class EXPORT ScriptOrigin {
 /**
  * A compiled JavaScript script.
  */
-class EXPORT Script {
+class V8EXPORT Script {
  public:
+
+   /**
+    * Compiles the specified script. The ScriptOrigin* and ScriptData*
+    * parameters are owned by the caller of Script::Compile. No
+    * references to these objects are kept after compilation finishes.
+    *
+    * The script object returned is context independent; when run it
+    * will use the currently entered context.
+    */
+   static Local<Script> New(Handle<String> source,
+                            ScriptOrigin* origin = NULL,
+                            ScriptData* pre_data = NULL);
+
+   /**
+    * Compiles the specified script using the specified file name
+    * object (typically a string) as the script's origin.
+    *
+    * The script object returned is context independent; when run it
+    * will use the currently entered context.
+    */
+   static Local<Script> New(Handle<String> source,
+                            Handle<Value> file_name);
 
   /**
    * Compiles the specified script. The ScriptOrigin* and ScriptData*
    * parameters are owned by the caller of Script::Compile. No
    * references to these objects are kept after compilation finishes.
+   *
+   * The script object returned is bound to the context that was active
+   * when this function was called.  When run it will always use this
+   * context.
    */
   static Local<Script> Compile(Handle<String> source,
                                ScriptOrigin* origin = NULL,
@@ -536,64 +569,85 @@ class EXPORT Script {
   /**
    * Compiles the specified script using the specified file name
    * object (typically a string) as the script's origin.
+   *
+   * The script object returned is bound to the context that was active
+   * when this function was called.  When run it will always use this
+   * context.
    */
   static Local<Script> Compile(Handle<String> source,
                                Handle<Value> file_name);
 
   /**
-   * Runs the script returning the resulting value.
+   * Runs the script returning the resulting value.  If the script is
+   * context independent (created using ::New) it will be run in the
+   * currently entered context.  If it is context specific (created
+   * using ::Compile) it will be run in the context in which it was
+   * compiled.
    */
   Local<Value> Run();
+
+  /**
+   * Returns the script id value.
+   */
+  Local<Value> Id();
+
+  /**
+   * Associate an additional data object with the script. This is mainly used
+   * with the debugger as this data object is only available through the
+   * debugger API.
+   */
+  void SetData(Handle<Value> data);
 };
 
 
 /**
  * An error message.
  */
-class EXPORT Message {
+class V8EXPORT Message {
  public:
-  Local<String> Get();
-  Local<String> GetSourceLine();
+  Local<String> Get() const;
+  Local<String> GetSourceLine() const;
 
-  // TODO(1241256): Rewrite (or remove) this method.  We don't want to
-  // deal with ownership of the returned string and we want to use
-  // JavaScript data structures exclusively.
-  char* GetUnderline(char* source_line, char underline_char);
+  /**
+   * Returns the resource name for the script from where the function causing
+   * the error originates.
+   */
+  Handle<Value> GetScriptResourceName() const;
 
-  Handle<String> GetScriptResourceName();
-
-  // TODO(1240903): Remove this when no longer used in WebKit V8
-  // bindings.
-  Handle<Value> GetSourceData();
+  /**
+   * Returns the resource data for the script from where the function causing
+   * the error originates.
+   */
+  Handle<Value> GetScriptData() const;
 
   /**
    * Returns the number, 1-based, of the line where the error occurred.
    */
-  int GetLineNumber();
+  int GetLineNumber() const;
 
   /**
    * Returns the index within the script of the first character where
    * the error occurred.
    */
-  int GetStartPosition();
+  int GetStartPosition() const;
 
   /**
    * Returns the index within the script of the last character where
    * the error occurred.
    */
-  int GetEndPosition();
+  int GetEndPosition() const;
 
   /**
    * Returns the index within the line of the first character where
    * the error occurred.
    */
-  int GetStartColumn();
+  int GetStartColumn() const;
 
   /**
    * Returns the index within the line of the last character where
    * the error occurred.
    */
-  int GetEndColumn();
+  int GetEndColumn() const;
 
   // TODO(1245381): Print to a string instead of on a FILE.
   static void PrintCurrentStackTrace(FILE* out);
@@ -606,112 +660,121 @@ class EXPORT Message {
 /**
  * The superclass of all JavaScript values and objects.
  */
-class EXPORT Value : public Data {
+class V8EXPORT Value : public Data {
  public:
 
   /**
    * Returns true if this value is the undefined value.  See ECMA-262
    * 4.3.10.
    */
-  bool IsUndefined();
+  bool IsUndefined() const;
 
   /**
    * Returns true if this value is the null value.  See ECMA-262
    * 4.3.11.
    */
-  bool IsNull();
+  bool IsNull() const;
 
    /**
    * Returns true if this value is true.
    */
-  bool IsTrue();
+  bool IsTrue() const;
 
   /**
    * Returns true if this value is false.
    */
-  bool IsFalse();
+  bool IsFalse() const;
 
   /**
    * Returns true if this value is an instance of the String type.
    * See ECMA-262 8.4.
    */
-  bool IsString();
+  inline bool IsString() const;
 
   /**
    * Returns true if this value is a function.
    */
-  bool IsFunction();
+  bool IsFunction() const;
 
   /**
    * Returns true if this value is an array.
    */
-  bool IsArray();
+  bool IsArray() const;
 
   /**
    * Returns true if this value is an object.
    */
-  bool IsObject();
+  bool IsObject() const;
 
   /**
    * Returns true if this value is boolean.
    */
-  bool IsBoolean();
+  bool IsBoolean() const;
 
   /**
    * Returns true if this value is a number.
    */
-  bool IsNumber();
+  bool IsNumber() const;
 
   /**
    * Returns true if this value is external.
    */
-  bool IsExternal();
+  bool IsExternal() const;
 
   /**
    * Returns true if this value is a 32-bit signed integer.
    */
-  bool IsInt32();
+  bool IsInt32() const;
 
-  Local<Boolean> ToBoolean();
-  Local<Number> ToNumber();
-  Local<String> ToString();
-  Local<String> ToDetailString();
-  Local<Object> ToObject();
-  Local<Integer> ToInteger();
-  Local<Uint32> ToUint32();
-  Local<Int32> ToInt32();
+  /**
+   * Returns true if this value is a Date.
+   */
+  bool IsDate() const;
+
+  Local<Boolean> ToBoolean() const;
+  Local<Number> ToNumber() const;
+  Local<String> ToString() const;
+  Local<String> ToDetailString() const;
+  Local<Object> ToObject() const;
+  Local<Integer> ToInteger() const;
+  Local<Uint32> ToUint32() const;
+  Local<Int32> ToInt32() const;
 
   /**
    * Attempts to convert a string to an array index.
    * Returns an empty handle if the conversion fails.
    */
-  Local<Uint32> ToArrayIndex();
+  Local<Uint32> ToArrayIndex() const;
 
-  bool BooleanValue();
-  double NumberValue();
-  int64_t IntegerValue();
-  uint32_t Uint32Value();
-  int32_t Int32Value();
+  bool BooleanValue() const;
+  double NumberValue() const;
+  int64_t IntegerValue() const;
+  uint32_t Uint32Value() const;
+  int32_t Int32Value() const;
 
   /** JS == */
-  bool Equals(Handle<Value> that);
-  bool StrictEquals(Handle<Value> that);
+  bool Equals(Handle<Value> that) const;
+  bool StrictEquals(Handle<Value> that) const;
+  
+ private:
+  inline bool QuickIsString() const;
+  bool FullIsString() const;
 };
 
 
 /**
  * The superclass of primitive values.  See ECMA-262 4.3.2.
  */
-class EXPORT Primitive : public Value { };
+class V8EXPORT Primitive : public Value { };
 
 
 /**
  * A primitive boolean value (ECMA-262, 4.3.14).  Either the true
  * or false value.
  */
-class EXPORT Boolean : public Primitive {
+class V8EXPORT Boolean : public Primitive {
  public:
-  bool Value();
+  bool Value() const;
   static inline Handle<Boolean> New(bool value);
 };
 
@@ -719,19 +782,19 @@ class EXPORT Boolean : public Primitive {
 /**
  * A JavaScript string value (ECMA-262, 4.3.17).
  */
-class EXPORT String : public Primitive {
+class V8EXPORT String : public Primitive {
  public:
 
   /**
    * Returns the number of characters in this string.
    */
-  int Length();
+  int Length() const;
 
   /**
    * Returns the number of bytes in the UTF-8 encoded
    * representation of this string.
    */
-  int Utf8Length();
+  int Utf8Length() const;
 
   /**
    * Write the contents of the string to an external buffer.
@@ -750,26 +813,31 @@ class EXPORT String : public Primitive {
    * \return The number of characters copied to the buffer
    * excluding the NULL terminator.
    */
-  int Write(uint16_t* buffer, int start = 0, int length = -1);  // UTF-16
-  int WriteAscii(char* buffer, int start = 0, int length = -1);  // ASCII
-  int WriteUtf8(char* buffer, int length = -1); // UTF-8
+  int Write(uint16_t* buffer, int start = 0, int length = -1) const;  // UTF-16
+  int WriteAscii(char* buffer, int start = 0, int length = -1) const;  // ASCII
+  int WriteUtf8(char* buffer, int length = -1) const; // UTF-8
+
+  /**
+   * A zero length string.
+   */
+  static v8::Local<v8::String> Empty();
 
   /**
    * Returns true if the string is external
    */
-  bool IsExternal();
+  bool IsExternal() const;
 
   /**
    * Returns true if the string is both external and ascii
    */
-  bool IsExternalAscii();
+  bool IsExternalAscii() const;
   /**
    * An ExternalStringResource is a wrapper around a two-byte string
    * buffer that resides outside V8's heap. Implement an
    * ExternalStringResource to manage the life cycle of the underlying
    * buffer.  Note that the string data must be immutable.
    */
-  class EXPORT ExternalStringResource {  // NOLINT
+  class V8EXPORT ExternalStringResource {  // NOLINT
    public:
     /**
      * Override the destructor to manage the life cycle of the underlying
@@ -799,7 +867,7 @@ class EXPORT String : public Primitive {
    * Use String::New or convert to 16 bit data for non-ASCII.
    */
 
-  class EXPORT ExternalAsciiStringResource {  // NOLINT
+  class V8EXPORT ExternalAsciiStringResource {  // NOLINT
    public:
     /**
      * Override the destructor to manage the life cycle of the underlying
@@ -819,18 +887,18 @@ class EXPORT String : public Primitive {
   };
 
   /**
-   * Get the ExternalStringResource for an external string.  Only
-   * valid if IsExternal() returns true.
+   * Get the ExternalStringResource for an external string.  Returns
+   * NULL if IsExternal() doesn't return true.
    */
-  ExternalStringResource* GetExternalStringResource();
+  inline ExternalStringResource* GetExternalStringResource() const;
 
   /**
    * Get the ExternalAsciiStringResource for an external ascii string.
-   * Only valid if IsExternalAscii() returns true.
+   * Returns NULL if IsExternalAscii() doesn't return true.
    */
-  ExternalAsciiStringResource* GetExternalAsciiStringResource();
+  ExternalAsciiStringResource* GetExternalAsciiStringResource() const;
 
-  static String* Cast(v8::Value* obj);
+  static inline String* Cast(v8::Value* obj);
 
   /**
    * Allocates a new string from either utf-8 encoded or ascii data.
@@ -860,6 +928,16 @@ class EXPORT String : public Primitive {
   static Local<String> NewExternal(ExternalStringResource* resource);
 
   /**
+   * Associate an external string resource with this string by transforming it
+   * in place so that existing references to this string in the JavaScript heap
+   * will use the external string resource. The external string resource's
+   * character contents needs to be equivalent to this string.
+   * Returns true if the string has been changed to be an external string.
+   * The string is not modified if the operation fails.
+   */
+  bool MakeExternal(ExternalStringResource* resource);
+
+  /**
    * Creates a new external string using the ascii data defined in the given
    * resource. The resource is deleted when the external string is no
    * longer live on V8's heap. The caller of this function should not
@@ -869,6 +947,21 @@ class EXPORT String : public Primitive {
    */
   static Local<String> NewExternal(ExternalAsciiStringResource* resource);
 
+  /**
+   * Associate an external string resource with this string by transforming it
+   * in place so that existing references to this string in the JavaScript heap
+   * will use the external string resource. The external string resource's
+   * character contents needs to be equivalent to this string.
+   * Returns true if the string has been changed to be an external string.
+   * The string is not modified if the operation fails.
+   */
+  bool MakeExternal(ExternalAsciiStringResource* resource);
+
+  /**
+   * Returns true if this string can be made external.
+   */
+  bool CanMakeExternal();
+
   /** Creates an undetectable string from the supplied ascii or utf-8 data.*/
   static Local<String> NewUndetectable(const char* data, int length = -1);
 
@@ -877,13 +970,16 @@ class EXPORT String : public Primitive {
 
   /**
    * Converts an object to a utf8-encoded character array.  Useful if
-   * you want to print the object.
+   * you want to print the object.  If conversion to a string fails
+   * (eg. due to an exception in the toString() method of the object)
+   * then the length() method returns 0 and the * operator returns
+   * NULL.
    */
-  class EXPORT Utf8Value {
+  class V8EXPORT Utf8Value {
    public:
     explicit Utf8Value(Handle<v8::Value> obj);
     ~Utf8Value();
-    char* operator*() { return str_; }
+    char* operator*() const { return str_; }
     int length() { return length_; }
    private:
     char* str_;
@@ -897,12 +993,15 @@ class EXPORT String : public Primitive {
   /**
    * Converts an object to an ascii string.
    * Useful if you want to print the object.
+   * If conversion to a string fails (eg. due to an exception in the toString()
+   * method of the object) then the length() method returns 0 and the * operator
+   * returns NULL.
    */
-  class EXPORT AsciiValue {
+  class V8EXPORT AsciiValue {
    public:
     explicit AsciiValue(Handle<v8::Value> obj);
     ~AsciiValue();
-    char* operator*() { return str_; }
+    char* operator*() const { return str_; }
     int length() { return length_; }
    private:
     char* str_;
@@ -915,12 +1014,15 @@ class EXPORT String : public Primitive {
 
   /**
    * Converts an object to a two-byte string.
+   * If conversion to a string fails (eg. due to an exception in the toString()
+   * method of the object) then the length() method returns 0 and the * operator
+   * returns NULL.
    */
-  class EXPORT Value {
+  class V8EXPORT Value {
    public:
     explicit Value(Handle<v8::Value> obj);
     ~Value();
-    uint16_t* operator*() { return str_; }
+    uint16_t* operator*() const { return str_; }
     int length() { return length_; }
    private:
     uint16_t* str_;
@@ -930,41 +1032,47 @@ class EXPORT String : public Primitive {
     Value(const Value&);
     void operator=(const Value&);
   };
+  
+ private:
+  void VerifyExternalStringResource(ExternalStringResource* val) const;
+  static void CheckCast(v8::Value* obj);
 };
 
 
 /**
  * A JavaScript number value (ECMA-262, 4.3.20)
  */
-class EXPORT Number : public Primitive {
+class V8EXPORT Number : public Primitive {
  public:
-  double Value();
+  double Value() const;
   static Local<Number> New(double value);
-  static Number* Cast(v8::Value* obj);
+  static inline Number* Cast(v8::Value* obj);
  private:
   Number();
+  static void CheckCast(v8::Value* obj);
 };
 
 
 /**
  * A JavaScript value representing a signed integer.
  */
-class EXPORT Integer : public Number {
+class V8EXPORT Integer : public Number {
  public:
   static Local<Integer> New(int32_t value);
-  int64_t Value();
-  static Integer* Cast(v8::Value* obj);
+  int64_t Value() const;
+  static inline Integer* Cast(v8::Value* obj);
  private:
   Integer();
+  static void CheckCast(v8::Value* obj);
 };
 
 
 /**
  * A JavaScript value representing a 32-bit signed integer.
  */
-class EXPORT Int32 : public Integer {
+class V8EXPORT Int32 : public Integer {
  public:
-  int32_t Value();
+  int32_t Value() const;
  private:
   Int32();
 };
@@ -973,9 +1081,9 @@ class EXPORT Int32 : public Integer {
 /**
  * A JavaScript value representing a 32-bit unsigned integer.
  */
-class EXPORT Uint32 : public Integer {
+class V8EXPORT Uint32 : public Integer {
  public:
-  uint32_t Value();
+  uint32_t Value() const;
  private:
   Uint32();
 };
@@ -984,9 +1092,19 @@ class EXPORT Uint32 : public Integer {
 /**
  * An instance of the built-in Date constructor (ECMA-262, 15.9).
  */
-class EXPORT Date : public Value {
+class V8EXPORT Date : public Value {
  public:
   static Local<Value> New(double time);
+
+  /**
+   * A specialization of Value::NumberValue that is more efficient
+   * because we know the structure of this object.
+   */
+  double NumberValue() const;
+
+  static inline Date* Cast(v8::Value* obj);
+ private:
+  static void CheckCast(v8::Value* obj);
 };
 
 
@@ -1000,19 +1118,47 @@ enum PropertyAttribute {
 /**
  * A JavaScript object (ECMA-262, 4.3.3)
  */
-class EXPORT Object : public Value {
+class V8EXPORT Object : public Value {
  public:
   bool Set(Handle<Value> key,
            Handle<Value> value,
            PropertyAttribute attribs = None);
+
+  // Sets a local property on this object bypassing interceptors and
+  // overriding accessors or read-only properties.
+  //
+  // Note that if the object has an interceptor the property will be set
+  // locally, but since the interceptor takes precedence the local property
+  // will only be returned if the interceptor doesn't return a value.
+  //
+  // Note also that this only works for named properties.
+  bool ForceSet(Handle<Value> key,
+                Handle<Value> value,
+                PropertyAttribute attribs = None);
+
   Local<Value> Get(Handle<Value> key);
 
   // TODO(1245389): Replace the type-specific versions of these
   // functions with generic ones that accept a Handle<Value> key.
   bool Has(Handle<String> key);
+
   bool Delete(Handle<String> key);
+
+  // Delete a property on this object bypassing interceptors and
+  // ignoring dont-delete attributes.
+  bool ForceDelete(Handle<Value> key);
+
   bool Has(uint32_t index);
+
   bool Delete(uint32_t index);
+
+  /**
+   * Returns an array containing the names of the enumerable properties
+   * of this object, including properties from prototype objects.  The
+   * array returned by this method contains the same values as would
+   * be enumerated by a for-in statement over this object.
+   */
+  Local<Array> GetPropertyNames();
 
   /**
    * Get the prototype object.  This does not skip objects marked to
@@ -1020,6 +1166,12 @@ class EXPORT Object : public Value {
    * handler.
    */
   Local<Value> GetPrototype();
+
+  /**
+   * Finds an instance of the given function template in the prototype
+   * chain.
+   */
+  Local<Object> FindInstanceInPrototypeChain(Handle<FunctionTemplate> tmpl);
 
   /**
    * Call builtin Object.prototype.toString on this object.
@@ -1031,9 +1183,15 @@ class EXPORT Object : public Value {
   /** Gets the number of internal fields for this Object. */
   int InternalFieldCount();
   /** Gets the value in an internal field. */
-  Local<Value> GetInternalField(int index);
+  inline Local<Value> GetInternalField(int index);
   /** Sets the value in an internal field. */
   void SetInternalField(int index, Handle<Value> value);
+
+  /** Gets a native pointer from an internal field. */
+  inline void* GetPointerFromInternalField(int index);
+  
+  /** Sets a native pointer in an internal field. */
+  void SetPointerInInternalField(int index, void* value);
 
   // Testers for local properties.
   bool HasRealNamedProperty(Handle<String> key);
@@ -1052,56 +1210,124 @@ class EXPORT Object : public Value {
   /** Tests for an index lookup interceptor.*/
   bool HasIndexedLookupInterceptor();
 
+  /**
+   * Turns on access check on the object if the object is an instance of
+   * a template that has access check callbacks. If an object has no
+   * access check info, the object cannot be accessed by anyone.
+   */
+  void TurnOnAccessCheck();
+
+  /**
+   * Returns the identity hash for this object. The current implemenation uses
+   * a hidden property on the object to store the identity hash.
+   *
+   * The return value will never be 0. Also, it is not guaranteed to be
+   * unique.
+   */
+  int GetIdentityHash();
+
+  /**
+   * Access hidden properties on JavaScript objects. These properties are
+   * hidden from the executing JavaScript and only accessible through the V8
+   * C++ API. Hidden properties introduced by V8 internally (for example the
+   * identity hash) are prefixed with "v8::".
+   */
+  bool SetHiddenValue(Handle<String> key, Handle<Value> value);
+  Local<Value> GetHiddenValue(Handle<String> key);
+  bool DeleteHiddenValue(Handle<String> key);
+
+  /**
+   * Clone this object with a fast but shallow copy.  Values will point
+   * to the same values as the original object.
+   */
+  Local<Object> Clone();
+
+  /**
+   * Set the backing store of the indexed properties to be managed by the
+   * embedding layer. Access to the indexed properties will follow the rules
+   * spelled out in CanvasPixelArray.
+   * Note: The embedding program still owns the data and needs to ensure that
+   *       the backing store is preserved while V8 has a reference.
+   */
+  void SetIndexedPropertiesToPixelData(uint8_t* data, int length);
 
   static Local<Object> New();
-  static Object* Cast(Value* obj);
+  static inline Object* Cast(Value* obj);
  private:
   Object();
+  static void CheckCast(Value* obj);
+  Local<Value> CheckedGetInternalField(int index);
+
+  /**
+   * If quick access to the internal field is possible this method
+   * returns the value.  Otherwise an empty handle is returned. 
+   */
+  inline Local<Value> UncheckedGetInternalField(int index);
 };
 
 
 /**
  * An instance of the built-in array constructor (ECMA-262, 15.4.2).
  */
-class EXPORT Array : public Object {
+class V8EXPORT Array : public Object {
  public:
-  uint32_t Length();
+  uint32_t Length() const;
+
+  /**
+   * Clones an element at index |index|.  Returns an empty
+   * handle if cloning fails (for any reason).
+   */
+  Local<Object> CloneElementAt(uint32_t index);
 
   static Local<Array> New(int length = 0);
-  static Array* Cast(Value* obj);
+  static inline Array* Cast(Value* obj);
  private:
   Array();
+  static void CheckCast(Value* obj);
 };
 
 
 /**
  * A JavaScript function object (ECMA-262, 15.3).
  */
-class EXPORT Function : public Object {
+class V8EXPORT Function : public Object {
  public:
-  Local<Object> NewInstance();
-  Local<Object> NewInstance(int argc, Handle<Value> argv[]);
+  Local<Object> NewInstance() const;
+  Local<Object> NewInstance(int argc, Handle<Value> argv[]) const;
   Local<Value> Call(Handle<Object> recv, int argc, Handle<Value> argv[]);
   void SetName(Handle<String> name);
-  Handle<Value> GetName();
-  static Function* Cast(Value* obj);
+  Handle<Value> GetName() const;
+  static inline Function* Cast(Value* obj);
  private:
   Function();
+  static void CheckCast(Value* obj);
 };
 
 
 /**
- * A JavaScript value that wraps a c++ void*.  This type of value is
- * mainly used to associate c++ data structures with JavaScript
+ * A JavaScript value that wraps a C++ void*.  This type of value is
+ * mainly used to associate C++ data structures with JavaScript
  * objects.
+ *
+ * The Wrap function V8 will return the most optimal Value object wrapping the
+ * C++ void*. The type of the value is not guaranteed to be an External object
+ * and no assumptions about its type should be made. To access the wrapped
+ * value Unwrap should be used, all other operations on that object will lead
+ * to unpredictable results.
  */
-class EXPORT External : public Value {
+class V8EXPORT External : public Value {
  public:
+  static Local<Value> Wrap(void* data);
+  static inline void* Unwrap(Handle<Value> obj);
+
   static Local<External> New(void* value);
-  static External* Cast(Value* obj);
-  void* Value();
+  static inline External* Cast(Value* obj);
+  void* Value() const;
  private:
   External();
+  static void CheckCast(v8::Value* obj);
+  static inline void* QuickUnwrap(Handle<v8::Value> obj);
+  static void* FullUnwrap(Handle<v8::Value> obj);
 };
 
 
@@ -1111,7 +1337,7 @@ class EXPORT External : public Value {
 /**
  * The superclass of object and function templates.
  */
-class EXPORT Template : public Data {
+class V8EXPORT Template : public Data {
  public:
   /** Adds a property to each instance created by this template.*/
   void Set(Handle<String> name, Handle<Data> value,
@@ -1131,7 +1357,7 @@ class EXPORT Template : public Data {
  * including the receiver, the number and values of arguments, and
  * the holder of the function.
  */
-class EXPORT Arguments {
+class V8EXPORT Arguments {
  public:
   inline int Length() const;
   inline Local<Value> operator[](int i) const;
@@ -1161,7 +1387,7 @@ class EXPORT Arguments {
  * The information passed to an accessor callback about the context
  * of the property access.
  */
-class EXPORT AccessorInfo {
+class V8EXPORT AccessorInfo {
  public:
   inline AccessorInfo(Local<Object> self,
                       Local<Value> data,
@@ -1279,11 +1505,18 @@ typedef Handle<Array> (*IndexedPropertyEnumerator)(const AccessorInfo& info);
  * Some accessors should be accessible across contexts.  These
  * accessors have an explicit access control parameter which specifies
  * the kind of cross-context access that should be allowed.
+ *
+ * Additionally, for security, accessors can prohibit overwriting by
+ * accessors defined in JavaScript.  For objects that have such
+ * accessors either locally or in their prototype chain it is not
+ * possible to overwrite the accessor by using __defineGetter__ or
+ * __defineSetter__ from JavaScript code.
  */
 enum AccessControl {
-  DEFAULT         = 0,
-  ALL_CAN_READ    = 1,
-  ALL_CAN_WRITE   = 2
+  DEFAULT               = 0,
+  ALL_CAN_READ          = 1,
+  ALL_CAN_WRITE         = 1 << 1,
+  PROHIBITS_OVERWRITING = 1 << 2
 };
 
 
@@ -1408,7 +1641,7 @@ typedef bool (*IndexedSecurityCallback)(Local<Object> global,
  *   child_instance.instance_property == 3;
  * \endcode
  */
-class EXPORT FunctionTemplate : public Template {
+class V8EXPORT FunctionTemplate : public Template {
  public:
   /** Creates a function template.*/
   static Local<FunctionTemplate> New(
@@ -1500,7 +1733,7 @@ class EXPORT FunctionTemplate : public Template {
  * Properties added to an ObjectTemplate are added to each object
  * created from the ObjectTemplate.
  */
-class EXPORT ObjectTemplate : public Template {
+class V8EXPORT ObjectTemplate : public Template {
  public:
   /** Creates an ObjectTemplate. */
   static Local<ObjectTemplate> New();
@@ -1609,10 +1842,15 @@ class EXPORT ObjectTemplate : public Template {
    * When accessing properties on instances of this object template,
    * the access check callback will be called to determine whether or
    * not to allow cross-context access to the properties.
+   * The last parameter specifies whether access checks are turned
+   * on by default on instances. If access checks are off by default,
+   * they can be turned on on individual instances by calling
+   * Object::TurnOnAccessCheck().
    */
   void SetAccessCheckCallbacks(NamedSecurityCallback named_handler,
                                IndexedSecurityCallback indexed_handler,
-                               Handle<Value> data = Handle<Value>());
+                               Handle<Value> data = Handle<Value>(),
+                               bool turned_on_by_default = true);
 
   /**
    * Gets the number of internal fields for objects generated from
@@ -1637,7 +1875,7 @@ class EXPORT ObjectTemplate : public Template {
  * A Signature specifies which receivers and arguments a function can
  * legally be called with.
  */
-class EXPORT Signature : public Data {
+class V8EXPORT Signature : public Data {
  public:
   static Local<Signature> New(Handle<FunctionTemplate> receiver =
                                   Handle<FunctionTemplate>(),
@@ -1652,7 +1890,7 @@ class EXPORT Signature : public Data {
  * A utility for determining the type of objects based on the template
  * they were constructed from.
  */
-class EXPORT TypeSwitch : public Data {
+class V8EXPORT TypeSwitch : public Data {
  public:
   static Local<TypeSwitch> New(Handle<FunctionTemplate> type);
   static Local<TypeSwitch> New(int argc, Handle<FunctionTemplate> types[]);
@@ -1668,7 +1906,7 @@ class EXPORT TypeSwitch : public Data {
 /**
  * Ignore
  */
-class EXPORT Extension {  // NOLINT
+class V8EXPORT Extension {  // NOLINT
  public:
   Extension(const char* name,
             const char* source = 0,
@@ -1700,13 +1938,13 @@ class EXPORT Extension {  // NOLINT
 };
 
 
-void EXPORT RegisterExtension(Extension* extension);
+void V8EXPORT RegisterExtension(Extension* extension);
 
 
 /**
  * Ignore
  */
-class EXPORT DeclareExtension {
+class V8EXPORT DeclareExtension {
  public:
   inline DeclareExtension(Extension* extension) {
     RegisterExtension(extension);
@@ -1717,24 +1955,24 @@ class EXPORT DeclareExtension {
 // --- S t a t i c s ---
 
 
-Handle<Primitive> EXPORT Undefined();
-Handle<Primitive> EXPORT Null();
-Handle<Boolean> EXPORT True();
-Handle<Boolean> EXPORT False();
+Handle<Primitive> V8EXPORT Undefined();
+Handle<Primitive> V8EXPORT Null();
+Handle<Boolean> V8EXPORT True();
+Handle<Boolean> V8EXPORT False();
 
 
 /**
  * A set of constraints that specifies the limits of the runtime's
  * memory use.
  */
-class EXPORT ResourceConstraints {
+class V8EXPORT ResourceConstraints {
  public:
   ResourceConstraints();
-  int max_young_space_size() { return max_young_space_size_; }
+  int max_young_space_size() const { return max_young_space_size_; }
   void set_max_young_space_size(int value) { max_young_space_size_ = value; }
-  int max_old_space_size() { return max_old_space_size_; }
+  int max_old_space_size() const { return max_old_space_size_; }
   void set_max_old_space_size(int value) { max_old_space_size_ = value; }
-  uint32_t* stack_limit() { return stack_limit_; }
+  uint32_t* stack_limit() const { return stack_limit_; }
   void set_stack_limit(uint32_t* value) { stack_limit_ = value; }
  private:
   int max_young_space_size_;
@@ -1761,13 +1999,13 @@ typedef void (*MessageCallback)(Handle<Message> message, Handle<Value> data);
  * operation; the caller must return immediately and only after the exception
  * has been handled does it become legal to invoke JavaScript operations.
  */
-Handle<Value> EXPORT ThrowException(Handle<Value> exception);
+Handle<Value> V8EXPORT ThrowException(Handle<Value> exception);
 
 /**
  * Create new error objects by calling the corresponding error object
  * constructor with the message.
  */
-class EXPORT Exception {
+class V8EXPORT Exception {
  public:
   static Local<Value> RangeError(Handle<String> message);
   static Local<Value> ReferenceError(Handle<String> message);
@@ -1777,9 +2015,16 @@ class EXPORT Exception {
 };
 
 
-// --- C o u n t e r s  C a l l b a c k s
+// --- C o u n t e r s  C a l l b a c k s ---
 
-typedef int* (*CounterLookupCallback)(const wchar_t* name);
+typedef int* (*CounterLookupCallback)(const char* name);
+
+typedef void* (*CreateHistogramCallback)(const char* name,
+                                         int min,
+                                         int max,
+                                         size_t buckets);
+
+typedef void (*AddHistogramSampleCallback)(void* histogram, int sample);
 
 // --- F a i l e d A c c e s s C h e c k C a l l b a c k ---
 typedef void (*FailedAccessCheckCallback)(Local<Object> target,
@@ -1798,7 +2043,7 @@ typedef void (*FailedAccessCheckCallback)(Local<Object> target,
 typedef void (*GCCallback)();
 
 
-//  --- C o n t e x t  G e n e r a t o r
+// --- C o n t e x t  G e n e r a t o r ---
 
 /**
  * Applications must provide a callback function which is called to generate
@@ -1808,9 +2053,26 @@ typedef Persistent<Context> (*ContextGenerator)();
 
 
 /**
+ * Profiler modules.
+ *
+ * In V8, profiler consists of several modules: CPU profiler, and different
+ * kinds of heap profiling. Each can be turned on / off independently.
+ * When PROFILER_MODULE_HEAP_SNAPSHOT flag is passed to ResumeProfilerEx,
+ * modules are enabled only temporarily for making a snapshot of the heap.
+ */
+enum ProfilerModules {
+  PROFILER_MODULE_NONE            = 0,
+  PROFILER_MODULE_CPU             = 1,
+  PROFILER_MODULE_HEAP_STATS      = 1 << 1,
+  PROFILER_MODULE_JS_CONSTRUCTORS = 1 << 2,
+  PROFILER_MODULE_HEAP_SNAPSHOT   = 1 << 16
+};
+
+
+/**
  * Container class for static utility functions.
  */
-class EXPORT V8 {
+class V8EXPORT V8 {
  public:
   /** Set the callback to invoke in case of fatal errors. */
   static void SetFatalErrorHandler(FatalErrorCallback that);
@@ -1871,6 +2133,15 @@ class EXPORT V8 {
   static void SetCounterFunction(CounterLookupCallback);
 
   /**
+   * Enables the host application to provide a mechanism for recording
+   * histograms. The CreateHistogram function returns a
+   * histogram which will later be passed to the AddHistogramSample
+   * function.
+   */
+  static void SetCreateHistogramFunction(CreateHistogramCallback);
+  static void SetAddHistogramSampleFunction(AddHistogramSampleCallback);
+
+  /**
    * Enables the computation of a sliding window of states. The sliding
    * window information is recorded in statistics counters.
    */
@@ -1902,10 +2173,10 @@ class EXPORT V8 {
    * object in the group is alive, all objects in the group are alive.
    * After each garbage collection, object groups are removed. It is
    * intended to be used in the before-garbage-collection callback
-   * function for istance to simulate DOM tree connections among JS
+   * function, for instance to simulate DOM tree connections among JS
    * wrapper objects.
    */
-  static void AddObjectToGroup(void* id, Persistent<Object> obj);
+  static void AddObjectGroup(Persistent<Value>* objects, size_t length);
 
   /**
    * Initializes from snapshot if possible. Otherwise, attempts to
@@ -1929,15 +2200,153 @@ class EXPORT V8 {
    */
   static int AdjustAmountOfExternalAllocatedMemory(int change_in_bytes);
 
+  /**
+   * Suspends recording of tick samples in the profiler.
+   * When the V8 profiling mode is enabled (usually via command line
+   * switches) this function suspends recording of tick samples.
+   * Profiling ticks are discarded until ResumeProfiler() is called.
+   *
+   * See also the --prof and --prof_auto command line switches to
+   * enable V8 profiling.
+   */
+  static void PauseProfiler();
+
+  /**
+   * Resumes recording of tick samples in the profiler.
+   * See also PauseProfiler().
+   */
+  static void ResumeProfiler();
+
+  /**
+   * Return whether profiler is currently paused.
+   */
+  static bool IsProfilerPaused();
+
+  /**
+   * Resumes specified profiler modules.
+   * "ResumeProfiler" is equivalent to "ResumeProfilerEx(PROFILER_MODULE_CPU)".
+   * See ProfilerModules enum.
+   *
+   * \param flags Flags specifying profiler modules.
+   */
+  static void ResumeProfilerEx(int flags);
+
+  /**
+   * Pauses specified profiler modules.
+   * "PauseProfiler" is equivalent to "PauseProfilerEx(PROFILER_MODULE_CPU)".
+   * See ProfilerModules enum.
+   *
+   * \param flags Flags specifying profiler modules.
+   */
+  static void PauseProfilerEx(int flags);
+
+  /**
+   * Returns active (resumed) profiler modules.
+   * See ProfilerModules enum.
+   *
+   * \returns active profiler modules.
+   */
+  static int GetActiveProfilerModules();
+
+  /**
+   * If logging is performed into a memory buffer (via --logfile=*), allows to
+   * retrieve previously written messages. This can be used for retrieving
+   * profiler log data in the application. This function is thread-safe.
+   *
+   * Caller provides a destination buffer that must exist during GetLogLines
+   * call. Only whole log lines are copied into the buffer.
+   *
+   * \param from_pos specified a point in a buffer to read from, 0 is the
+   *   beginning of a buffer. It is assumed that caller updates its current
+   *   position using returned size value from the previous call.
+   * \param dest_buf destination buffer for log data.
+   * \param max_size size of the destination buffer.
+   * \returns actual size of log data copied into buffer.
+   */
+  static int GetLogLines(int from_pos, char* dest_buf, int max_size);
+
+  /**
+   * Retrieve the V8 thread id of the calling thread.
+   *
+   * The thread id for a thread should only be retrieved after the V8
+   * lock has been acquired with a Locker object with that thread.
+   */
+  static int GetCurrentThreadId();
+
+  /**
+   * Forcefully terminate execution of a JavaScript thread.  This can
+   * be used to terminate long-running scripts.
+   *
+   * TerminateExecution should only be called when then V8 lock has
+   * been acquired with a Locker object.  Therefore, in order to be
+   * able to terminate long-running threads, preemption must be
+   * enabled to allow the user of TerminateExecution to acquire the
+   * lock.
+   *
+   * The termination is achieved by throwing an exception that is
+   * uncatchable by JavaScript exception handlers.  Termination
+   * exceptions act as if they were caught by a C++ TryCatch exception
+   * handlers.  If forceful termination is used, any C++ TryCatch
+   * exception handler that catches an exception should check if that
+   * exception is a termination exception and immediately return if
+   * that is the case.  Returning immediately in that case will
+   * continue the propagation of the termination exception if needed.
+   *
+   * The thread id passed to TerminateExecution must have been
+   * obtained by calling GetCurrentThreadId on the thread in question.
+   *
+   * \param thread_id The thread id of the thread to terminate.
+   */
+  static void TerminateExecution(int thread_id);
+
+  /**
+   * Forcefully terminate the current thread of JavaScript execution.
+   *
+   * This method can be used by any thread even if that thread has not
+   * acquired the V8 lock with a Locker object.
+   */
+  static void TerminateExecution();
+
+  /**
+   * Releases any resources used by v8 and stops any utility threads
+   * that may be running.  Note that disposing v8 is permanent, it
+   * cannot be reinitialized.
+   *
+   * It should generally not be necessary to dispose v8 before exiting
+   * a process, this should happen automatically.  It is only necessary
+   * to use if the process needs the resources taken up by v8.
+   */
+  static bool Dispose();
+
+
+  /**
+   * Optional notification that the embedder is idle.
+   * V8 uses the notification to reduce memory footprint.
+   * This call can be used repeatedly if the embedder remains idle.
+   * \param is_high_priority tells whether the embedder is high priority.
+   * Returns true if the embedder should stop calling IdleNotification
+   * until real work has been done.  This indicates that V8 has done
+   * as much cleanup as it will be able to do.
+   */
+  static bool IdleNotification(bool is_high_priority);
+
+  /**
+   * Optional notification that the system is running low on memory.
+   * V8 uses these notifications to attempt to free memory.
+   */
+  static void LowMemoryNotification();
+
  private:
   V8();
 
-  static void** GlobalizeReference(void** handle);
-  static void DisposeGlobal(void** global_handle);
-  static void MakeWeak(void** global_handle, void* data, WeakReferenceCallback);
-  static void ClearWeak(void** global_handle);
-  static bool IsGlobalNearDeath(void** global_handle);
-  static bool IsGlobalWeak(void** global_handle);
+  static internal::Object** GlobalizeReference(internal::Object** handle);
+  static void DisposeGlobal(internal::Object** global_handle);
+  static void MakeWeak(internal::Object** global_handle,
+                       void* data,
+                       WeakReferenceCallback);
+  static void ClearWeak(internal::Object** global_handle);
+  static bool IsGlobalNearDeath(internal::Object** global_handle);
+  static bool IsGlobalWeak(internal::Object** global_handle);
 
   template <class T> friend class Handle;
   template <class T> friend class Local;
@@ -1949,7 +2358,7 @@ class EXPORT V8 {
 /**
  * An external exception handler.
  */
-class EXPORT TryCatch {
+class V8EXPORT TryCatch {
  public:
 
   /**
@@ -1965,7 +2374,22 @@ class EXPORT TryCatch {
   /**
    * Returns true if an exception has been caught by this try/catch block.
    */
-  bool HasCaught();
+  bool HasCaught() const;
+
+  /**
+   * For certain types of exceptions, it makes no sense to continue
+   * execution.
+   *
+   * Currently, the only type of exception that can be caught by a
+   * TryCatch handler and for which it does not make sense to continue
+   * is termination exception.  Such exceptions are thrown when the
+   * TerminateExecution methods are called to terminate a long-running
+   * script.
+   *
+   * If CanContinue returns false, the correct action is to perform
+   * any C++ cleanup needed and then return.
+   */
+  bool CanContinue() const;
 
   /**
    * Returns the exception caught by this try/catch block.  If no exception has
@@ -1973,7 +2397,13 @@ class EXPORT TryCatch {
    *
    * The returned handle is valid until this TryCatch block has been destroyed.
    */
-  Local<Value> Exception();
+  Local<Value> Exception() const;
+
+  /**
+   * Returns the .stack property of the thrown object.  If no .stack
+   * property is present an empty handle is returned.
+   */
+  Local<Value> StackTrace() const;
 
   /**
    * Returns the message associated with this exception.  If there is
@@ -1982,7 +2412,7 @@ class EXPORT TryCatch {
    * The returned handle is valid until this TryCatch block has been
    * destroyed.
    */
-  Local<v8::Message> Message();
+  Local<v8::Message> Message() const;
 
   /**
    * Clears any exceptions that may have been caught by this try/catch block.
@@ -2017,7 +2447,9 @@ class EXPORT TryCatch {
   void* exception_;
   void* message_;
   bool is_verbose_;
+  bool can_continue_;
   bool capture_message_;
+  void* js_handler_;
 };
 
 
@@ -2027,7 +2459,7 @@ class EXPORT TryCatch {
 /**
  * Ignore
  */
-class EXPORT ExtensionConfiguration {
+class V8EXPORT ExtensionConfiguration {
  public:
   ExtensionConfiguration(int name_count, const char* names[])
       : name_count_(name_count), names_(names) { }
@@ -2042,9 +2474,16 @@ class EXPORT ExtensionConfiguration {
  * A sandboxed execution context with its own set of built-in objects
  * and functions.
  */
-class EXPORT Context {
+class V8EXPORT Context {
  public:
+  /** Returns the global object of the context. */
   Local<Object> Global();
+
+  /**
+   * Detaches the global object from its context before
+   * the global object can be reused to create a new context.
+   */
+  void DetachGlobal();
 
   /** Creates a new context. */
   static Persistent<Context> New(
@@ -2058,14 +2497,21 @@ class EXPORT Context {
   /** Returns the context that is on the top of the stack. */
   static Local<Context> GetCurrent();
 
-  /** Returns the security context that is currently used. */
-  static Local<Context> GetCurrentSecurityContext();
+  /**
+   * Returns the context of the calling JavaScript code.  That is the
+   * context of the top-most JavaScript frame.  If there are no
+   * JavaScript frames an empty handle is returned.
+   */
+  static Local<Context> GetCalling();
 
   /**
    * Sets the security token for the context.  To access an object in
    * another context, the security tokens must match.
    */
   void SetSecurityToken(Handle<Value> token);
+
+  /** Restores the security token to the default value. */
+  void UseDefaultSecurityToken();
 
   /** Returns the security token of this context.*/
   Handle<Value> GetSecurityToken();
@@ -2090,14 +2536,19 @@ class EXPORT Context {
   /** Returns true if V8 has a current context. */
   static bool InContext();
 
-  /** Returns true if V8 has a current security context. */
-  static bool InSecurityContext();
+  /**
+   * Associate an additional data object with the context. This is mainly used
+   * with the debugger to provide additional information on the context through
+   * the debugger API.
+   */
+  void SetData(Handle<Value> data);
+  Local<Value> GetData();
 
   /**
    * Stack-allocated class which sets the execution context for all
    * operations executed within a local scope.
    */
-  class EXPORT Scope {
+  class V8EXPORT Scope {
    public:
     inline Scope(Handle<Context> context) : context_(context) {
       context_->Enter();
@@ -2183,14 +2634,14 @@ class EXPORT Context {
  * // V8 Now no longer locked.
  * \endcode
  */
-class EXPORT Unlocker {
+class V8EXPORT Unlocker {
  public:
   Unlocker();
   ~Unlocker();
 };
 
 
-class EXPORT Locker {
+class V8EXPORT Locker {
  public:
   Locker();
   ~Locker();
@@ -2214,9 +2665,16 @@ class EXPORT Locker {
    */
   static bool IsLocked();
 
+  /**
+   * Returns whether v8::Locker is being used by this V8 instance.
+   */
+  static bool IsActive() { return active_; }
+
  private:
   bool has_lock_;
   bool top_level_;
+
+  static bool active_;
 
   // Disallow copying and assigning.
   Locker(const Locker&);
@@ -2226,6 +2684,76 @@ class EXPORT Locker {
 
 
 // --- I m p l e m e n t a t i o n ---
+
+
+namespace internal {
+
+
+// Tag information for HeapObject.
+const int kHeapObjectTag = 1;
+const int kHeapObjectTagSize = 2;
+const intptr_t kHeapObjectTagMask = (1 << kHeapObjectTagSize) - 1;
+
+
+// Tag information for Smi.
+const int kSmiTag = 0;
+const int kSmiTagSize = 1;
+const intptr_t kSmiTagMask = (1 << kSmiTagSize) - 1;
+
+
+/**
+ * This class exports constants and functionality from within v8 that
+ * is necessary to implement inline functions in the v8 api.  Don't
+ * depend on functions and constants defined here.
+ */
+class Internals {
+ public:
+
+  // These values match non-compiler-dependent values defined within
+  // the implementation of v8.
+  static const int kHeapObjectMapOffset = 0;
+  static const int kMapInstanceTypeOffset = sizeof(void*) + sizeof(int);
+  static const int kStringResourceOffset = 2 * sizeof(void*);
+  static const int kProxyProxyOffset = sizeof(void*);
+  static const int kJSObjectHeaderSize = 3 * sizeof(void*);
+  static const int kFullStringRepresentationMask = 0x07;
+  static const int kExternalTwoByteRepresentationTag = 0x03;
+  static const int kAlignedPointerShift = 2;
+
+  // These constants are compiler dependent so their values must be
+  // defined within the implementation.
+  static int kJSObjectType;
+  static int kFirstNonstringType;
+  static int kProxyType;
+
+  static inline bool HasHeapObjectTag(internal::Object* value) {
+    return ((reinterpret_cast<intptr_t>(value) & kHeapObjectTagMask) ==
+            kHeapObjectTag);
+  }
+  
+  static inline bool HasSmiTag(internal::Object* value) {
+    return ((reinterpret_cast<intptr_t>(value) & kSmiTagMask) == kSmiTag);
+  }
+  
+  static inline int SmiValue(internal::Object* value) {
+    return static_cast<int>(reinterpret_cast<intptr_t>(value)) >> kSmiTagSize;
+  }
+  
+  static inline bool IsExternalTwoByteString(int instance_type) {
+    int representation = (instance_type & kFullStringRepresentationMask);
+    return representation == kExternalTwoByteRepresentationTag;
+  }
+
+  template <typename T>
+  static inline T ReadField(Object* ptr, int offset) {
+    uint8_t* addr = reinterpret_cast<uint8_t*>(ptr) + offset - kHeapObjectTag;
+    return *reinterpret_cast<T*>(addr);
+  }
+
+};
+
+}
+
 
 template <class T>
 Handle<T>::Handle() : val_(0) { }
@@ -2238,7 +2766,7 @@ Local<T>::Local() : Handle<T>() { }
 template <class T>
 Local<T> Local<T>::New(Handle<T> that) {
   if (that.IsEmpty()) return Local<T>();
-  void** p = reinterpret_cast<void**>(*that);
+  internal::Object** p = reinterpret_cast<internal::Object**>(*that);
   return Local<T>(reinterpret_cast<T*>(HandleScope::CreateHandle(*p)));
 }
 
@@ -2246,29 +2774,29 @@ Local<T> Local<T>::New(Handle<T> that) {
 template <class T>
 Persistent<T> Persistent<T>::New(Handle<T> that) {
   if (that.IsEmpty()) return Persistent<T>();
-  void** p = reinterpret_cast<void**>(*that);
+  internal::Object** p = reinterpret_cast<internal::Object**>(*that);
   return Persistent<T>(reinterpret_cast<T*>(V8::GlobalizeReference(p)));
 }
 
 
 template <class T>
-bool Persistent<T>::IsNearDeath() {
+bool Persistent<T>::IsNearDeath() const {
   if (this->IsEmpty()) return false;
-  return V8::IsGlobalNearDeath(reinterpret_cast<void**>(**this));
+  return V8::IsGlobalNearDeath(reinterpret_cast<internal::Object**>(**this));
 }
 
 
 template <class T>
-bool Persistent<T>::IsWeak() {
+bool Persistent<T>::IsWeak() const {
   if (this->IsEmpty()) return false;
-  return V8::IsGlobalWeak(reinterpret_cast<void**>(**this));
+  return V8::IsGlobalWeak(reinterpret_cast<internal::Object**>(**this));
 }
 
 
 template <class T>
 void Persistent<T>::Dispose() {
   if (this->IsEmpty()) return;
-  V8::DisposeGlobal(reinterpret_cast<void**>(**this));
+  V8::DisposeGlobal(reinterpret_cast<internal::Object**>(**this));
 }
 
 
@@ -2277,25 +2805,15 @@ Persistent<T>::Persistent() : Handle<T>() { }
 
 template <class T>
 void Persistent<T>::MakeWeak(void* parameters, WeakReferenceCallback callback) {
-  V8::MakeWeak(reinterpret_cast<void**>(**this), parameters, callback);
+  V8::MakeWeak(reinterpret_cast<internal::Object**>(**this),
+               parameters,
+               callback);
 }
 
 template <class T>
 void Persistent<T>::ClearWeak() {
-  V8::ClearWeak(reinterpret_cast<void**>(**this));
+  V8::ClearWeak(reinterpret_cast<internal::Object**>(**this));
 }
-
-template <class T>
-T* Handle<T>::operator->() {
-  return val_;
-}
-
-
-template <class T>
-T* Handle<T>::operator*() {
-  return val_;
-}
-
 
 Local<Value> Arguments::operator[](int i) const {
   if (i < 0 || length_ <= i) return Local<Value>(*Undefined());
@@ -2350,21 +2868,22 @@ Local<Object> AccessorInfo::Holder() const {
 
 template <class T>
 Local<T> HandleScope::Close(Handle<T> value) {
-  void** after = RawClose(reinterpret_cast<void**>(*value));
+  internal::Object** before = reinterpret_cast<internal::Object**>(*value);
+  internal::Object** after = RawClose(before);
   return Local<T>(reinterpret_cast<T*>(after));
 }
 
-Handle<Value> ScriptOrigin::ResourceName() {
+Handle<Value> ScriptOrigin::ResourceName() const {
   return resource_name_;
 }
 
 
-Handle<Integer> ScriptOrigin::ResourceLineOffset() {
+Handle<Integer> ScriptOrigin::ResourceLineOffset() const {
   return resource_line_offset_;
 }
 
 
-Handle<Integer> ScriptOrigin::ResourceColumnOffset() {
+Handle<Integer> ScriptOrigin::ResourceColumnOffset() const {
   return resource_column_offset_;
 }
 
@@ -2376,6 +2895,171 @@ Handle<Boolean> Boolean::New(bool value) {
 
 void Template::Set(const char* name, v8::Handle<Data> value) {
   Set(v8::String::New(name), value);
+}
+
+
+Local<Value> Object::GetInternalField(int index) {
+#ifndef V8_ENABLE_CHECKS
+  Local<Value> quick_result = UncheckedGetInternalField(index);
+  if (!quick_result.IsEmpty()) return quick_result;
+#endif
+  return CheckedGetInternalField(index);
+}
+
+
+Local<Value> Object::UncheckedGetInternalField(int index) {
+  typedef internal::Object O;
+  typedef internal::Internals I;
+  O* obj = *reinterpret_cast<O**>(this);
+  O* map = I::ReadField<O*>(obj, I::kHeapObjectMapOffset);
+  int instance_type = I::ReadField<uint8_t>(map, I::kMapInstanceTypeOffset);
+  if (instance_type == I::kJSObjectType) {
+    // If the object is a plain JSObject, which is the common case,
+    // we know where to find the internal fields and can return the
+    // value directly.
+    int offset = I::kJSObjectHeaderSize + (sizeof(void*) * index);
+    O* value = I::ReadField<O*>(obj, offset);
+    O** result = HandleScope::CreateHandle(value);
+    return Local<Value>(reinterpret_cast<Value*>(result));
+  } else {
+    return Local<Value>();
+  }
+}
+
+
+void* External::Unwrap(Handle<v8::Value> obj) {
+#ifdef V8_ENABLE_CHECKS
+  return FullUnwrap(obj);
+#else
+  return QuickUnwrap(obj);
+#endif
+}
+
+
+void* External::QuickUnwrap(Handle<v8::Value> wrapper) {
+  typedef internal::Object O;
+  typedef internal::Internals I;
+  O* obj = *reinterpret_cast<O**>(const_cast<v8::Value*>(*wrapper));
+  if (I::HasSmiTag(obj)) {
+    int value = I::SmiValue(obj) << I::kAlignedPointerShift;
+    return reinterpret_cast<void*>(value);
+  } else {
+    O* map = I::ReadField<O*>(obj, I::kHeapObjectMapOffset);
+    int instance_type = I::ReadField<uint8_t>(map, I::kMapInstanceTypeOffset);
+    if (instance_type == I::kProxyType) {
+      return I::ReadField<void*>(obj, I::kProxyProxyOffset);
+    } else {
+      return NULL;
+    }
+  }
+}
+
+
+void* Object::GetPointerFromInternalField(int index) {
+  return External::Unwrap(GetInternalField(index));
+}
+
+
+String* String::Cast(v8::Value* value) {
+#ifdef V8_ENABLE_CHECKS
+  CheckCast(value);
+#endif
+  return static_cast<String*>(value);
+}
+
+
+String::ExternalStringResource* String::GetExternalStringResource() const {
+  typedef internal::Object O;
+  typedef internal::Internals I;
+  O* obj = *reinterpret_cast<O**>(const_cast<String*>(this));
+  O* map = I::ReadField<O*>(obj, I::kHeapObjectMapOffset);
+  int instance_type = I::ReadField<uint8_t>(map, I::kMapInstanceTypeOffset);
+  String::ExternalStringResource* result;
+  if (I::IsExternalTwoByteString(instance_type)) {
+    void* value = I::ReadField<void*>(obj, I::kStringResourceOffset);
+    result = reinterpret_cast<String::ExternalStringResource*>(value);
+  } else {
+    result = NULL;
+  }
+#ifdef V8_ENABLE_CHECKS
+  VerifyExternalStringResource(result);
+#endif
+  return result;
+}
+
+
+bool Value::IsString() const {
+#ifdef V8_ENABLE_CHECKS
+  return FullIsString();
+#else
+  return QuickIsString();
+#endif
+}
+
+bool Value::QuickIsString() const {
+  typedef internal::Object O;
+  typedef internal::Internals I;
+  O* obj = *reinterpret_cast<O**>(const_cast<Value*>(this));
+  if (!I::HasHeapObjectTag(obj)) return false;
+  O* map = I::ReadField<O*>(obj, I::kHeapObjectMapOffset);
+  int instance_type = I::ReadField<uint8_t>(map, I::kMapInstanceTypeOffset);
+  return (instance_type < I::kFirstNonstringType);
+}
+
+
+Number* Number::Cast(v8::Value* value) {
+#ifdef V8_ENABLE_CHECKS
+  CheckCast(value);
+#endif
+  return static_cast<Number*>(value);
+}
+
+
+Integer* Integer::Cast(v8::Value* value) {
+#ifdef V8_ENABLE_CHECKS
+  CheckCast(value);
+#endif
+  return static_cast<Integer*>(value);
+}
+
+
+Date* Date::Cast(v8::Value* value) {
+#ifdef V8_ENABLE_CHECKS
+  CheckCast(value);
+#endif
+  return static_cast<Date*>(value);
+}
+
+
+Object* Object::Cast(v8::Value* value) {
+#ifdef V8_ENABLE_CHECKS
+  CheckCast(value);
+#endif
+  return static_cast<Object*>(value);
+}
+
+
+Array* Array::Cast(v8::Value* value) {
+#ifdef V8_ENABLE_CHECKS
+  CheckCast(value);
+#endif
+  return static_cast<Array*>(value);
+}
+
+
+Function* Function::Cast(v8::Value* value) {
+#ifdef V8_ENABLE_CHECKS
+  CheckCast(value);
+#endif
+  return static_cast<Function*>(value);
+}
+
+
+External* External::Cast(v8::Value* value) {
+#ifdef V8_ENABLE_CHECKS
+  CheckCast(value);
+#endif
+  return static_cast<External*>(value);
 }
 
 
@@ -2394,8 +3078,8 @@ void Template::Set(const char* name, v8::Handle<Data> value) {
 }  // namespace v8
 
 
-#undef EXPORT
-#undef EXPORT_INLINE
+#undef V8EXPORT
+#undef V8EXPORT_INLINE
 #undef TYPE_CHECK
 
 

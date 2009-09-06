@@ -33,12 +33,33 @@
 #include "factory.h"
 #include "macro-assembler.h"
 
-namespace v8 { namespace internal {
+namespace v8 {
+namespace internal {
 
 
 Handle<FixedArray> Factory::NewFixedArray(int size, PretenureFlag pretenure) {
   ASSERT(0 <= size);
   CALL_HEAP_FUNCTION(Heap::AllocateFixedArray(size, pretenure), FixedArray);
+}
+
+
+Handle<FixedArray> Factory::NewFixedArrayWithHoles(int size) {
+  ASSERT(0 <= size);
+  CALL_HEAP_FUNCTION(Heap::AllocateFixedArrayWithHoles(size), FixedArray);
+}
+
+
+Handle<StringDictionary> Factory::NewStringDictionary(int at_least_space_for) {
+  ASSERT(0 <= at_least_space_for);
+  CALL_HEAP_FUNCTION(StringDictionary::Allocate(at_least_space_for),
+                     StringDictionary);
+}
+
+
+Handle<NumberDictionary> Factory::NewNumberDictionary(int at_least_space_for) {
+  ASSERT(0 <= at_least_space_for);
+  CALL_HEAP_FUNCTION(NumberDictionary::Allocate(at_least_space_for),
+                     NumberDictionary);
 }
 
 
@@ -66,8 +87,10 @@ Handle<String> Factory::NewStringFromUtf8(Vector<const char> string,
 }
 
 
-Handle<String> Factory::NewStringFromTwoByte(Vector<const uc16> string) {
-  CALL_HEAP_FUNCTION(Heap::AllocateStringFromTwoByte(string), String);
+Handle<String> Factory::NewStringFromTwoByte(Vector<const uc16> string,
+                                             PretenureFlag pretenure) {
+  CALL_HEAP_FUNCTION(Heap::AllocateStringFromTwoByte(string, pretenure),
+                     String);
 }
 
 
@@ -83,7 +106,9 @@ Handle<String> Factory::NewConsString(Handle<String> first,
 }
 
 
-Handle<String> Factory::NewStringSlice(Handle<String> str, int begin, int end) {
+Handle<String> Factory::NewStringSlice(Handle<String> str,
+                                       int begin,
+                                       int end) {
   CALL_HEAP_FUNCTION(str->Slice(begin, end), String);
 }
 
@@ -112,8 +137,12 @@ Handle<Context> Factory::NewFunctionContext(int length,
 
 
 Handle<Context> Factory::NewWithContext(Handle<Context> previous,
-                                        Handle<JSObject> extension) {
-  CALL_HEAP_FUNCTION(Heap::AllocateWithContext(*previous, *extension), Context);
+                                        Handle<JSObject> extension,
+                                        bool is_catch_context) {
+  CALL_HEAP_FUNCTION(Heap::AllocateWithContext(*previous,
+                                               *extension,
+                                               is_catch_context),
+                     Context);
 }
 
 
@@ -131,13 +160,38 @@ Handle<AccessorInfo> Factory::NewAccessorInfo() {
 
 
 Handle<Script> Factory::NewScript(Handle<String> source) {
+  // Generate id for this script.
+  int id;
+  if (Heap::last_script_id()->IsUndefined()) {
+    // Script ids start from one.
+    id = 1;
+  } else {
+    // Increment id, wrap when positive smi is exhausted.
+    id = Smi::cast(Heap::last_script_id())->value();
+    id++;
+    if (!Smi::IsValid(id)) {
+      id = 0;
+    }
+  }
+  Heap::SetLastScriptId(Smi::FromInt(id));
+
+  // Create and initialize script object.
+  Handle<Proxy> wrapper = Factory::NewProxy(0, TENURED);
   Handle<Script> script = Handle<Script>::cast(NewStruct(SCRIPT_TYPE));
   script->set_source(*source);
   script->set_name(Heap::undefined_value());
+  script->set_id(Heap::last_script_id());
   script->set_line_offset(Smi::FromInt(0));
   script->set_column_offset(Smi::FromInt(0));
-  script->set_wrapper(*Factory::NewProxy(0, TENURED));
-  script->set_type(Smi::FromInt(SCRIPT_TYPE_NORMAL));
+  script->set_data(Heap::undefined_value());
+  script->set_context_data(Heap::undefined_value());
+  script->set_type(Smi::FromInt(Script::TYPE_NORMAL));
+  script->set_compilation_type(Smi::FromInt(Script::COMPILATION_TYPE_HOST));
+  script->set_wrapper(*wrapper);
+  script->set_line_ends(Heap::undefined_value());
+  script->set_eval_from_function(Heap::undefined_value());
+  script->set_eval_from_instructions_offset(Smi::FromInt(0));
+
   return script;
 }
 
@@ -152,9 +206,19 @@ Handle<Proxy> Factory::NewProxy(const AccessorDescriptor* desc) {
 }
 
 
-Handle<ByteArray> Factory::NewByteArray(int length) {
+Handle<ByteArray> Factory::NewByteArray(int length, PretenureFlag pretenure) {
   ASSERT(0 <= length);
-  CALL_HEAP_FUNCTION(Heap::AllocateByteArray(length), ByteArray);
+  CALL_HEAP_FUNCTION(Heap::AllocateByteArray(length, pretenure), ByteArray);
+}
+
+
+Handle<PixelArray> Factory::NewPixelArray(int length,
+                                          uint8_t* external_pointer,
+                                          PretenureFlag pretenure) {
+  ASSERT(0 <= length);
+  CALL_HEAP_FUNCTION(Heap::AllocatePixelArray(length,
+                                              external_pointer,
+                                              pretenure), PixelArray);
 }
 
 
@@ -168,10 +232,33 @@ Handle<JSObject> Factory::NewFunctionPrototype(Handle<JSFunction> function) {
 }
 
 
-Handle<Map> Factory::CopyMap(Handle<Map> src) {
-  CALL_HEAP_FUNCTION(src->Copy(), Map);
+Handle<Map> Factory::CopyMapDropDescriptors(Handle<Map> src) {
+  CALL_HEAP_FUNCTION(src->CopyDropDescriptors(), Map);
 }
 
+
+Handle<Map> Factory::CopyMap(Handle<Map> src,
+                             int extra_inobject_properties) {
+  Handle<Map> copy = CopyMapDropDescriptors(src);
+  // Check that we do not overflow the instance size when adding the
+  // extra inobject properties.
+  int instance_size_delta = extra_inobject_properties * kPointerSize;
+  int max_instance_size_delta =
+      JSObject::kMaxInstanceSize - copy->instance_size();
+  if (instance_size_delta > max_instance_size_delta) {
+    // If the instance size overflows, we allocate as many properties
+    // as we can as inobject properties.
+    instance_size_delta = max_instance_size_delta;
+    extra_inobject_properties = max_instance_size_delta >> kPointerSizeLog2;
+  }
+  // Adjust the map with the extra inobject properties.
+  int inobject_properties =
+      copy->inobject_properties() + extra_inobject_properties;
+  copy->set_inobject_properties(inobject_properties);
+  copy->set_unused_property_fields(inobject_properties);
+  copy->set_instance_size(copy->instance_size() + instance_size_delta);
+  return copy;
+}
 
 Handle<Map> Factory::CopyMapDropTransitions(Handle<Map> src) {
   CALL_HEAP_FUNCTION(src->CopyDropTransitions(), Map);
@@ -231,6 +318,11 @@ Handle<Object> Factory::NewNumberFromInt(int value) {
 }
 
 
+Handle<Object> Factory::NewNumberFromUint(uint32_t value) {
+  CALL_HEAP_FUNCTION(Heap::NumberFromUint32(value), Object);
+}
+
+
 Handle<JSObject> Factory::NewNeanderObject() {
   CALL_HEAP_FUNCTION(Heap::AllocateJSObjectFromMap(Heap::neander_map()),
                      JSObject);
@@ -282,7 +374,7 @@ Handle<Object> Factory::NewReferenceError(Handle<String> message) {
 
 Handle<Object> Factory::NewError(const char* maker, const char* type,
     Vector< Handle<Object> > args) {
-  HandleScope scope;
+  v8::HandleScope scope;  // Instantiate a closeable HandleScope for EscapeFrom.
   Handle<FixedArray> array = Factory::NewFixedArray(args.length());
   for (int i = 0; i < args.length(); i++) {
     array->set(i, *args[i]);
@@ -312,7 +404,7 @@ Handle<Object> Factory::NewError(const char* maker,
   Handle<JSFunction> fun =
       Handle<JSFunction>(
           JSFunction::cast(
-              Top::security_context_builtins()->GetProperty(*make_str)));
+              Top::builtins()->GetProperty(*make_str)));
   Handle<Object> type_obj = Factory::LookupAsciiSymbol(type);
   Object** argv[2] = { type_obj.location(),
                        Handle<Object>::cast(args).location() };
@@ -321,7 +413,7 @@ Handle<Object> Factory::NewError(const char* maker,
   // running the factory method, use the exception as the result.
   bool caught_exception;
   Handle<Object> result = Execution::TryCall(fun,
-                                             Top::security_context_builtins(),
+                                             Top::builtins(),
                                              2,
                                              argv,
                                              &caught_exception);
@@ -340,14 +432,14 @@ Handle<Object> Factory::NewError(const char* constructor,
   Handle<JSFunction> fun =
       Handle<JSFunction>(
           JSFunction::cast(
-              Top::security_context_builtins()->GetProperty(*constr)));
+              Top::builtins()->GetProperty(*constr)));
   Object** argv[1] = { Handle<Object>::cast(message).location() };
 
   // Invoke the JavaScript factory method. If an exception is thrown while
   // running the factory method, use the exception as the result.
   bool caught_exception;
   Handle<Object> result = Execution::TryCall(fun,
-                                             Top::security_context_builtins(),
+                                             Top::builtins(),
                                              1,
                                              argv,
                                              &caught_exception);
@@ -438,9 +530,12 @@ Handle<JSFunction> Factory::NewFunctionWithPrototype(Handle<String> name,
   return function;
 }
 
-Handle<Code> Factory::NewCode(const CodeDesc& desc, ScopeInfo<>* sinfo,
-                              Code::Flags flags) {
-  CALL_HEAP_FUNCTION(Heap::CreateCode(desc, sinfo, flags), Code);
+
+Handle<Code> Factory::NewCode(const CodeDesc& desc,
+                              ZoneScopeInfo* sinfo,
+                              Code::Flags flags,
+                              Handle<Object> self_ref) {
+  CALL_HEAP_FUNCTION(Heap::CreateCode(desc, sinfo, flags, self_ref), Code);
 }
 
 
@@ -449,41 +544,25 @@ Handle<Code> Factory::CopyCode(Handle<Code> code) {
 }
 
 
-#define CALL_GC(RETRY)                                                     \
-  do {                                                                     \
-    if (!Heap::CollectGarbage(Failure::cast(RETRY)->requested(),           \
-                              Failure::cast(RETRY)->allocation_space())) { \
-      /* TODO(1181417): Fix this. */                                       \
-      V8::FatalProcessOutOfMemory("Factory CALL_GC");                      \
-    }                                                                      \
-  } while (false)
+static inline Object* DoCopyInsert(DescriptorArray* array,
+                                   String* key,
+                                   Object* value,
+                                   PropertyAttributes attributes) {
+  CallbacksDescriptor desc(key, value, attributes);
+  Object* obj = array->CopyInsert(&desc, REMOVE_TRANSITIONS);
+  return obj;
+}
 
 
-// Allocate the new array. We cannot use the CALL_HEAP_FUNCTION macro here,
-// because the stack-allocated CallbacksDescriptor instance is not GC safe.
+// Allocate the new array.
 Handle<DescriptorArray> Factory::CopyAppendProxyDescriptor(
     Handle<DescriptorArray> array,
     Handle<String> key,
     Handle<Object> value,
     PropertyAttributes attributes) {
-  GC_GREEDY_CHECK();
-  CallbacksDescriptor desc(*key, *value, attributes);
-  Object* obj = array->CopyInsert(&desc, REMOVE_TRANSITIONS);
-  if (obj->IsFailure()) {
-    if (obj->IsRetryAfterGC()) {
-      CALL_GC(obj);
-      CallbacksDescriptor desc(*key, *value, attributes);
-      obj = array->CopyInsert(&desc, REMOVE_TRANSITIONS);
-    }
-    if (obj->IsFailure()) {
-      // TODO(1181417): Fix this.
-      V8::FatalProcessOutOfMemory("CopyAppendProxyDescriptor");
-    }
-  }
-  return Handle<DescriptorArray>(DescriptorArray::cast(obj));
+  CALL_HEAP_FUNCTION(DoCopyInsert(*array, *key, *value, attributes),
+                     DescriptorArray);
 }
-
-#undef CALL_GC
 
 
 Handle<String> Factory::SymbolFromString(Handle<String> value) {
@@ -503,10 +582,10 @@ Handle<DescriptorArray> Factory::CopyAppendCallbackDescriptors(
   int descriptor_count = 0;
 
   // Copy the descriptors from the array.
-  DescriptorWriter w(*result);
-  for (DescriptorReader r(*array); !r.eos(); r.advance()) {
-    w.WriteFrom(&r);
-    descriptor_count++;
+  for (int i = 0; i < array->number_of_descriptors(); i++) {
+    if (array->GetType(i) != NULL_DESCRIPTOR) {
+      result->CopyFrom(descriptor_count++, *array, i);
+    }
   }
 
   // Number of duplicates detected.
@@ -522,10 +601,10 @@ Handle<DescriptorArray> Factory::CopyAppendCallbackDescriptors(
     Handle<String> key =
         SymbolFromString(Handle<String>(String::cast(entry->name())));
     // Check if a descriptor with this name already exists before writing.
-    if (result->BinarySearch(*key, 0, descriptor_count - 1) ==
+    if (result->LinearSearch(*key, descriptor_count) ==
         DescriptorArray::kNotFound) {
       CallbacksDescriptor desc(*key, *entry, entry->property_attributes());
-      w.Write(&desc);
+      result->Set(descriptor_count, &desc);
       descriptor_count++;
     } else {
       duplicates++;
@@ -535,13 +614,11 @@ Handle<DescriptorArray> Factory::CopyAppendCallbackDescriptors(
   // If duplicates were detected, allocate a result of the right size
   // and transfer the elements.
   if (duplicates > 0) {
+    int number_of_descriptors = result->number_of_descriptors() - duplicates;
     Handle<DescriptorArray> new_result =
-        NewDescriptorArray(result->number_of_descriptors() - duplicates);
-    DescriptorWriter w(*new_result);
-    DescriptorReader r(*result);
-    while (!w.eos()) {
-      w.WriteFrom(&r);
-      r.advance();
+        NewDescriptorArray(number_of_descriptors);
+    for (int i = 0; i < number_of_descriptors; i++) {
+      new_result->CopyFrom(i, *result, i);
     }
     result = new_result;
   }
@@ -558,24 +635,17 @@ Handle<JSObject> Factory::NewJSObject(Handle<JSFunction> constructor,
 }
 
 
+Handle<GlobalObject> Factory::NewGlobalObject(
+    Handle<JSFunction> constructor) {
+  CALL_HEAP_FUNCTION(Heap::AllocateGlobalObject(*constructor),
+                     GlobalObject);
+}
+
+
+
 Handle<JSObject> Factory::NewJSObjectFromMap(Handle<Map> map) {
   CALL_HEAP_FUNCTION(Heap::AllocateJSObjectFromMap(*map, NOT_TENURED),
                      JSObject);
-}
-
-
-Handle<JSObject> Factory::NewObjectLiteral(int expected_number_of_properties) {
-  Handle<Map> map = Handle<Map>(Top::object_function()->initial_map());
-  map = Factory::CopyMap(map);
-  map->set_instance_descriptors(Heap::empty_descriptor_array());
-  map->set_unused_property_fields(expected_number_of_properties);
-  CALL_HEAP_FUNCTION(Heap::AllocateJSObjectFromMap(*map, TENURED),
-                     JSObject);
-}
-
-
-Handle<JSArray> Factory::NewArrayLiteral(int length) {
-  return NewJSArrayWithElements(NewFixedArray(length), TENURED);
 }
 
 
@@ -601,10 +671,11 @@ Handle<SharedFunctionInfo> Factory::NewSharedFunctionInfo(Handle<String> name) {
 }
 
 
-Handle<Dictionary> Factory::DictionaryAtNumberPut(Handle<Dictionary> dictionary,
-                                                  uint32_t key,
-                                                  Handle<Object> value) {
-  CALL_HEAP_FUNCTION(dictionary->AtNumberPut(key, *value), Dictionary);
+Handle<NumberDictionary> Factory::DictionaryAtNumberPut(
+    Handle<NumberDictionary> dictionary,
+    uint32_t key,
+    Handle<Object> value) {
+  CALL_HEAP_FUNCTION(dictionary->AtNumberPut(key, *value), NumberDictionary);
 }
 
 
@@ -632,6 +703,7 @@ Handle<Object> Factory::ToObject(Handle<Object> object,
 }
 
 
+#ifdef ENABLE_DEBUGGER_SUPPORT
 Handle<DebugInfo> Factory::NewDebugInfo(Handle<SharedFunctionInfo> shared) {
   // Get the original code of the function.
   Handle<Code> code(shared->code());
@@ -661,6 +733,7 @@ Handle<DebugInfo> Factory::NewDebugInfo(Handle<SharedFunctionInfo> shared) {
 
   return debug_info;
 }
+#endif
 
 
 Handle<JSObject> Factory::NewArgumentsObject(Handle<Object> callee,
@@ -670,8 +743,7 @@ Handle<JSObject> Factory::NewArgumentsObject(Handle<Object> callee,
 
 
 Handle<JSFunction> Factory::CreateApiFunction(
-    Handle<FunctionTemplateInfo> obj,
-    bool is_global) {
+    Handle<FunctionTemplateInfo> obj, ApiInstanceType instance_type) {
   Handle<Code> code = Handle<Code>(Builtins::builtin(Builtins::HandleApiCall));
 
   int internal_field_count = 0;
@@ -684,17 +756,31 @@ Handle<JSFunction> Factory::CreateApiFunction(
   }
 
   int instance_size = kPointerSize * internal_field_count;
-  if (is_global) {
-    instance_size += JSGlobalObject::kSize;
-  } else {
-    instance_size += JSObject::kHeaderSize;
+  InstanceType type = INVALID_TYPE;
+  switch (instance_type) {
+    case JavaScriptObject:
+      type = JS_OBJECT_TYPE;
+      instance_size += JSObject::kHeaderSize;
+      break;
+    case InnerGlobalObject:
+      type = JS_GLOBAL_OBJECT_TYPE;
+      instance_size += JSGlobalObject::kSize;
+      break;
+    case OuterGlobalObject:
+      type = JS_GLOBAL_PROXY_TYPE;
+      instance_size += JSGlobalProxy::kSize;
+      break;
+    default:
+      break;
   }
-
-  InstanceType type = is_global ? JS_GLOBAL_OBJECT_TYPE : JS_OBJECT_TYPE;
+  ASSERT(type != INVALID_TYPE);
 
   Handle<JSFunction> result =
-      Factory::NewFunction(Factory::empty_symbol(), type, instance_size,
-                           code, true);
+      Factory::NewFunction(Factory::empty_symbol(),
+                           type,
+                           instance_size,
+                           code,
+                           true);
   // Set class name.
   Handle<Object> class_name = Handle<Object>(obj->class_name());
   if (class_name->IsString()) {
@@ -716,7 +802,7 @@ Handle<JSFunction> Factory::CreateApiFunction(
 
   // Mark as needs_access_check if needed.
   if (obj->needs_access_check()) {
-    map->set_needs_access_check();
+    map->set_is_access_check_needed(true);
   }
 
   // Set interceptor information in the map.
@@ -783,17 +869,52 @@ Handle<Map> Factory::ObjectLiteralMapFromCache(Handle<Context> context,
     Handle<MapCache> new_cache = NewMapCache(24);
     context->set_map_cache(*new_cache);
   }
-  // Check to see whether there is a maching element in the cache.
+  // Check to see whether there is a matching element in the cache.
   Handle<MapCache> cache =
       Handle<MapCache>(MapCache::cast(context->map_cache()));
   Handle<Object> result = Handle<Object>(cache->Lookup(*keys));
   if (result->IsMap()) return Handle<Map>::cast(result);
   // Create a new map and add it to the cache.
   Handle<Map> map =
-      CopyMap(Handle<Map>(context->object_function()->initial_map()));
+      CopyMap(Handle<Map>(context->object_function()->initial_map()),
+              keys->length());
   AddToMapCache(context, keys, map);
   return Handle<Map>(map);
 }
+
+
+void Factory::SetRegExpAtomData(Handle<JSRegExp> regexp,
+                                JSRegExp::Type type,
+                                Handle<String> source,
+                                JSRegExp::Flags flags,
+                                Handle<Object> data) {
+  Handle<FixedArray> store = NewFixedArray(JSRegExp::kAtomDataSize);
+
+  store->set(JSRegExp::kTagIndex, Smi::FromInt(type));
+  store->set(JSRegExp::kSourceIndex, *source);
+  store->set(JSRegExp::kFlagsIndex, Smi::FromInt(flags.value()));
+  store->set(JSRegExp::kAtomPatternIndex, *data);
+  regexp->set_data(*store);
+}
+
+void Factory::SetRegExpIrregexpData(Handle<JSRegExp> regexp,
+                                    JSRegExp::Type type,
+                                    Handle<String> source,
+                                    JSRegExp::Flags flags,
+                                    int capture_count) {
+  Handle<FixedArray> store = NewFixedArray(JSRegExp::kIrregexpDataSize);
+
+  store->set(JSRegExp::kTagIndex, Smi::FromInt(type));
+  store->set(JSRegExp::kSourceIndex, *source);
+  store->set(JSRegExp::kFlagsIndex, Smi::FromInt(flags.value()));
+  store->set(JSRegExp::kIrregexpASCIICodeIndex, Heap::the_hole_value());
+  store->set(JSRegExp::kIrregexpUC16CodeIndex, Heap::the_hole_value());
+  store->set(JSRegExp::kIrregexpMaxRegisterCountIndex, Smi::FromInt(0));
+  store->set(JSRegExp::kIrregexpCaptureCountIndex,
+             Smi::FromInt(capture_count));
+  regexp->set_data(*store);
+}
+
 
 
 void Factory::ConfigureInstance(Handle<FunctionTemplateInfo> desc,

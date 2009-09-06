@@ -30,7 +30,8 @@
 
 #include "char-predicates.h"
 
-namespace v8 { namespace internal {
+namespace v8 {
+namespace internal {
 
 
 inline bool IsCarriageReturn(uc32 c) {
@@ -43,19 +44,40 @@ inline bool IsLineFeed(uc32 c) {
 }
 
 
+static inline bool IsInRange(int value, int lower_limit, int higher_limit) {
+  ASSERT(lower_limit <= higher_limit);
+  return static_cast<unsigned int>(value - lower_limit) <=
+      static_cast<unsigned int>(higher_limit - lower_limit);
+}
+
+
 inline bool IsDecimalDigit(uc32 c) {
   // ECMA-262, 3rd, 7.8.3 (p 16)
-  return
-    '0' <= c && c <= '9';
+  return IsInRange(c, '0', '9');
 }
 
 
 inline bool IsHexDigit(uc32 c) {
   // ECMA-262, 3rd, 7.6 (p 15)
-  return
-    ('0' <= c && c <= '9') ||
-    ('A' <= c && c <= 'F') ||
-    ('a' <= c && c <= 'f');
+  return IsDecimalDigit(c) || IsInRange(c | 0x20, 'a', 'f');
+}
+
+
+inline bool IsRegExpWord(uc16 c) {
+  return IsInRange(c | 0x20, 'a', 'z')
+      || IsDecimalDigit(c)
+      || (c == '_');
+}
+
+
+inline bool IsRegExpNewline(uc16 c) {
+  switch (c) {
+    //   CR           LF           LS           PS
+    case 0x000A: case 0x000D: case 0x2028: case 0x2029:
+      return false;
+    default:
+      return true;
+  }
 }
 
 

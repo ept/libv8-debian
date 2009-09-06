@@ -25,28 +25,30 @@
 // (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
 // OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
-// Platform specific code for MacOS goes here
+// Platform specific code for MacOS goes here. For the POSIX comaptible parts
+// the implementation is in platform-posix.cc.
 
-#include <ucontext.h>
 #include <unistd.h>
 #include <sys/mman.h>
 #include <mach/mach_init.h>
+#include <mach-o/dyld.h>
+#include <mach-o/getsect.h>
 
 #include <AvailabilityMacros.h>
-
-#ifdef MAC_OS_X_VERSION_10_5
-# include <execinfo.h>  // backtrace, backtrace_symbols
-#endif
 
 #include <pthread.h>
 #include <semaphore.h>
 #include <signal.h>
+#include <mach/mach.h>
 #include <mach/semaphore.h>
 #include <mach/task.h>
 #include <sys/time.h>
 #include <sys/resource.h>
+#include <sys/types.h>
 #include <stdarg.h>
 #include <stdlib.h>
+
+#include <errno.h>
 
 #undef MAP_TYPE
 
@@ -54,7 +56,19 @@
 
 #include "platform.h"
 
-namespace v8 { namespace internal {
+// Manually define these here as weak imports, rather than including execinfo.h.
+// This lets us launch on 10.4 which does not have these calls.
+extern "C" {
+  extern int backtrace(void**, int) __attribute__((weak_import));
+  extern char** backtrace_symbols(void* const*, int)
+      __attribute__((weak_import));
+  extern void backtrace_symbols_fd(void* const*, int, int)
+      __attribute__((weak_import));
+}
+
+
+namespace v8 {
+namespace internal {
 
 // 0 is never a valid thread id on MacOSX since a ptread_t is
 // a pointer.
@@ -79,124 +93,6 @@ void OS::Setup() {
   // call this setup code within the same millisecond.
   uint64_t seed = static_cast<uint64_t>(TimeCurrentMillis());
   srandom(static_cast<unsigned int>(seed));
-}
-
-
-int OS::GetUserTime(uint32_t* secs,  uint32_t* usecs) {
-  struct rusage usage;
-
-  if (getrusage(RUSAGE_SELF, &usage) < 0) return -1;
-  *secs = usage.ru_utime.tv_sec;
-  *usecs = usage.ru_utime.tv_usec;
-  return 0;
-}
-
-
-double OS::TimeCurrentMillis() {
-  struct timeval tv;
-  if (gettimeofday(&tv, NULL) < 0) return 0.0;
-  return (static_cast<double>(tv.tv_sec) * 1000) +
-         (static_cast<double>(tv.tv_usec) / 1000);
-}
-
-
-int64_t OS::Ticks() {
-  // Mac OS's gettimeofday has microsecond resolution.
-  struct timeval tv;
-  if (gettimeofday(&tv, NULL) < 0)
-    return 0;
-  return (static_cast<int64_t>(tv.tv_sec) * 1000000) + tv.tv_usec;
-}
-
-
-char* OS::LocalTimezone(double time) {
-  time_t tv = static_cast<time_t>(floor(time/msPerSecond));
-  struct tm* t = localtime(&tv);
-  return const_cast<char*>(t->tm_zone);
-}
-
-
-double OS::DaylightSavingsOffset(double time) {
-  time_t tv = static_cast<time_t>(floor(time/msPerSecond));
-  struct tm* t = localtime(&tv);
-  return t->tm_isdst > 0 ? 3600 * msPerSecond : 0;
-}
-
-
-double OS::LocalTimeOffset() {
-  time_t tv = time(NULL);
-  struct tm* t = localtime(&tv);
-  // tm_gmtoff includes any daylight savings offset, so subtract it.
-  return static_cast<double>(t->tm_gmtoff * msPerSecond -
-                             (t->tm_isdst > 0 ? 3600 * msPerSecond : 0));
-}
-
-
-FILE* OS::FOpen(const char* path, const char* mode) {
-  return fopen(path, mode);
-}
-
-
-void OS::Print(const char* format, ...) {
-  va_list args;
-  va_start(args, format);
-  VPrint(format, args);
-  va_end(args);
-}
-
-
-void OS::VPrint(const char* format, va_list args) {
-  vprintf(format, args);
-}
-
-
-void OS::PrintError(const char* format, ...) {
-  va_list args;
-  va_start(args, format);
-  VPrintError(format, args);
-  va_end(args);
-}
-
-
-void OS::VPrintError(const char* format, va_list args) {
-  vfprintf(stderr, format, args);
-}
-
-
-int OS::SNPrintF(Vector<char> str, const char* format, ...) {
-  va_list args;
-  va_start(args, format);
-  int result = VSNPrintF(str, format, args);
-  va_end(args);
-  return result;
-}
-
-
-int OS::VSNPrintF(Vector<char> str,
-                  const char* format,
-                  va_list args) {
-  int n = vsnprintf(str.start(), str.length(), format, args);
-  if (n < 0 || n >= str.length()) {
-    str[str.length() - 1] = '\0';
-    return -1;
-  } else {
-    return n;
-  }
-}
-
-
-void OS::StrNCpy(Vector<char> dest, const char* src, size_t n) {
-  strncpy(dest.start(), src, n);
-}
-
-
-void OS::WcsCpy(Vector<wchar_t> dest, const wchar_t* src) {
-  wcscpy(dest.start(), src);
-}
-
-
-char *OS::StrDup(const char* str) {
-  return strdup(str);
 }
 
 
@@ -229,9 +125,9 @@ size_t OS::AllocateAlignment() {
 
 void* OS::Allocate(const size_t requested,
                    size_t* allocated,
-                   bool executable) {
+                   bool is_executable) {
   const size_t msize = RoundUp(requested, getpagesize());
-  int prot = PROT_READ | PROT_WRITE | (executable ? PROT_EXEC : 0);
+  int prot = PROT_READ | PROT_WRITE | (is_executable ? PROT_EXEC : 0);
   void* mbase = mmap(NULL, msize, prot, MAP_PRIVATE | MAP_ANON, -1, 0);
   if (mbase == MAP_FAILED) {
     LOG(StringEvent("OS::Allocate", "mmap failed"));
@@ -243,14 +139,28 @@ void* OS::Allocate(const size_t requested,
 }
 
 
-void OS::Free(void* buf, const size_t length) {
+void OS::Free(void* address, const size_t size) {
   // TODO(1240712): munmap has a return value which is ignored here.
-  munmap(buf, length);
+  munmap(address, size);
 }
 
 
-void OS::Sleep(int miliseconds) {
-  usleep(1000 * miliseconds);
+#ifdef ENABLE_HEAP_PROTECTION
+
+void OS::Protect(void* address, size_t size) {
+  UNIMPLEMENTED();
+}
+
+
+void OS::Unprotect(void* address, size_t size, bool is_executable) {
+  UNIMPLEMENTED();
+}
+
+#endif
+
+
+void OS::Sleep(int milliseconds) {
+  usleep(1000 * milliseconds);
 }
 
 
@@ -296,7 +206,19 @@ PosixMemoryMappedFile::~PosixMemoryMappedFile() {
 
 
 void OS::LogSharedLibraryAddresses() {
-  // TODO(1233579): Implement.
+#ifdef ENABLE_LOGGING_AND_PROFILING
+  unsigned int images_count = _dyld_image_count();
+  for (unsigned int i = 0; i < images_count; ++i) {
+    const mach_header* header = _dyld_get_image_header(i);
+    if (header == NULL) continue;
+    unsigned int size;
+    char* code_ptr = getsectdatafromheader(header, SEG_TEXT, SECT_TEXT, &size);
+    if (code_ptr == NULL) continue;
+    const uintptr_t slide = _dyld_get_image_vmaddr_slide(i);
+    const uintptr_t start = reinterpret_cast<uintptr_t>(code_ptr) + slide;
+    LOG(SharedLibraryEvent(_dyld_get_image_name(i), start, start + size));
+  }
+#endif  // ENABLE_LOGGING_AND_PROFILING
 }
 
 
@@ -312,10 +234,12 @@ int OS::ActivationFrameAlignment() {
 }
 
 
-int OS::StackWalk(StackFrame* frames, int frames_size) {
-#ifndef MAC_OS_X_VERSION_10_5
-  return 0;
-#else
+int OS::StackWalk(Vector<StackFrame> frames) {
+  // If weak link to execinfo lib has failed, ie because we are on 10.4, abort.
+  if (backtrace == NULL)
+    return 0;
+
+  int frames_size = frames.length();
   void** addresses = NewArray<void*>(frames_size);
   int frames_count = backtrace(addresses, frames_size);
 
@@ -342,7 +266,6 @@ int OS::StackWalk(StackFrame* frames, int frames_size) {
   free(symbols);
 
   return frames_count;
-#endif
 }
 
 
@@ -371,8 +294,8 @@ bool VirtualMemory::IsReserved() {
 }
 
 
-bool VirtualMemory::Commit(void* address, size_t size, bool executable) {
-  int prot = PROT_READ | PROT_WRITE | (executable ? PROT_EXEC : 0);
+bool VirtualMemory::Commit(void* address, size_t size, bool is_executable) {
+  int prot = PROT_READ | PROT_WRITE | (is_executable ? PROT_EXEC : 0);
   if (MAP_FAILED == mmap(address, size, prot,
                          MAP_PRIVATE | MAP_ANON | MAP_FIXED,
                          kMmapFd, kMmapFdOffset)) {
@@ -389,6 +312,7 @@ bool VirtualMemory::Uncommit(void* address, size_t size) {
               MAP_PRIVATE | MAP_ANON | MAP_NORESERVE,
               kMmapFd, kMmapFdOffset) != MAP_FAILED;
 }
+
 
 class ThreadHandle::PlatformData : public Malloced {
  public:
@@ -500,14 +424,10 @@ class MacOSMutex : public Mutex {
  public:
 
   MacOSMutex() {
-    // For some reason the compiler doesn't allow you to write
-    // "this->mutex_ = PTHREAD_..." directly on mac.
-    pthread_mutex_t m = PTHREAD_MUTEX_INITIALIZER;
     pthread_mutexattr_t attr;
     pthread_mutexattr_init(&attr);
     pthread_mutexattr_settype(&attr, PTHREAD_MUTEX_RECURSIVE);
-    pthread_mutex_init(&m, &attr);
-    mutex_ = m;
+    pthread_mutex_init(&mutex_, &attr);
   }
 
   ~MacOSMutex() { pthread_mutex_destroy(&mutex_); }
@@ -541,6 +461,8 @@ class MacOSSemaphore : public Semaphore {
   // platform is not needed here.
   void Wait() { semaphore_wait(semaphore_); }
 
+  bool Wait(int timeout);
+
   void Signal() { semaphore_signal(semaphore_); }
 
  private:
@@ -548,57 +470,107 @@ class MacOSSemaphore : public Semaphore {
 };
 
 
+bool MacOSSemaphore::Wait(int timeout) {
+  mach_timespec_t ts;
+  ts.tv_sec = timeout / 1000000;
+  ts.tv_nsec = (timeout % 1000000) * 1000;
+  return semaphore_timedwait(semaphore_, ts) != KERN_OPERATION_TIMED_OUT;
+}
+
+
 Semaphore* OS::CreateSemaphore(int count) {
   return new MacOSSemaphore(count);
 }
 
+
 #ifdef ENABLE_LOGGING_AND_PROFILING
-
-static Sampler* active_sampler_ = NULL;
-
-static void ProfilerSignalHandler(int signal, siginfo_t* info, void* context) {
-  USE(info);
-  if (signal != SIGPROF) return;
-  if (active_sampler_ == NULL) return;
-
-  TickSample sample;
-
-  // If profiling, we extract the current pc and sp.
-  if (active_sampler_->IsProfiling()) {
-    // Extracting the sample from the context is extremely machine dependent.
-    ucontext_t* ucontext = reinterpret_cast<ucontext_t*>(context);
-    mcontext_t& mcontext = ucontext->uc_mcontext;
-#if __DARWIN_UNIX03
-    sample.pc = mcontext->__ss.__eip;
-    sample.sp = mcontext->__ss.__esp;
-#else  // !__DARWIN_UNIX03
-    sample.pc = mcontext->ss.eip;
-    sample.sp = mcontext->ss.esp;
-#endif  // __DARWIN_UNIX03
-  }
-
-  // We always sample the VM state.
-  sample.state = Logger::state();
-
-  active_sampler_->Tick(&sample);
-}
-
 
 class Sampler::PlatformData : public Malloced {
  public:
-  PlatformData() {
-    signal_handler_installed_ = false;
+  explicit PlatformData(Sampler* sampler)
+      : sampler_(sampler),
+        task_self_(mach_task_self()),
+        profiled_thread_(0),
+        sampler_thread_(0) {
   }
 
-  bool signal_handler_installed_;
-  struct sigaction old_signal_handler_;
-  struct itimerval old_timer_value_;
+  Sampler* sampler_;
+  // Note: for profiled_thread_ Mach primitives are used instead of PThread's
+  // because the latter doesn't provide thread manipulation primitives required.
+  // For details, consult "Mac OS X Internals" book, Section 7.3.
+  mach_port_t task_self_;
+  thread_act_t profiled_thread_;
+  pthread_t sampler_thread_;
+
+  // Sampler thread handler.
+  void Runner() {
+    // Loop until the sampler is disengaged.
+    while (sampler_->IsActive()) {
+      TickSample sample;
+
+      // If profiling, we record the pc and sp of the profiled thread.
+      if (sampler_->IsProfiling()
+          && KERN_SUCCESS == thread_suspend(profiled_thread_)) {
+#if V8_HOST_ARCH_X64
+        thread_state_flavor_t flavor = x86_THREAD_STATE64;
+        x86_thread_state64_t state;
+        mach_msg_type_number_t count = x86_THREAD_STATE64_COUNT;
+#if __DARWIN_UNIX03
+#define REGISTER_FIELD(name) __r ## name
+#else
+#define REGISTER_FIELD(name) r ## name
+#endif  // __DARWIN_UNIX03
+#elif V8_HOST_ARCH_IA32
+        thread_state_flavor_t flavor = i386_THREAD_STATE;
+        i386_thread_state_t state;
+        mach_msg_type_number_t count = i386_THREAD_STATE_COUNT;
+#if __DARWIN_UNIX03
+#define REGISTER_FIELD(name) __e ## name
+#else
+#define REGISTER_FIELD(name) e ## name
+#endif  // __DARWIN_UNIX03
+#else
+#error Unsupported Mac OS X host architecture.
+#endif  // V8_HOST_ARCH
+
+        if (thread_get_state(profiled_thread_,
+                             flavor,
+                             reinterpret_cast<natural_t*>(&state),
+                             &count) == KERN_SUCCESS) {
+          sample.pc = state.REGISTER_FIELD(ip);
+          sample.sp = state.REGISTER_FIELD(sp);
+          sample.fp = state.REGISTER_FIELD(bp);
+          sampler_->SampleStack(&sample);
+        }
+        thread_resume(profiled_thread_);
+      }
+
+      // We always sample the VM state.
+      sample.state = Logger::state();
+      // Invoke tick handler with program counter and stack pointer.
+      sampler_->Tick(&sample);
+
+      // Wait until next sampling.
+      usleep(sampler_->interval_ * 1000);
+    }
+  }
 };
+
+#undef REGISTER_FIELD
+
+
+// Entry point for sampler thread.
+static void* SamplerEntry(void* arg) {
+  Sampler::PlatformData* data =
+      reinterpret_cast<Sampler::PlatformData*>(arg);
+  data->Runner();
+  return 0;
+}
 
 
 Sampler::Sampler(int interval, bool profiling)
     : interval_(interval), profiling_(profiling), active_(false) {
-  data_ = new PlatformData();
+  data_ = new PlatformData(this);
 }
 
 
@@ -608,43 +580,40 @@ Sampler::~Sampler() {
 
 
 void Sampler::Start() {
-  // There can only be one active sampler at the time on POSIX
-  // platforms.
-  if (active_sampler_ != NULL) return;
+  // If we are profiling, we need to be able to access the calling
+  // thread.
+  if (IsProfiling()) {
+    data_->profiled_thread_ = mach_thread_self();
+  }
 
-  // Request profiling signals.
-  struct sigaction sa;
-  sa.sa_sigaction = ProfilerSignalHandler;
-  sigemptyset(&sa.sa_mask);
-  sa.sa_flags = SA_SIGINFO;
-  if (sigaction(SIGPROF, &sa, &data_->old_signal_handler_) != 0) return;
-  data_->signal_handler_installed_ = true;
+  // Create sampler thread with high priority.
+  // According to POSIX spec, when SCHED_FIFO policy is used, a thread
+  // runs until it exits or blocks.
+  pthread_attr_t sched_attr;
+  sched_param fifo_param;
+  pthread_attr_init(&sched_attr);
+  pthread_attr_setinheritsched(&sched_attr, PTHREAD_EXPLICIT_SCHED);
+  pthread_attr_setschedpolicy(&sched_attr, SCHED_FIFO);
+  fifo_param.sched_priority = sched_get_priority_max(SCHED_FIFO);
+  pthread_attr_setschedparam(&sched_attr, &fifo_param);
 
-  // Set the itimer to generate a tick for each interval.
-  itimerval itimer;
-  itimer.it_interval.tv_sec = interval_ / 1000;
-  itimer.it_interval.tv_usec = (interval_ % 1000) * 1000;
-  itimer.it_value.tv_sec = itimer.it_interval.tv_sec;
-  itimer.it_value.tv_usec = itimer.it_interval.tv_usec;
-  setitimer(ITIMER_PROF, &itimer, &data_->old_timer_value_);
-
-  // Set this sampler as the active sampler.
-  active_sampler_ = this;
   active_ = true;
+  pthread_create(&data_->sampler_thread_, &sched_attr, SamplerEntry, data_);
 }
 
 
 void Sampler::Stop() {
-  // Restore old signal handler
-  if (data_->signal_handler_installed_) {
-    setitimer(ITIMER_PROF, &data_->old_timer_value_, NULL);
-    sigaction(SIGPROF, &data_->old_signal_handler_, 0);
-    data_->signal_handler_installed_ = false;
-  }
-
-  // This sampler is no longer the active sampler.
-  active_sampler_ = NULL;
+  // Seting active to false triggers termination of the sampler
+  // thread.
   active_ = false;
+
+  // Wait for sampler thread to terminate.
+  pthread_join(data_->sampler_thread_, NULL);
+
+  // Deallocate Mach port for thread.
+  if (IsProfiling()) {
+    mach_port_deallocate(data_->task_self_, data_->profiled_thread_);
+  }
 }
 
 #endif  // ENABLE_LOGGING_AND_PROFILING

@@ -157,27 +157,23 @@ TEST(NewSpace) {
   CHECK(Heap::ConfigureHeapDefault());
   CHECK(MemoryAllocator::Setup(Heap::MaxCapacity()));
 
-  NewSpace* s = new NewSpace(Heap::InitialSemiSpaceSize(),
-                             Heap::SemiSpaceSize(),
-                             NEW_SPACE);
-  CHECK(s != NULL);
+  NewSpace new_space;
 
   void* chunk =
       MemoryAllocator::ReserveInitialChunk(2 * Heap::YoungGenerationSize());
   CHECK(chunk != NULL);
   Address start = RoundUp(static_cast<Address>(chunk),
                           Heap::YoungGenerationSize());
-  CHECK(s->Setup(start, Heap::YoungGenerationSize()));
-  CHECK(s->HasBeenSetup());
+  CHECK(new_space.Setup(start, Heap::YoungGenerationSize()));
+  CHECK(new_space.HasBeenSetup());
 
-  while (s->Available() >= Page::kMaxHeapObjectSize) {
-    Object* obj = s->AllocateRaw(Page::kMaxHeapObjectSize);
+  while (new_space.Available() >= Page::kMaxHeapObjectSize) {
+    Object* obj = new_space.AllocateRaw(Page::kMaxHeapObjectSize);
     CHECK(!obj->IsFailure());
-    CHECK(s->Contains(HeapObject::cast(obj)));
+    CHECK(new_space.Contains(HeapObject::cast(obj)));
   }
 
-  s->TearDown();
-  delete s;
+  new_space.TearDown();
   MemoryAllocator::TearDown();
 }
 
@@ -211,13 +207,10 @@ TEST(OldSpace) {
 
 
 TEST(LargeObjectSpace) {
-  CHECK(Heap::ConfigureHeapDefault());
-  MemoryAllocator::Setup(Heap::MaxCapacity());
+  CHECK(Heap::Setup(false));
 
-  LargeObjectSpace* lo = new LargeObjectSpace(LO_SPACE);
+  LargeObjectSpace* lo = Heap::lo_space();
   CHECK(lo != NULL);
-
-  CHECK(lo->Setup());
 
   Map* faked_map = reinterpret_cast<Map*>(HeapObject::FromAddress(0));
   int lo_size = Page::kPageSize;

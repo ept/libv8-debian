@@ -28,7 +28,8 @@
 #ifndef V8_RUNTIME_H_
 #define V8_RUNTIME_H_
 
-namespace v8 { namespace internal {
+namespace v8 {
+namespace internal {
 
 // The interface to C++ runtime functions.
 
@@ -37,7 +38,10 @@ namespace v8 { namespace internal {
 // release and debug mode.
 // This macro should only be used by the macro RUNTIME_FUNCTION_LIST.
 
-#define RUNTIME_FUNCTION_LIST_ALWAYS(F) \
+// WARNING: RUNTIME_FUNCTION_LIST_ALWAYS_* is a very large macro that caused
+// MSVC Intellisense to crash.  It was broken into two macros to work around
+// this problem. Please avoid large recursive macros whenever possible.
+#define RUNTIME_FUNCTION_LIST_ALWAYS_1(F) \
   /* Property access */ \
   F(GetProperty, 2) \
   F(KeyedGetProperty, 2) \
@@ -49,14 +53,18 @@ namespace v8 { namespace internal {
   F(GetPropertyNames, 1) \
   F(GetPropertyNamesFast, 1) \
   F(GetArgumentsProperty, 1) \
+  F(ToFastProperties, 1) \
+  F(ToSlowProperties, 1) \
   \
   F(IsInPrototypeChain, 2) \
+  F(SetHiddenPrototype, 2) \
   \
   F(IsConstructCall, 0) \
   \
   /* Utilities */ \
   F(GetCalledFunction, 0) \
   F(GetFunctionDelegate, 1) \
+  F(GetConstructorDelegate, 1) \
   F(NewArguments, 1) \
   F(NewArgumentsFast, 3) \
   F(LazyCompile, 1) \
@@ -64,10 +72,7 @@ namespace v8 { namespace internal {
   \
   /* Array join support */ \
   F(PushIfAbsent, 2) \
-  \
-  /* ConsStrings */ \
-  F(ConsStringFst, 1) \
-  F(ConsStringSnd, 1) \
+  F(ArrayConcat, 1) \
   \
   /* Conversions */ \
   F(ToBool, 1) \
@@ -87,6 +92,7 @@ namespace v8 { namespace internal {
   F(NumberToInteger, 1) \
   F(NumberToJSUint32, 1) \
   F(NumberToJSInt32, 1) \
+  F(NumberToSmi, 1) \
   \
   /* Arithmetic operations */ \
   F(NumberAdd, 2) \
@@ -129,7 +135,6 @@ namespace v8 { namespace internal {
   F(Math_floor, 1) \
   F(Math_log, 1) \
   F(Math_pow, 2) \
-  F(Math_random, 0) \
   F(Math_round, 1) \
   F(Math_sin, 1) \
   F(Math_sqrt, 1) \
@@ -137,8 +142,7 @@ namespace v8 { namespace internal {
   \
   /* Regular expressions */ \
   F(RegExpCompile, 3) \
-  F(RegExpExec, 3) \
-  F(RegExpExecGlobal, 2) \
+  F(RegExpExec, 4) \
   \
   /* Strings */ \
   F(StringCharCodeAt, 2) \
@@ -146,13 +150,16 @@ namespace v8 { namespace internal {
   F(StringLastIndexOf, 3) \
   F(StringLocaleCompare, 2) \
   F(StringSlice, 3) \
+  F(StringReplaceRegExpWithString, 4) \
+  F(StringMatch, 3) \
   \
   /* Numbers */ \
   F(NumberToRadixString, 2) \
   F(NumberToFixed, 2) \
   F(NumberToExponential, 2) \
-  F(NumberToPrecision, 2) \
-  \
+  F(NumberToPrecision, 2)
+
+#define RUNTIME_FUNCTION_LIST_ALWAYS_2(F) \
   /* Reflection */ \
   F(FunctionSetInstanceClassName, 2) \
   F(FunctionSetLength, 2) \
@@ -162,21 +169,23 @@ namespace v8 { namespace internal {
   F(FunctionGetSourceCode, 1) \
   F(FunctionGetScript, 1) \
   F(FunctionGetScriptSourcePosition, 1) \
+  F(FunctionGetPositionForOffset, 2) \
+  F(FunctionIsAPIFunction, 1) \
   F(GetScript, 1) \
+  F(CollectStackTrace, 2) \
   \
   F(ClassOf, 1) \
-  F(IsDateClass, 1) \
-  F(IsStringClass, 1) \
-  F(IsArrayClass, 1) \
   F(SetCode, 2) \
   \
   F(CreateApiFunction, 1) \
   F(IsTemplate, 1) \
   F(GetTemplateField, 2) \
+  F(DisableAccessChecks, 1) \
+  F(EnableAccessChecks, 1) \
   \
   /* Dates */ \
   F(DateCurrentTime, 0) \
-  F(DateParseString, 1) \
+  F(DateParseString, 2) \
   F(DateLocalTimezone, 1) \
   F(DateLocalTimeOffset, 0) \
   F(DateDaylightSavingsOffset, 1) \
@@ -185,18 +194,18 @@ namespace v8 { namespace internal {
   F(NumberIsFinite, 1) \
   \
   /* Globals */ \
-  F(CompileString, 3) \
-  F(CompileScript, 4) \
+  F(CompileString, 2) \
   F(GlobalPrint, 1) \
   \
   /* Eval */ \
-  F(EvalReceiver, 1) \
+  F(GlobalReceiver, 1) \
+  F(ResolvePossiblyDirectEval, 2) \
   \
   F(SetProperty, -1 /* 3 or 4 */) \
   F(IgnoreAttributesAndSetProperty, -1 /* 3 or 4 */) \
   \
   /* Arrays */ \
-  F(RemoveArrayHoles, 1) \
+  F(RemoveArrayHoles, 2) \
   F(GetArrayKeys, 2) \
   F(MoveArrayContents, 2) \
   F(EstimateNumberOfElements, 1) \
@@ -205,11 +214,61 @@ namespace v8 { namespace internal {
   F(DefineAccessor, -1 /* 4 or 5 */) \
   F(LookupAccessor, 3) \
   \
+  /* Literals */ \
+  F(MaterializeRegExpLiteral, 4)\
+  F(CreateArrayLiteralBoilerplate, 3) \
+  F(CreateObjectLiteralBoilerplate, 3) \
+  F(CloneLiteralBoilerplate, 1) \
+  F(CloneShallowLiteralBoilerplate, 1) \
+  \
+  /* Catch context extension objects */ \
+  F(CreateCatchExtensionObject, 2) \
+  \
+  /* Statements */ \
+  F(NewClosure, 2) \
+  F(NewObject, 1) \
+  F(Throw, 1) \
+  F(ReThrow, 1) \
+  F(ThrowReferenceError, 1) \
+  F(StackGuard, 1) \
+  \
+  /* Contexts */ \
+  F(NewContext, 1) \
+  F(PushContext, 1) \
+  F(PushCatchContext, 1) \
+  F(LookupContext, 2) \
+  F(LoadContextSlot, 2) \
+  F(LoadContextSlotNoReferenceError, 2) \
+  F(StoreContextSlot, 3) \
+  \
+  /* Declarations and initialization */ \
+  F(DeclareGlobals, 3) \
+  F(DeclareContextSlot, 4) \
+  F(InitializeVarGlobal, -1 /* 1 or 2 */) \
+  F(InitializeConstGlobal, 2) \
+  F(InitializeConstContextSlot, 3) \
+  F(OptimizeObjectForAddingMultipleProperties, 2) \
+  F(TransformToFastProperties, 1) \
+  \
   /* Debugging */ \
-  F(AddDebugEventListener, 2) \
-  F(RemoveDebugEventListener, 1) \
+  F(DebugPrint, 1) \
+  F(DebugTrace, 0) \
+  F(TraceEnter, 0) \
+  F(TraceExit, 1) \
+  F(Abort, 2) \
+  /* Logging */ \
+  F(Log, 2) \
+  \
+  /* Pseudo functions - handled as macros by parser */ \
+  F(IS_VAR, 1)
+
+#ifdef ENABLE_DEBUGGER_SUPPORT
+#define RUNTIME_FUNCTION_LIST_DEBUGGER_SUPPORT(F) \
+  /* Debugger support*/ \
+  F(DebugBreak, 0) \
+  F(SetDebugEventListener, 2) \
   F(Break, 0) \
-  F(DebugGetLocalPropertyDetails, 2) \
+  F(DebugGetPropertyDetails, 2) \
   F(DebugGetProperty, 2) \
   F(DebugLocalPropertyNames, 1) \
   F(DebugLocalElementNames, 1) \
@@ -224,7 +283,12 @@ namespace v8 { namespace internal {
   F(CheckExecutionState, 1) \
   F(GetFrameCount, 1) \
   F(GetFrameDetails, 2) \
+  F(GetScopeCount, 2) \
+  F(GetScopeDetails, 3) \
+  F(DebugPrintScopes, 0) \
   F(GetCFrames, 1) \
+  F(GetThreadCount, 1) \
+  F(GetThreadDetails, 2) \
   F(GetBreakLocations, 1) \
   F(SetFunctionBreakPoint, 3) \
   F(SetScriptBreakPoint, 3) \
@@ -237,50 +301,14 @@ namespace v8 { namespace internal {
   F(DebugGetLoadedScripts, 0) \
   F(DebugReferencedBy, 3) \
   F(DebugConstructedBy, 2) \
-  F(GetPrototype, 1) \
+  F(DebugGetPrototype, 1) \
   F(SystemBreak, 0) \
-  \
-  /* Literals */ \
-  F(MaterializeRegExpLiteral, 4)\
-  F(CreateArrayLiteral, 2) \
-  F(CreateObjectLiteralBoilerplate, 3) \
-  F(CloneObjectLiteralBoilerplate, 1) \
-  \
-  /* Statements */ \
-  F(NewClosure, 2) \
-  F(NewObject, 1) \
-  F(Throw, 1) \
-  F(ReThrow, 1) \
-  F(ThrowReferenceError, 1) \
-  F(StackGuard, 1) \
-  \
-  /* Contexts */ \
-  F(NewContext, 1) \
-  F(PushContext, 1) \
-  F(LookupContext, 2) \
-  F(LoadContextSlot, 2) \
-  F(LoadContextSlotNoReferenceError, 2) \
-  F(StoreContextSlot, 3) \
-  \
-  /* Declarations and initialization */ \
-  F(DeclareGlobals, 3) \
-  F(DeclareContextSlot, 4) \
-  F(InitializeVarGlobal, -1 /* 1 or 2 */) \
-  F(InitializeConstGlobal, 2) \
-  F(InitializeConstContextSlot, 3) \
-  \
-  /* Debugging */ \
-  F(DebugPrint, 1) \
-  F(DebugTrace, 1) \
-  F(TraceEnter, 1) \
-  F(TraceExit, 1) \
-  F(DebugBreak, 1) \
-  F(FunctionGetAssemblerCode, 1) \
-  F(Abort, 2) \
-  \
-  /* Pseudo functions - handled as macros by parser */ \
-  F(IS_VAR, 1)
-
+  F(DebugDisassembleFunction, 1) \
+  F(DebugDisassembleConstructor, 1) \
+  F(FunctionGetInferredName, 1)
+#else
+#define RUNTIME_FUNCTION_LIST_DEBUGGER_SUPPORT(F)
+#endif
 
 #ifdef DEBUG
 #define RUNTIME_FUNCTION_LIST_DEBUG(F) \
@@ -297,8 +325,10 @@ namespace v8 { namespace internal {
 // via a native call by name (from within JS code).
 
 #define RUNTIME_FUNCTION_LIST(F) \
-  RUNTIME_FUNCTION_LIST_ALWAYS(F) \
-  RUNTIME_FUNCTION_LIST_DEBUG(F)
+  RUNTIME_FUNCTION_LIST_ALWAYS_1(F) \
+  RUNTIME_FUNCTION_LIST_ALWAYS_2(F) \
+  RUNTIME_FUNCTION_LIST_DEBUG(F) \
+  RUNTIME_FUNCTION_LIST_DEBUGGER_SUPPORT(F)
 
 // ----------------------------------------------------------------------------
 // Runtime provides access to all C++ runtime functions.
@@ -311,7 +341,6 @@ class Runtime : public AllStatic {
     kNofFunctions
 #undef F
   };
-  static Object* CreateArrayLiteral(Arguments args);
 
   // Runtime function descriptor.
   struct Function {
@@ -338,6 +367,8 @@ class Runtime : public AllStatic {
 
   static int StringMatch(Handle<String> sub, Handle<String> pat, int index);
 
+  static bool IsUpperCaseChar(uint16_t ch);
+
   // TODO(1240886): The following three methods are *not* handle safe,
   // but accept handle arguments. This seems fragile.
 
@@ -350,7 +381,19 @@ class Runtime : public AllStatic {
                                    Handle<Object> value,
                                    PropertyAttributes attr);
 
+  static Object* ForceSetObjectProperty(Handle<JSObject> object,
+                                        Handle<Object> key,
+                                        Handle<Object> value,
+                                        PropertyAttributes attr);
+
+  static Object* ForceDeleteObjectProperty(Handle<JSObject> object,
+                                           Handle<Object> key);
+
   static Object* GetObjectProperty(Handle<Object> object, Handle<Object> key);
+
+  // This function is used in FunctionNameUsing* tests.
+  static Object* FindSharedFunctionInfoInScript(Handle<Script> script,
+                                                int position);
 
   // Helper functions used stubs.
   static void PerformGC(Object* result);

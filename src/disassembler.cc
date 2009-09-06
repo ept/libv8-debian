@@ -28,7 +28,7 @@
 #include "v8.h"
 
 #include "code-stubs.h"
-#include "codegen.h"
+#include "codegen-inl.h"
 #include "debug.h"
 #include "disasm.h"
 #include "disassembler.h"
@@ -36,16 +36,18 @@
 #include "serialize.h"
 #include "string-stream.h"
 
-namespace v8 { namespace internal {
+namespace v8 {
+namespace internal {
 
 #ifdef ENABLE_DISASSEMBLER
 
 void Disassembler::Dump(FILE* f, byte* begin, byte* end) {
   for (byte* pc = begin; pc < end; pc++) {
     if (f == NULL) {
-      PrintF("%p  %4d  %02x\n", pc, pc - begin, *pc);
+      PrintF("%" V8PRIxPTR "  %4" V8PRIdPTR "  %02x\n", pc, pc - begin, *pc);
     } else {
-      fprintf(f, "%p  %4d  %02x\n", pc, pc - begin, *pc);
+      fprintf(f, "%" V8PRIxPTR "  %4" V8PRIdPTR "  %02x\n",
+              reinterpret_cast<uintptr_t>(pc), pc - begin, *pc);
     }
   }
 }
@@ -99,7 +101,7 @@ static void DumpBuffer(FILE* f, char* buff) {
   }
 }
 
-static const int kOutBufferSize = 256 + String::kMaxShortPrintLength;
+static const int kOutBufferSize = 2048 + String::kMaxShortPrintLength;
 static const int kRelocInfoPosition = 57;
 
 static int DecodeIt(FILE* f,
@@ -144,8 +146,8 @@ static int DecodeIt(FILE* f,
         // raw pointer embedded in code stream, e.g., jump table
         byte* ptr = *reinterpret_cast<byte**>(pc);
         OS::SNPrintF(decode_buffer,
-                     "%08x      jump table entry %4d",
-                     reinterpret_cast<int32_t>(ptr),
+                     "%08" V8PRIxPTR "      jump table entry %4" V8PRIdPTR,
+                     ptr,
                      ptr - begin);
         pc += 4;
       } else {
@@ -217,7 +219,7 @@ static int DecodeIt(FILE* f,
         HeapStringAllocator allocator;
         StringStream accumulator(&allocator);
         relocinfo.target_object()->ShortPrint(&accumulator);
-        SmartPointer<char> obj_name = accumulator.ToCString();
+        SmartPointer<const char> obj_name = accumulator.ToCString();
         out.AddFormatted("    ;; object: %s", *obj_name);
       } else if (rmode == RelocInfo::EXTERNAL_REFERENCE) {
         const char* reference_name =
@@ -228,7 +230,7 @@ static int DecodeIt(FILE* f,
         if (rmode == RelocInfo::CONSTRUCT_CALL) {
           out.AddFormatted(" constructor,");
         }
-        Code* code = Debug::GetCodeTarget(relocinfo.target_address());
+        Code* code = Code::GetCodeFromTargetAddress(relocinfo.target_address());
         Code::Kind kind = code->kind();
         if (code->is_inline_cache_stub()) {
           if (rmode == RelocInfo::CODE_TARGET_CONTEXT) {
@@ -237,6 +239,13 @@ static int DecodeIt(FILE* f,
           InlineCacheState ic_state = code->ic_state();
           out.AddFormatted(" %s, %s", Code::Kind2String(kind),
               Code::ICState2String(ic_state));
+          if (ic_state == MONOMORPHIC) {
+            PropertyType type = code->type();
+            out.AddFormatted(", %s", Code::PropertyType2String(type));
+          }
+          if (code->ic_in_loop() == IN_LOOP) {
+            out.AddFormatted(", in_loop");
+          }
           if (kind == Code::CALL_IC) {
             out.AddFormatted(", argc = %d", code->arguments_count());
           }

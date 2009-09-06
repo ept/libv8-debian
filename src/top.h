@@ -30,7 +30,8 @@
 
 #include "frames-inl.h"
 
-namespace v8 { namespace internal {
+namespace v8 {
+namespace internal {
 
 
 #define RETURN_IF_SCHEDULED_EXCEPTION() \
@@ -38,15 +39,21 @@ namespace v8 { namespace internal {
 
 // Top has static variables used for JavaScript execution.
 
-class SaveContext;  // Forward decleration.
+class SaveContext;  // Forward declaration.
 
 class ThreadLocalTop BASE_EMBEDDED {
  public:
-  Context* security_context_;
   // The context where the current execution method is created and for variable
   // lookups.
   Context* context_;
+  int thread_id_;
   Object* pending_exception_;
+  bool has_pending_message_;
+  const char* pending_message_;
+  Object* pending_message_obj_;
+  Script* pending_message_script_;
+  int pending_message_start_pos_;
+  int pending_message_end_pos_;
   // Use a separate value for scheduled exceptions to preserve the
   // invariants that hold about pending_exception.  We may want to
   // unify them later.
@@ -54,10 +61,14 @@ class ThreadLocalTop BASE_EMBEDDED {
   bool external_caught_exception_;
   v8::TryCatch* try_catch_handler_;
   SaveContext* save_context_;
+  v8::TryCatch* catcher_;
 
   // Stack.
   Address c_entry_fp_;  // the frame pointer of the top c entry frame
   Address handler_;   // try-blocks are chained through the stack
+#ifdef ENABLE_LOGGING_AND_PROFILING
+  Address js_entry_sp_;  // the stack pointer of the bottom js entry frame
+#endif
   bool stack_is_cooked_;
   inline bool stack_is_cooked() { return stack_is_cooked_; }
   inline void set_stack_is_cooked(bool value) { stack_is_cooked_ = value; }
@@ -70,35 +81,31 @@ class ThreadLocalTop BASE_EMBEDDED {
 };
 
 #define TOP_ADDRESS_LIST(C) \
-  C(handler_address)                    \
+  C(handler_address)                   \
   C(c_entry_fp_address)                \
   C(context_address)                   \
   C(pending_exception_address)         \
-  C(external_caught_exception_address) \
-  C(security_context_address)
+  C(external_caught_exception_address)
+
+#ifdef ENABLE_LOGGING_AND_PROFILING
+#define TOP_ADDRESS_LIST_PROF(C)       \
+  C(js_entry_sp_address)
+#else
+#define TOP_ADDRESS_LIST_PROF(C)
+#endif
+
 
 class Top {
  public:
   enum AddressId {
 #define C(name) k_##name,
     TOP_ADDRESS_LIST(C)
+    TOP_ADDRESS_LIST_PROF(C)
 #undef C
     k_top_address_count
   };
 
   static Address get_address_from_id(AddressId id);
-
-  // Access to the security context from which JS execution started.
-  // In a browser world, it is the JS context of the frame which initiated
-  // JavaScript execution.
-  static Context* security_context() { return thread_local_.security_context_; }
-  static void set_security_context(Context* context) {
-    ASSERT(context == NULL || context->IsGlobalContext());
-    thread_local_.security_context_ = context;
-  }
-  static Context** security_context_address() {
-    return &thread_local_.security_context_;
-  }
 
   // Access to top context (where the current function object was created).
   static Context* context() { return thread_local_.context_; }
@@ -111,6 +118,10 @@ class Top {
   static void set_save_context(SaveContext* save) {
     thread_local_.save_context_ = save;
   }
+
+  // Access to current thread id.
+  static int thread_id() { return thread_local_.thread_id_; }
+  static void set_thread_id(int id) { thread_local_.thread_id_ = id; }
 
   // Interface to pending exception.
   static Object* pending_exception() {
@@ -133,6 +144,12 @@ class Top {
   static bool has_pending_exception() {
     return !thread_local_.pending_exception_->IsTheHole();
   }
+  static void clear_pending_message() {
+    thread_local_.has_pending_message_ = false;
+    thread_local_.pending_message_ = NULL;
+    thread_local_.pending_message_obj_ = Heap::the_hole_value();
+    thread_local_.pending_message_script_ = NULL;
+  }
   static v8::TryCatch* try_catch_handler() {
     return thread_local_.try_catch_handler_;
   }
@@ -140,7 +157,8 @@ class Top {
   // exceptions.  If an exception was thrown and not handled by an external
   // handler the exception is scheduled to be rethrown when we return to running
   // JavaScript code.  If an exception is scheduled true is returned.
-  static bool optional_reschedule_exception(bool is_bottom_call);
+  static bool OptionalRescheduleException(bool is_bottom_call);
+
 
   static bool* external_caught_exception_address() {
     return &thread_local_.external_caught_exception_;
@@ -155,6 +173,13 @@ class Top {
   }
   static void clear_scheduled_exception() {
     thread_local_.scheduled_exception_ = Heap::the_hole_value();
+  }
+
+  static void setup_external_caught() {
+    thread_local_.external_caught_exception_ =
+        has_pending_exception() &&
+        (thread_local_.catcher_ != NULL) &&
+        (thread_local_.try_catch_handler_ == thread_local_.catcher_);
   }
 
   // Tells whether the current context has experienced an out of memory
@@ -172,20 +197,25 @@ class Top {
   }
   static inline Address* handler_address() { return &thread_local_.handler_; }
 
+#ifdef ENABLE_LOGGING_AND_PROFILING
+  // Bottom JS entry (see StackTracer::Trace in log.cc).
+  static Address js_entry_sp(ThreadLocalTop* thread) {
+    return thread->js_entry_sp_;
+  }
+  static inline Address* js_entry_sp_address() {
+    return &thread_local_.js_entry_sp_;
+  }
+#endif
+
   // Generated code scratch locations.
   static void* formal_count_address() { return &thread_local_.formal_count_; }
 
-  static void new_break(StackFrame::Id break_frame_id);
-  static void set_break(StackFrame::Id break_frame_id, int break_id);
-  static bool check_break(int break_id);
-  static bool is_break();
-  static StackFrame::Id break_frame_id();
-  static int break_id();
-
-  static void MarkCompactPrologue();
-  static void MarkCompactEpilogue();
-  static void MarkCompactPrologue(char* archived_thread_data);
-  static void MarkCompactEpilogue(char* archived_thread_data);
+  static void MarkCompactPrologue(bool is_compacting);
+  static void MarkCompactEpilogue(bool is_compacting);
+  static void MarkCompactPrologue(bool is_compacting,
+                                  char* archived_thread_data);
+  static void MarkCompactEpilogue(bool is_compacting,
+                                  char* archived_thread_data);
   static void PrintCurrentStackTrace(FILE* out);
   static void PrintStackTrace(FILE* out, char* thread_data);
   static void PrintStack(StringStream* accumulator);
@@ -214,14 +244,16 @@ class Top {
   // originally.
   static Failure* ReThrow(Object* exception, MessageLocation* location = NULL);
   static void ScheduleThrow(Object* exception);
+  static void ReportPendingMessages();
+  static Failure* ThrowIllegalOperation();
 
   // Promote a scheduled exception to pending. Asserts has_scheduled_exception.
   static Object* PromoteScheduledException();
   static void DoThrow(Object* exception,
                       MessageLocation* location,
-                      const char* message,
-                      bool is_rethrow);
-  static bool ShouldReportException(bool* is_caught_externally);
+                      const char* message);
+  static bool ShouldReturnException(bool* is_caught_externally,
+                                    bool catchable_by_javascript);
   static void ReportUncaughtException(Handle<Object> exception,
                                       MessageLocation* location,
                                       Handle<String> stack_trace);
@@ -235,6 +267,7 @@ class Top {
 
   // Out of resource exception helpers.
   static Failure* StackOverflow();
+  static Failure* TerminateExecution();
 
   // Administration
   static void Initialize();
@@ -243,17 +276,26 @@ class Top {
   static void Iterate(ObjectVisitor* v, ThreadLocalTop* t);
   static char* Iterate(ObjectVisitor* v, char* t);
 
-  static Handle<JSObject> global() {
-    return Handle<JSObject>(context()->global());
+  // Returns the global object of the current context. It could be
+  // a builtin object, or a js global object.
+  static Handle<GlobalObject> global() {
+    return Handle<GlobalObject>(context()->global());
   }
+
+  // Returns the global proxy object of the current context.
+  static Object* global_proxy() {
+    return context()->global_proxy();
+  }
+
+  // Returns the current global context.
   static Handle<Context> global_context();
+
+  // Returns the global context of the calling JavaScript code.  That
+  // is, the global context of the top-most JavaScript frame.
+  static Handle<Context> GetCallingGlobalContext();
 
   static Handle<JSBuiltinsObject> builtins() {
     return Handle<JSBuiltinsObject>(thread_local_.context_->builtins());
-  }
-  static Handle<JSBuiltinsObject> security_context_builtins() {
-    return Handle<JSBuiltinsObject>(
-        thread_local_.security_context_->builtins());
   }
 
   static Object* LookupSpecialFunction(JSObject* receiver,
@@ -275,26 +317,21 @@ class Top {
   static char* ArchiveThread(char* to);
   static char* RestoreThread(char* from);
 
+  static const char* kStackOverflowMessage;
+
  private:
   // The context that initiated this JS execution.
   static ThreadLocalTop thread_local_;
   static void InitializeThreadLocal();
   static void PrintStackTrace(FILE* out, ThreadLocalTop* thread);
-  static void MarkCompactPrologue(ThreadLocalTop* archived_thread_data);
-  static void MarkCompactEpilogue(ThreadLocalTop* archived_thread_data);
+  static void MarkCompactPrologue(bool is_compacting,
+                                  ThreadLocalTop* archived_thread_data);
+  static void MarkCompactEpilogue(bool is_compacting,
+                                  ThreadLocalTop* archived_thread_data);
 
   // Debug.
   // Mutex for serializing access to break control structures.
   static Mutex* break_access_;
-
-  // ID of the frame where execution is stopped by debugger.
-  static StackFrame::Id break_frame_id_;
-
-  // Counter to create unique id for each debug break.
-  static int break_count_;
-
-  // Current debug break, 0 if running.
-  static int break_id_;
 
   friend class SaveContext;
   friend class AssertNoContextChange;
@@ -304,29 +341,44 @@ class Top {
 };
 
 
+// If the GCC version is 4.1.x or 4.2.x an additional field is added to the
+// class as a work around for a bug in the generated code found with these
+// versions of GCC. See V8 issue 122 for details.
 class SaveContext BASE_EMBEDDED {
  public:
-  SaveContext() :
-      context_(Top::context()),
-      security_context_(Top::security_context()),
-      prev_(Top::save_context()) {
+  SaveContext()
+      : context_(Top::context()),
+#if __GNUC_VERSION__ >= 40100 && __GNUC_VERSION__ < 40300
+        dummy_(Top::context()),
+#endif
+        prev_(Top::save_context()) {
     Top::set_save_context(this);
+
+    // If there is no JS frame under the current C frame, use the value 0.
+    JavaScriptFrameIterator it;
+    js_sp_ = it.done() ? 0 : it.frame()->sp();
   }
 
   ~SaveContext() {
     Top::set_context(*context_);
-    Top::set_security_context(*security_context_);
     Top::set_save_context(prev_);
   }
 
   Handle<Context> context() { return context_; }
-  Handle<Context> security_context() { return security_context_; }
   SaveContext* prev() { return prev_; }
+
+  // Returns true if this save context is below a given JavaScript frame.
+  bool below(JavaScriptFrame* frame) {
+    return (js_sp_ == 0) || (frame->sp() < js_sp_);
+  }
 
  private:
   Handle<Context> context_;
-  Handle<Context> security_context_;
+#if __GNUC_VERSION__ >= 40100 && __GNUC_VERSION__ < 40300
+  Handle<Context> dummy_;
+#endif
   SaveContext* prev_;
+  Address js_sp_;  // The top JS frame's sp when saving context.
 };
 
 
@@ -334,19 +386,16 @@ class AssertNoContextChange BASE_EMBEDDED {
 #ifdef DEBUG
  public:
   AssertNoContextChange() :
-      context_(Top::context()),
-      security_context_(Top::security_context()) {
+      context_(Top::context()) {
   }
 
   ~AssertNoContextChange() {
     ASSERT(Top::context() == *context_);
-    ASSERT(Top::security_context() == *security_context_);
   }
 
  private:
   HandleScope scope_;
   Handle<Context> context_;
-  Handle<Context> security_context_;
 #else
  public:
   AssertNoContextChange() { }

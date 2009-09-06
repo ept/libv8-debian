@@ -30,17 +30,30 @@
 
 #include "counters.h"
 
-namespace v8 { namespace internal {
+namespace v8 {
+namespace internal {
 
-#define STATS_RATE_LIST(SR)                                \
-  SR(gc_compactor, V8.GCCompactor) /* GC Compactor time */ \
-  SR(gc_scavenger, V8.GCScavenger) /* GC Scavenger time */ \
-  SR(compile, V8.Compile)          /* Compile time*/       \
-  SR(compile_eval, V8.CompileEval) /* Eval compile time */ \
-  SR(compile_lazy, V8.CompileLazy) /* Lazy compile time */ \
-  SR(parse, V8.Parse)              /* Parse time */        \
-  SR(parse_lazy, V8.ParseLazy)     /* Lazy parse time */   \
-  SR(pre_parse, V8.PreParse)       /* Pre-parse time */
+#define HISTOGRAM_TIMER_LIST(HT)                                      \
+  /* Garbage collection timers. */                                    \
+  HT(gc_compactor, V8.GCCompactor)                                    \
+  HT(gc_scavenger, V8.GCScavenger)                                    \
+  HT(gc_context, V8.GCContext) /* GC context cleanup time */          \
+  /* Parsing timers. */                                               \
+  HT(parse, V8.Parse)                                                 \
+  HT(parse_lazy, V8.ParseLazy)                                        \
+  HT(pre_parse, V8.PreParse)                                          \
+  /* Total compilation times. */                                      \
+  HT(compile, V8.Compile)                                             \
+  HT(compile_eval, V8.CompileEval)                                    \
+  HT(compile_lazy, V8.CompileLazy)                                    \
+  /* Individual compiler passes. */                                   \
+  HT(rewriting, V8.Rewriting)                                         \
+  HT(usage_analysis, V8.UsageAnalysis)                                \
+  HT(variable_allocation, V8.VariableAllocation)                      \
+  HT(ast_optimization, V8.ASTOptimization)                            \
+  HT(code_generation, V8.CodeGeneration)                              \
+  HT(deferred_code_generation, V8.DeferredCodeGeneration)             \
+  HT(code_creation, V8.CodeCreation)
 
 // WARNING: STATS_COUNTER_LIST_* is a very large macro that is causing MSVC
 // Intellisense to crash.  It was broken into two macros (each of length 40
@@ -50,8 +63,6 @@ namespace v8 { namespace internal {
 #define STATS_COUNTER_LIST_1(SC)                                 \
   /* Global Handle Count*/                                       \
   SC(global_handles, V8.GlobalHandles)                           \
-  /* Global Object Count */                                      \
-  SC(global_objects, V8.GlobalObjects)                           \
   /* Mallocs from PCRE */                                        \
   SC(pcre_mallocs, V8.PcreMallocCount)                           \
   /* OS Memory allocated */                                      \
@@ -73,6 +84,8 @@ namespace v8 { namespace internal {
   SC(arguments_adaptors, V8.ArgumentsAdaptors)                   \
   SC(compilation_cache_hits, V8.CompilationCacheHits)            \
   SC(compilation_cache_misses, V8.CompilationCacheMisses)        \
+  SC(regexp_cache_hits, V8.RegExpCacheHits)                      \
+  SC(regexp_cache_misses, V8.RegExpCacheMisses)                  \
   /* Amount of evaled source code. */                            \
   SC(total_eval_size, V8.TotalEvalSize)                          \
   /* Amount of loaded source code. */                            \
@@ -99,6 +112,8 @@ namespace v8 { namespace internal {
      V8.GCCompactorCausedByOldspaceExhaustion)                      \
   SC(gc_compactor_caused_by_weak_handles,                           \
      V8.GCCompactorCausedByWeakHandles)                             \
+  SC(gc_last_resort_from_js, V8.GCLastResortFromJS)                 \
+  SC(gc_last_resort_from_handles, V8.GCLastResortFromHandles)       \
   /* How is the generic keyed-load stub used? */                    \
   SC(keyed_load_generic_smi, V8.KeyedLoadGenericSmi)                \
   SC(keyed_load_generic_symbol, V8.KeyedLoadGenericSymbol)          \
@@ -111,21 +126,38 @@ namespace v8 { namespace internal {
   SC(keyed_load_field, V8.KeyedLoadField)                           \
   SC(keyed_load_callback, V8.KeyedLoadCallback)                     \
   SC(keyed_load_interceptor, V8.KeyedLoadInterceptor)               \
+  SC(keyed_load_inline, V8.KeyedLoadInline)                         \
+  SC(keyed_load_inline_miss, V8.KeyedLoadInlineMiss)                \
+  SC(named_load_inline, V8.NamedLoadInline)                         \
+  SC(named_load_inline_miss, V8.NamedLoadInlineMiss)                \
+  SC(named_load_global_inline, V8.NamedLoadGlobalInline)            \
+  SC(named_load_global_inline_miss, V8.NamedLoadGlobalInlineMiss)   \
   SC(keyed_store_field, V8.KeyedStoreField)                         \
+  SC(keyed_store_inline, V8.KeyedStoreInline)                       \
+  SC(keyed_store_inline_miss, V8.KeyedStoreInlineMiss)              \
+  SC(named_store_global_inline, V8.NamedStoreGlobalInline)          \
+  SC(named_store_global_inline_miss, V8.NamedStoreGlobalInlineMiss) \
+  SC(call_global_inline, V8.CallGlobalInline)                       \
+  SC(call_global_inline_miss, V8.CallGlobalInlineMiss)              \
+  SC(constructed_objects, V8.ConstructedObjects)                    \
+  SC(constructed_objects_runtime, V8.ConstructedObjectsRuntime)     \
+  SC(constructed_objects_stub, V8.ConstructedObjectsStub)           \
   SC(for_in, V8.ForIn)                                              \
   SC(enum_cache_hits, V8.EnumCacheHits)                             \
   SC(enum_cache_misses, V8.EnumCacheMisses)                         \
   SC(reloc_info_count, V8.RelocInfoCount)                           \
-  SC(reloc_info_size, V8.RelocInfoSize)
+  SC(reloc_info_size, V8.RelocInfoSize)                             \
+  SC(zone_segment_bytes, V8.ZoneSegmentBytes)                       \
+  SC(compute_entry_frame, V8.ComputeEntryFrame)
 
 
 // This file contains all the v8 counters that are in use.
 class Counters : AllStatic {
  public:
-#define SR(name, caption) \
-  static StatsRate name;
-  STATS_RATE_LIST(SR)
-#undef SR
+#define HT(name, caption) \
+  static HistogramTimer name;
+  HISTOGRAM_TIMER_LIST(HT)
+#undef HT
 
 #define SC(name, caption) \
   static StatsCounter name;
@@ -135,7 +167,7 @@ class Counters : AllStatic {
 
   enum Id {
 #define RATE_ID(name, caption) k_##name,
-    STATS_RATE_LIST(RATE_ID)
+    HISTOGRAM_TIMER_LIST(RATE_ID)
 #undef RATE_ID
 #define COUNTER_ID(name, caption) k_##name,
   STATS_COUNTER_LIST_1(COUNTER_ID)
@@ -153,4 +185,4 @@ class Counters : AllStatic {
 
 } }  // namespace v8::internal
 
-#endif  // V8_COUNTERS_H_
+#endif  // V8_V8_COUNTERS_H_

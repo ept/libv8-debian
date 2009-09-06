@@ -63,6 +63,7 @@ class ProgressIndicator(object):
     self.remaining = len(cases)
     self.total = len(cases)
     self.failed = [ ]
+    self.crashed = 0
     self.terminate = False
     self.lock = threading.Lock()
 
@@ -124,6 +125,8 @@ class ProgressIndicator(object):
       self.lock.acquire()
       if output.UnexpectedOutput():
         self.failed.append(output)
+        if output.HasCrashed():
+          self.crashed += 1
       else:
         self.succeeded += 1
       self.remaining -= 1
@@ -159,6 +162,10 @@ class SimpleProgressIndicator(ProgressIndicator):
         print "--- stdout ---"
         print failed.output.stdout.strip()
       print "Command: %s" % EscapeCommand(failed.command)
+      if failed.HasCrashed():
+        print "--- CRASHED ---"
+      if failed.HasTimedOut():
+        print "--- TIMEOUT ---"
     if len(self.failed) == 0:
       print "==="
       print "=== All tests succeeded"
@@ -167,6 +174,8 @@ class SimpleProgressIndicator(ProgressIndicator):
       print
       print "==="
       print "=== %i tests failed" % len(self.failed)
+      if self.crashed > 0:
+        print "=== %i tests CRASHED" % self.crashed
       print "==="
 
 
@@ -178,7 +187,10 @@ class VerboseProgressIndicator(SimpleProgressIndicator):
 
   def HasRun(self, output):
     if output.UnexpectedOutput():
-      outcome = 'FAIL'
+      if output.HasCrashed():
+        outcome = 'CRASH'
+      else:
+        outcome = 'FAIL'
     else:
       outcome = 'pass'
     print 'Done running %s: %s' % (output.test.GetLabel(), outcome)
@@ -194,8 +206,15 @@ class DotsProgressIndicator(SimpleProgressIndicator):
     if (total > 1) and (total % 50 == 1):
       sys.stdout.write('\n')
     if output.UnexpectedOutput():
-      sys.stdout.write('F')
-      sys.stdout.flush()
+      if output.HasCrashed():
+        sys.stdout.write('C')
+        sys.stdout.flush()
+      elif output.HasTimedOut():
+        sys.stdout.write('T')
+        sys.stdout.flush()
+      else:
+        sys.stdout.write('F')
+        sys.stdout.flush()
     else:
       sys.stdout.write('.')
       sys.stdout.flush()
@@ -222,13 +241,17 @@ class CompactProgressIndicator(ProgressIndicator):
     if output.UnexpectedOutput():
       self.ClearLine(self.last_status_length)
       self.PrintFailureHeader(output.test)
-      print "Command: %s" % EscapeCommand(output.command)
       stdout = output.output.stdout.strip()
       if len(stdout):
         print self.templates['stdout'] % stdout
       stderr = output.output.stderr.strip()
       if len(stderr):
         print self.templates['stderr'] % stderr
+      print "Command: %s" % EscapeCommand(output.command)
+      if output.HasCrashed():
+        print "--- CRASHED ---"
+      if output.HasTimedOut():
+        print "--- TIMEOUT ---"
 
   def Truncate(self, str, length):
     if length and (len(str) > (length - 3)):
@@ -298,8 +321,9 @@ PROGRESS_INDICATORS = {
 
 class CommandOutput(object):
 
-  def __init__(self, exit_code, stdout, stderr):
+  def __init__(self, exit_code, timed_out, stdout, stderr):
     self.exit_code = exit_code
+    self.timed_out = timed_out
     self.stdout = stdout
     self.stderr = stderr
 
@@ -329,11 +353,17 @@ class TestCase(object):
   def GetSource(self):
     return "(no source available)"
 
-  def Run(self):
-    command = self.GetCommand()
+  def RunCommand(self, command):
     full_command = self.context.processor(command)
     output = Execute(full_command, self.context, self.context.timeout)
+    self.Cleanup()
     return TestOutput(self, full_command, output)
+
+  def Run(self):
+    return self.RunCommand(self.GetCommand())
+
+  def Cleanup(self):
+    return
 
 
 class TestOutput(object):
@@ -344,11 +374,28 @@ class TestOutput(object):
     self.output = output
 
   def UnexpectedOutput(self):
-    if self.HasFailed():
+    if self.HasCrashed():
+      outcome = CRASH
+    elif self.HasTimedOut():
+      outcome = TIMEOUT
+    elif self.HasFailed():
       outcome = FAIL
     else:
       outcome = PASS
     return not outcome in self.test.outcomes
+
+  def HasCrashed(self):
+    if utils.IsWindows():
+      return 0x80000000 & self.output.exit_code and not (0x3FFFFF00 & self.output.exit_code)
+    else:
+      # Timed out tests will have exit_code -signal.SIGTERM.
+      if self.output.timed_out:
+        return False
+      return self.output.exit_code < 0 and \
+             self.output.exit_code != -signal.SIGABRT
+
+  def HasTimedOut(self):
+    return self.output.timed_out;
 
   def HasFailed(self):
     execution_failed = self.test.DidFail(self.output)
@@ -359,7 +406,7 @@ class TestOutput(object):
 
 
 def KillProcessWithID(pid):
-  if platform.system() == 'Windows':
+  if utils.IsWindows():
     os.popen('taskkill /T /F /PID %d' % pid)
   else:
     os.kill(pid, signal.SIGTERM)
@@ -369,17 +416,38 @@ MAX_SLEEP_TIME = 0.1
 INITIAL_SLEEP_TIME = 0.0001
 SLEEP_TIME_FACTOR = 1.25
 
+SEM_INVALID_VALUE = -1
+SEM_NOGPFAULTERRORBOX = 0x0002 # Microsoft Platform SDK WinBase.h
+
+def Win32SetErrorMode(mode):
+  prev_error_mode = SEM_INVALID_VALUE
+  try:
+    import ctypes
+    prev_error_mode = ctypes.windll.kernel32.SetErrorMode(mode);
+  except ImportError:
+    pass
+  return prev_error_mode
 
 def RunProcess(context, timeout, args, **rest):
   if context.verbose: print "#", " ".join(args)
   popen_args = args
-  if platform.system() == 'Windows':
+  prev_error_mode = SEM_INVALID_VALUE;
+  if utils.IsWindows():
     popen_args = '"' + subprocess.list2cmdline(args) + '"'
+    if context.suppress_dialogs:
+      # Try to change the error mode to avoid dialogs on fatal errors. Don't
+      # touch any existing error mode flags by merging the existing error mode.
+      # See http://blogs.msdn.com/oldnewthing/archive/2004/07/27/198410.aspx.
+      error_mode = SEM_NOGPFAULTERRORBOX;
+      prev_error_mode = Win32SetErrorMode(error_mode);
+      Win32SetErrorMode(error_mode | prev_error_mode);
   process = subprocess.Popen(
-    shell = (platform.system() == 'Windows'),
+    shell = utils.IsWindows(),
     args = popen_args,
     **rest
   )
+  if utils.IsWindows() and context.suppress_dialogs and prev_error_mode != SEM_INVALID_VALUE:
+    Win32SetErrorMode(prev_error_mode)
   # Compute the end time - if the process crosses this limit we
   # consider it timed out.
   if timeout is None: end_time = None
@@ -409,6 +477,13 @@ def PrintError(str):
   sys.stderr.write('\n')
 
 
+def CheckedUnlink(name):
+  try:
+    os.unlink(name)
+  except OSError, e:
+    PrintError("os.unlink() " + str(e))
+
+
 def Execute(args, context, timeout=None):
   (fd_out, outname) = tempfile.mkstemp()
   (fd_err, errname) = tempfile.mkstemp()
@@ -423,14 +498,9 @@ def Execute(args, context, timeout=None):
   os.close(fd_err)
   output = file(outname).read()
   errors = file(errname).read()
-  def CheckedUnlink(name):
-    try:
-      os.unlink(name)
-    except OSError, e:
-      PrintError(str(e))
   CheckedUnlink(outname)
   CheckedUnlink(errname)
-  return CommandOutput(exit_code, output, errors)
+  return CommandOutput(exit_code, timed_out, output, errors)
 
 
 def ExecuteNoCapture(args, context, timeout=None):
@@ -439,7 +509,7 @@ def ExecuteNoCapture(args, context, timeout=None):
     timeout,
     args = args,
   )
-  return CommandOutput(exit_code, "", "")
+  return CommandOutput(exit_code, False, "", "")
 
 
 def CarCdr(path):
@@ -492,7 +562,7 @@ class TestRepository(TestSuite):
     file = None
     try:
       (file, pathname, description) = imp.find_module('testcfg', [ self.path ])
-      module = imp.load_module(self.path, file, pathname, description)
+      module = imp.load_module('testcfg', file, pathname, description)
       self.config = module.GetConfiguration(context, self.path)
     finally:
       if file:
@@ -538,25 +608,25 @@ class LiteralTestSuite(TestSuite):
       test.GetTestStatus(context, sections, defs)
 
 
-PREFIX = {'debug': '_g', 'release': ''}
+SUFFIX = {'debug': '_g', 'release': ''}
 
 
 class Context(object):
 
-  def __init__(self, workspace, buildspace, verbose, vm, timeout, processor):
+  def __init__(self, workspace, buildspace, verbose, vm, timeout, processor, suppress_dialogs):
     self.workspace = workspace
     self.buildspace = buildspace
     self.verbose = verbose
     self.vm_root = vm
     self.timeout = timeout
     self.processor = processor
+    self.suppress_dialogs = suppress_dialogs
 
   def GetVm(self, mode):
-    name = self.vm_root + PREFIX[mode]
-    if platform.system() == 'Windows':
-      return name + '.exe'
-    else:
-      return name
+    name = self.vm_root + SUFFIX[mode]
+    if utils.IsWindows() and not name.endswith('.exe'):
+      name = name + '.exe'
+    return name
 
 def RunTestCases(all_cases, progress, tasks):
   def DoSkip(case):
@@ -839,7 +909,7 @@ def ParseOperatorExpression(scan):
 def ParseConditionalExpression(scan):
   left = ParseOperatorExpression(scan)
   if not left: return None
-  while scan.HasMore() and (scan.Current() == 'IF'):
+  while scan.HasMore() and (scan.Current() == 'if'):
     scan.Advance()
     right = ParseOperatorExpression(scan)
     if not right:
@@ -871,6 +941,9 @@ def ParseCondition(expr):
   scan = Scanner(tokens)
   ast = ParseLogicalExpression(scan)
   if not ast:
+    print "Malformed expression: '%s'" % expr
+    return None
+  if scan.HasMore():
     print "Malformed expression: '%s'" % expr
     return None
   return ast
@@ -1022,6 +1095,8 @@ def BuildOptions():
   result.add_option("--simulator", help="Run tests with architecture simulator",
       default='none')
   result.add_option("--special-command", default=None)
+  result.add_option("--valgrind", help="Run tests through valgrind",
+      default=False, action="store_true")
   result.add_option("--cat", help="Print the source of the tests",
       default=False, action="store_true")
   result.add_option("--warn-unused", help="Report unused rules",
@@ -1030,6 +1105,11 @@ def BuildOptions():
       default=1, type="int")
   result.add_option("--time", help="Print timing information after running",
       default=False, action="store_true")
+  result.add_option("--suppress-dialogs", help="Suppress Windows dialogs for crashing tests",
+        dest="suppress_dialogs", default=True, action="store_true")
+  result.add_option("--no-suppress-dialogs", help="Display Windows dialogs for crashing tests",
+        dest="suppress_dialogs", action="store_false")
+  result.add_option("--shell", help="Path to V8 shell", default="shell");
   return result
 
 
@@ -1056,6 +1136,7 @@ def ProcessOptions(options):
     # was found, set the arch to the guess.
     if options.arch == 'none':
       options.arch = ARCH_GUESS
+    options.scons_flags.append("arch=" + options.arch)
   return True
 
 
@@ -1112,8 +1193,9 @@ def GetSpecialCommandProcessor(value):
     return ExpandCommand
   else:
     pos = value.find('@')
-    prefix = value[:pos].split()
-    suffix = value[pos+1:].split()
+    import urllib
+    prefix = urllib.unquote(value[:pos]).split()
+    suffix = urllib.unquote(value[pos+1:]).split()
     def ExpandCommand(args):
       return prefix + args + suffix
     return ExpandCommand
@@ -1154,20 +1236,28 @@ def Main():
       path = SplitPath(arg)
       paths.append(path)
 
-  # First build the required targets
-  buildspace = abspath('.')
+  # Check for --valgrind option. If enabled, we overwrite the special
+  # command flag with a command that uses the run-valgrind.py script.
+  if options.valgrind:
+    run_valgrind = join(workspace, "tools", "run-valgrind.py")
+    options.special_command = "python -u " + run_valgrind + " @"
+
+  shell = abspath(options.shell)
+  buildspace = dirname(shell)
   context = Context(workspace, buildspace, VERBOSE,
-                    join(buildspace, 'shell'),
+                    shell,
                     options.timeout,
-                    GetSpecialCommandProcessor(options.special_command))
-  if options.j != 1:
-    options.scons_flags += ['-j', str(options.j)]
+                    GetSpecialCommandProcessor(options.special_command),
+                    options.suppress_dialogs)
+  # First build the required targets
   if not options.no_build:
     reqs = [ ]
     for path in paths:
       reqs += root.GetBuildRequirements(path, context)
     reqs = list(set(reqs))
     if len(reqs) > 0:
+      if options.j != 1:
+        options.scons_flags += ['-j', str(options.j)]
       if not BuildRequirements(context, reqs, options.mode, options.scons_flags):
         return 1
 
@@ -1184,10 +1274,14 @@ def Main():
   globally_unused_rules = None
   for path in paths:
     for mode in options.mode:
+      if not exists(context.GetVm(mode)):
+        print "Can't find shell executable: '%s'" % context.GetVm(mode)
+        continue
       env = {
         'mode': mode,
-        'system': platform.system().lower(),
-        'arch': options.arch
+        'system': utils.GuessOS(),
+        'arch': options.arch,
+        'simulator': options.simulator
       }
       test_list = root.ListTests([], path, context, mode)
       unclassified_tests += test_list

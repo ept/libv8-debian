@@ -62,17 +62,34 @@
 // printing / etc in the flag parser code.  We only do this for writable flags.
 #elif defined(FLAG_MODE_META)
 #define FLAG_FULL(ftype, ctype, nam, def, cmt) \
-  { Flag::TYPE_##ftype, #nam, &FLAG_##nam, &FLAGDEFAULT_##nam, cmt },
+  { Flag::TYPE_##ftype, #nam, &FLAG_##nam, &FLAGDEFAULT_##nam, cmt, false },
 #define FLAG_READONLY(ftype, ctype, nam, def, cmt)
 
 #else
 #error No mode supplied when including flags.defs
 #endif
 
+#ifdef FLAG_MODE_DECLARE
+// Structure used to hold a collection of arguments to the JavaScript code.
+struct JSArguments {
+public:
+  JSArguments();
+  JSArguments(int argc, const char** argv);
+  int argc() const;
+  const char** argv();
+  const char*& operator[](int idx);
+  JSArguments& operator=(JSArguments args);
+private:
+  int argc_;
+  const char** argv_;
+};
+#endif
+
 #define DEFINE_bool(nam, def, cmt) FLAG(BOOL, bool, nam, def, cmt)
 #define DEFINE_int(nam, def, cmt) FLAG(INT, int, nam, def, cmt)
 #define DEFINE_float(nam, def, cmt) FLAG(FLOAT, double, nam, def, cmt)
 #define DEFINE_string(nam, def, cmt) FLAG(STRING, const char*, nam, def, cmt)
+#define DEFINE_args(nam, def, cmt) FLAG(ARGS, JSArguments, nam, def, cmt)
 
 //
 // Flags in all modes.
@@ -93,6 +110,7 @@ DEFINE_string(expose_natives_as, NULL, "expose natives in global object")
 DEFINE_string(expose_debug_as, NULL, "expose debug in global object")
 DEFINE_string(natives_file, NULL, "alternative natives file")
 DEFINE_bool(expose_gc, false, "expose gc extension")
+DEFINE_int(stack_trace_limit, 10, "number of stack frames to capture")
 
 // builtins-ia32.cc
 DEFINE_bool(inline_new, true, "use fast inline allocation")
@@ -115,13 +133,17 @@ DEFINE_bool(debug_info, true, "add debug information to compiled functions")
 DEFINE_bool(strict, false, "strict error checking")
 DEFINE_int(min_preparse_length, 1024,
            "Minimum length for automatic enable preparsing")
+DEFINE_bool(multipass, false, "use the multipass code generator")
+
+// compilation-cache.cc
+DEFINE_bool(compilation_cache, true, "enable compilation cache")
 
 // debug.cc
 DEFINE_bool(remote_debugging, false, "enable remote debugging")
 DEFINE_bool(trace_debug_json, false, "trace debugging JSON request/response")
-
-// execution.cc
-DEFINE_bool(call_regexp, false, "allow calls to RegExp objects")
+DEFINE_bool(debugger_auto_break, false,
+            "automatically set the debug break flag when debugger commands are "
+            "in the queue (experimental)")
 
 // frames.cc
 DEFINE_int(max_stack_trace_source_length, 300,
@@ -134,7 +156,14 @@ DEFINE_bool(gc_global, false, "always perform global GCs")
 DEFINE_int(gc_interval, -1, "garbage collect after <n> allocations")
 DEFINE_bool(trace_gc, false,
             "print one trace line following each garbage collection")
+DEFINE_bool(trace_gc_verbose, false,
+            "print more details following each garbage collection")
+DEFINE_bool(collect_maps, true,
+            "garbage collect maps from which no objects can be reached")
 
+// v8.cc
+DEFINE_bool(use_idle_notification, true,
+            "Use idle notification to reduce memory footprint.")
 // ic.cc
 DEFINE_bool(use_ic, true, "use inline caching")
 
@@ -160,6 +189,9 @@ DEFINE_bool(h, false, "print this message")
 // parser.cc
 DEFINE_bool(allow_natives_syntax, false, "allow natives syntax")
 
+// rewriter.cc
+DEFINE_bool(optimize_ast, true, "optimize the ast")
+
 // simulator-arm.cc
 DEFINE_bool(trace_sim, false, "trace simulator execution")
 DEFINE_int(stop_sim_at, 0, "Simulator stop after x number of instructions")
@@ -177,6 +209,10 @@ DEFINE_bool(usage_computation, true, "compute variable usage counts")
 DEFINE_bool(preemption, false,
             "activate a 100ms timer that switches between V8 threads")
 
+// Regexp
+DEFINE_bool(trace_regexps, false, "trace regexp execution")
+DEFINE_bool(regexp_optimization, true, "generate optimized regexp code")
+
 // Testing flags test/cctest/test-{flags,api,serialization}.cc
 DEFINE_bool(testing_bool_flag, true, "testing_bool_flag")
 DEFINE_int(testing_int_flag, 13, "testing_int_flag")
@@ -191,7 +227,20 @@ DEFINE_string(testing_serialization_file, "/tmp/serdes",
               "file in which to serialize heap")
 #endif
 
+//
+// Dev shell flags
+//
 
+DEFINE_bool(help, false, "Print usage message, including flags, on console")
+DEFINE_bool(dump_counters, false, "Dump counters on exit")
+DEFINE_bool(debugger, true, "Enable JavaScript debugger")
+DEFINE_bool(remote_debugger, false, "Connect JavaScript debugger to the "
+                                    "debugger agent in another process")
+DEFINE_bool(debugger_agent, false, "Enable debugger agent")
+DEFINE_int(debugger_port, 5858, "Port to use for remote debugging")
+DEFINE_string(map_counters, false, "Map counters to a file")
+DEFINE_args(js_arguments, JSArguments(),
+            "Pass all remaining arguments to the script. Alias for \"--\".")
 
 //
 // Debug only flags
@@ -207,13 +256,9 @@ DEFINE_string(testing_serialization_file, "/tmp/serdes",
 DEFINE_bool(enable_slow_asserts, false,
             "enable asserts that are slow to execute")
 
-// code-stubs.cc
-DEFINE_bool(print_code_stubs, false, "print code stubs")
-
 // codegen-ia32.cc / codegen-arm.cc
 DEFINE_bool(trace_codegen, false,
             "print name of functions for which code is generated")
-DEFINE_bool(print_builtin_code, false, "print generated code for builtins")
 DEFINE_bool(print_source, false, "pretty print source code")
 DEFINE_bool(print_builtin_source, false,
             "pretty print source code for builtins")
@@ -226,6 +271,7 @@ DEFINE_string(stop_at, "", "function name where to insert a breakpoint")
 // compiler.cc
 DEFINE_bool(print_builtin_scopes, false, "print scopes for builtins")
 DEFINE_bool(print_scopes, false, "print scopes")
+DEFINE_bool(print_cfg, false, "print control-flow graph")
 
 // contexts.cc
 DEFINE_bool(trace_contexts, false, "trace contexts operations")
@@ -260,6 +306,12 @@ DEFINE_bool(collect_heap_spill_statistics, false,
             "report heap spill statistics along with heap_stats "
             "(requires heap_stats)")
 
+// Regexp
+DEFINE_bool(trace_regexp_bytecodes, false, "trace regexp bytecode execution")
+DEFINE_bool(trace_regexp_assembler,
+            false,
+            "trace regexp macro assembler calls.")
+
 //
 // Logging and profiling only flags
 //
@@ -274,6 +326,7 @@ DEFINE_bool(collect_heap_spill_statistics, false,
 DEFINE_bool(log, false,
             "Minimal logging (no API, code, GC, suspect, or handles samples).")
 DEFINE_bool(log_all, false, "Log all events to the log file.")
+DEFINE_bool(log_runtime, false, "Activate runtime system %Log call.")
 DEFINE_bool(log_api, false, "Log API events to the log file.")
 DEFINE_bool(log_code, false,
             "Log code events to the log file without profiling.")
@@ -282,12 +335,33 @@ DEFINE_bool(log_gc, false,
 DEFINE_bool(log_handles, false, "Log global handle events.")
 DEFINE_bool(log_state_changes, false, "Log state changes.")
 DEFINE_bool(log_suspect, false, "Log suspect operations.")
+DEFINE_bool(compress_log, false,
+            "Compress log to save space (makes log less human-readable).")
 DEFINE_bool(prof, false,
             "Log statistical profiling information (implies --log-code).")
+DEFINE_bool(prof_auto, true,
+            "Used with --prof, starts profiling automatically")
+DEFINE_bool(prof_lazy, false,
+            "Used with --prof, only does sampling and logging"
+            " when profiler is active (implies --noprof_auto).")
 DEFINE_bool(log_regexp, false, "Log regular expression execution.")
 DEFINE_bool(sliding_state_window, false,
             "Update sliding state window counters.")
 DEFINE_string(logfile, "v8.log", "Specify the name of the log file.")
+DEFINE_bool(oprofile, false, "Enable JIT agent for OProfile.")
+
+//
+// Heap protection flags
+// Using heap protection requires ENABLE_LOGGING_AND_PROFILING as well.
+//
+#ifdef ENABLE_HEAP_PROTECTION
+#undef FLAG
+#define FLAG FLAG_FULL
+
+DEFINE_bool(protect_heap, false,
+            "Protect/unprotect V8's heap when leaving/entring the VM.")
+
+#endif
 
 //
 // Disassembler only flags
@@ -299,9 +373,12 @@ DEFINE_string(logfile, "v8.log", "Specify the name of the log file.")
 #define FLAG FLAG_READONLY
 #endif
 
+// code-stubs.cc
+DEFINE_bool(print_code_stubs, false, "print code stubs")
+
 // codegen-ia32.cc / codegen-arm.cc
 DEFINE_bool(print_code, false, "print generated code")
-
+DEFINE_bool(print_builtin_code, false, "print generated code for builtins")
 
 // Cleanup...
 #undef FLAG_FULL

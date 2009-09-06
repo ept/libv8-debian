@@ -51,6 +51,7 @@ function Instantiate(data, name) {
       var Constructor = %GetTemplateField(data, kApiConstructorOffset);
       var result = Constructor ? new (Instantiate(Constructor))() : {};
       ConfigureTemplateInstance(result, data);
+      result = %ToFastProperties(result);
       return result;
     default:
       throw 'Unknown API tag <' + tag + '>';
@@ -59,35 +60,51 @@ function Instantiate(data, name) {
 
 
 function InstantiateFunction(data, name) {
+  // We need a reference to kApiFunctionCache in the stack frame
+  // if we need to bail out from a stack overflow.
+  var cache = kApiFunctionCache;
   var serialNumber = %GetTemplateField(data, kApiSerialNumberOffset);
-  if (!(serialNumber in kApiFunctionCache)) {
-    kApiFunctionCache[serialNumber] = null;
-    var fun = %CreateApiFunction(data);
-    if (name) %FunctionSetName(fun, name);
-    kApiFunctionCache[serialNumber] = fun;
-    var prototype = %GetTemplateField(data, kApiPrototypeTemplateOffset);
-    fun.prototype = prototype ? Instantiate(prototype) : {};
-    %SetProperty(fun.prototype, "constructor", fun, DONT_ENUM);
-    var parent = %GetTemplateField(data, kApiParentTemplateOffset);
-    if (parent) {
-      var parent_fun = Instantiate(parent);
-      fun.prototype.__proto__ = parent_fun.prototype;
+  var isFunctionCached =
+   (serialNumber in cache) && (cache[serialNumber] != kUninitialized);
+  if (!isFunctionCached) {
+    try {
+      cache[serialNumber] = null;
+      var fun = %CreateApiFunction(data);
+      if (name) %FunctionSetName(fun, name);
+      cache[serialNumber] = fun;
+      var prototype = %GetTemplateField(data, kApiPrototypeTemplateOffset);
+      fun.prototype = prototype ? Instantiate(prototype) : {};
+      %SetProperty(fun.prototype, "constructor", fun, DONT_ENUM);
+      var parent = %GetTemplateField(data, kApiParentTemplateOffset);
+      if (parent) {
+        var parent_fun = Instantiate(parent);
+        fun.prototype.__proto__ = parent_fun.prototype;
+      }
+      ConfigureTemplateInstance(fun, data);
+    } catch (e) {
+      cache[serialNumber] = kUninitialized;
+      throw e;
     }
-    ConfigureTemplateInstance(fun, data);
   }
-  return kApiFunctionCache[serialNumber];
+  return cache[serialNumber];
 }
 
 
 function ConfigureTemplateInstance(obj, data) {
   var properties = %GetTemplateField(data, kApiPropertyListOffset);
   if (properties) {
-    for (var i = 0; i < properties[0]; i += 3) {
-      var name = properties[i + 1];
-      var prop_data = properties[i + 2];
-      var attributes = properties[i + 3];
-      var value = Instantiate(prop_data, name);
-      %SetProperty(obj, name, value, attributes);
+    // Disable access checks while instantiating the object.
+    var requires_access_checks = %DisableAccessChecks(obj);
+    try {
+      for (var i = 0; i < properties[0]; i += 3) {
+        var name = properties[i + 1];
+        var prop_data = properties[i + 2];
+        var attributes = properties[i + 3];
+        var value = Instantiate(prop_data, name);
+        %SetProperty(obj, name, value, attributes);
+      }
+    } finally {
+      if (requires_access_checks) %EnableAccessChecks(obj);
     }
   }
 }

@@ -33,24 +33,25 @@
 
 function testDateParse(string) {
   var d = Date.parse(string);
-  assertEquals(946713600000, d, string);
+  assertEquals(946713600000, d, "parse: " + string);
 };
 
 
 // For local time we just test that parsing returns non-NaN positive
 // number of milliseconds to make it timezone independent.
 function testDateParseLocalTime(string) {
-  var d = Date.parse(string);
-  assertTrue(d > 0 && !isNaN(d));
+  var d = Date.parse("parse-local-time:" + string);
+  assertTrue(!isNaN(d), "parse-local-time: " + string + " is NaN.");
+  assertTrue(d > 0, "parse-local-time: " + string + " <= 0.");
 };
 
 
 function testDateParseMisc(array) {
-  assertTrue(array.length == 2);
+  assertEquals(2, array.length, "array [" + array + "] length != 2.");
   var string = array[0];
   var expected = array[1];
   var d = Date.parse(string);
-  assertEquals(expected, d, string);
+  assertEquals(expected, d, "parse-misc: " + string);
 }
 
 
@@ -249,11 +250,11 @@ testCasesMisc.forEach(testDateParseMisc);
 
 
 // Test that we can parse our own date format.
-// (Dates from 1970 to ~2070 with 95h steps.)
-for (var i = 0; i < 24 * 365 * 100; i += 95) {
+// (Dates from 1970 to ~2070 with 150h steps.)
+for (var i = 0; i < 24 * 365 * 100; i += 150) {
   var ms = i * (3600 * 1000);
   var s = (new Date(ms)).toString();
-  assertEquals(ms, Date.parse(s), s);
+  assertEquals(ms, Date.parse(s), "parse own: " + s);
 }
 
 // Negative tests.
@@ -262,4 +263,6 @@ var testCasesNegative = [
     'May 25 2008 1:30( )AM (PM)',
     'May 25 2008 AAA (GMT)'];
 
-testCasesNegative.forEach(function (s) { assertTrue(isNaN(Date.parse(s))); });
+testCasesNegative.forEach(function (s) {
+    assertTrue(isNaN(Date.parse(s)), s + " is not NaN.");
+});

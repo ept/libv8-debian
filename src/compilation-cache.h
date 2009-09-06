@@ -28,23 +28,15 @@
 #ifndef V8_COMPILATION_CACHE_H_
 #define V8_COMPILATION_CACHE_H_
 
-namespace v8 { namespace internal {
+namespace v8 {
+namespace internal {
 
 
 // The compilation cache keeps function boilerplates for compiled
 // scripts and evals. The boilerplates are looked up using the source
-// string as the key.
+// string as the key. For regular expressions the compilation data is cached.
 class CompilationCache {
  public:
-  // The same source code string has different compiled code for
-  // scripts and evals. Internally, we use separate caches to avoid
-  // getting the wrong kind of entry when looking up.
-  enum Entry {
-    SCRIPT,
-    EVAL_GLOBAL,
-    EVAL_CONTEXTUAL
-  };
-
   // Finds the script function boilerplate for a source
   // string. Returns an empty handle if the cache doesn't contain a
   // script for the given source string with the right origin.
@@ -53,17 +45,35 @@ class CompilationCache {
                                          int line_offset,
                                          int column_offset);
 
-  // Finds the function boilerplate for a source string for
-  // eval. Returns an empty handle if the cache doesn't contain a
-  // script for the given source string.
+  // Finds the function boilerplate for a source string for eval in a
+  // given context.  Returns an empty handle if the cache doesn't
+  // contain a script for the given source string.
   static Handle<JSFunction> LookupEval(Handle<String> source,
-                                       Entry entry);
+                                       Handle<Context> context,
+                                       bool is_global);
+
+  // Returns the regexp data associated with the given regexp if it
+  // is in cache, otherwise an empty handle.
+  static Handle<FixedArray> LookupRegExp(Handle<String> source,
+                                         JSRegExp::Flags flags);
 
   // Associate the (source, kind) pair to the boilerplate. This may
   // overwrite an existing mapping.
-  static void Associate(Handle<String> source,
-                        Entry entry,
+  static void PutScript(Handle<String> source,
                         Handle<JSFunction> boilerplate);
+
+  // Associate the (source, context->closure()->shared(), kind) triple
+  // with the boilerplate. This may overwrite an existing mapping.
+  static void PutEval(Handle<String> source,
+                      Handle<Context> context,
+                      bool is_global,
+                      Handle<JSFunction> boilerplate);
+
+  // Associate the (source, flags) pair to the given regexp data.
+  // This may overwrite an existing mapping.
+  static void PutRegExp(Handle<String> source,
+                        JSRegExp::Flags flags,
+                        Handle<FixedArray> data);
 
   // Clear the cache - also used to initialize the cache at startup.
   static void Clear();
@@ -73,10 +83,13 @@ class CompilationCache {
 
   // Notify the cache that a mark-sweep garbage collection is about to
   // take place. This is used to retire entries from the cache to
-  // avoid keeping them alive too long without using them. For now, we
-  // just clear the cache but we should consider are more
-  // sophisticated LRU scheme.
-  static void MarkCompactPrologue() { Clear(); }
+  // avoid keeping them alive too long without using them.
+  static void MarkCompactPrologue();
+
+  // Enable/disable compilation cache. Used by debugger to disable compilation
+  // cache during debugging to make sure new scripts are always compiled.
+  static void Enable();
+  static void Disable();
 };
 
 

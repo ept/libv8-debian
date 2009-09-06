@@ -32,12 +32,13 @@
 #include "factory.h"
 #include "macro-assembler.h"
 
-namespace v8 { namespace internal {
+namespace v8 {
+namespace internal {
 
 Handle<Code> CodeStub::GetCode() {
   uint32_t key = GetKey();
-  int index = Heap::code_stubs()->FindNumberEntry(key);
-  if (index == -1) {
+  int index = Heap::code_stubs()->FindEntry(key);
+  if (index == NumberDictionary::kNotFound) {
     HandleScope scope;
 
     // Update the static counter each time a new code stub is generated.
@@ -58,33 +59,36 @@ Handle<Code> CodeStub::GetCode() {
     masm.GetCode(&desc);
 
     // Copy the generated code into a heap object, and store the major key.
-    Code::Flags flags = Code::ComputeFlags(Code::STUB);
-    Handle<Code> code = Factory::NewCode(desc, NULL, flags);
+    Code::Flags flags = Code::ComputeFlags(Code::STUB, InLoop());
+    Handle<Code> code = Factory::NewCode(desc, NULL, flags, masm.CodeObject());
     code->set_major_key(MajorKey());
 
     // Add unresolved entries in the code to the fixup list.
     Bootstrapper::AddFixup(*code, &masm);
 
-    LOG(CodeCreateEvent("Stub", *code, GetName()));
+    LOG(CodeCreateEvent(Logger::STUB_TAG, *code, GetName()));
     Counters::total_stubs_code_size.Increment(code->instruction_size());
 
-#ifdef DEBUG
+#ifdef ENABLE_DISASSEMBLER
     if (FLAG_print_code_stubs) {
+#ifdef DEBUG
       Print();
-      code->Print();
+#endif
+      code->Disassemble(GetName());
       PrintF("\n");
     }
 #endif
 
     // Update the dictionary and the root in Heap.
-    Handle<Dictionary> dict =
-        Factory::DictionaryAtNumberPut(Handle<Dictionary>(Heap::code_stubs()),
-                                       key,
-                                       code);
-    Heap::set_code_stubs(*dict);
-    index = Heap::code_stubs()->FindNumberEntry(key);
+    Handle<NumberDictionary> dict =
+        Factory::DictionaryAtNumberPut(
+            Handle<NumberDictionary>(Heap::code_stubs()),
+            key,
+            code);
+    Heap::public_set_code_stubs(*dict);
+    index = Heap::code_stubs()->FindEntry(key);
   }
-  ASSERT(index != -1);
+  ASSERT(index != NumberDictionary::kNotFound);
 
   return Handle<Code>(Code::cast(Heap::code_stubs()->ValueAt(index)));
 }
@@ -130,6 +134,10 @@ const char* CodeStub::MajorName(CodeStub::Major major_key) {
       return "InvokeBuiltin";
     case JSExit:
       return "JSExit";
+    case ConvertToDouble:
+      return "ConvertToDouble";
+    case WriteInt32ToHeapNumber:
+      return "WriteInt32ToHeapNumber";
     default:
       UNREACHABLE();
       return NULL;

@@ -29,85 +29,8 @@
 
 #include "dateparser.h"
 
-namespace v8 { namespace internal {
-
-
-bool DateParser::Parse(String* str, FixedArray* out) {
-  ASSERT(out->length() == OUTPUT_SIZE);
-
-  InputReader in(str);
-  TimeZoneComposer tz;
-  TimeComposer time;
-  DayComposer day;
-
-  while (!in.IsEnd()) {
-    if (in.IsAsciiDigit()) {
-      // Parse a number (possibly with 1 or 2 trailing colons).
-      int n = in.ReadUnsignedNumber();
-      if (in.Skip(':')) {
-        if (in.Skip(':')) {
-          // n + "::"
-          if (!time.IsEmpty()) return false;
-          time.Add(n);
-          time.Add(0);
-        } else {
-          // n + ":"
-          if (!time.Add(n)) return false;
-        }
-      } else if (tz.IsExpecting(n)) {
-        tz.SetAbsoluteMinute(n);
-      } else if (time.IsExpecting(n)) {
-        time.AddFinal(n);
-        // Require end or white space immediately after finalizing time.
-        if (!in.IsEnd() && !in.SkipWhiteSpace()) return false;
-      } else {
-        if (!day.Add(n)) return false;
-        in.Skip('-');  // Ignore suffix '-' for year, month, or day.
-      }
-    } else if (in.IsAsciiAlphaOrAbove()) {
-      // Parse a "word" (sequence of chars. >= 'A').
-      uint32_t pre[KeywordTable::kPrefixLength];
-      int len = in.ReadWord(pre, KeywordTable::kPrefixLength);
-      int index = KeywordTable::Lookup(pre, len);
-      KeywordType type = KeywordTable::GetType(index);
-
-      if (type == AM_PM && !time.IsEmpty()) {
-        time.SetHourOffset(KeywordTable::GetValue(index));
-      } else if (type == MONTH_NAME) {
-        day.SetNamedMonth(KeywordTable::GetValue(index));
-        in.Skip('-');  // Ignore suffix '-' for month names
-      } else if (type == TIME_ZONE_NAME && in.HasReadNumber()) {
-        tz.Set(KeywordTable::GetValue(index));
-      } else {
-        // Garbage words are illegal if no number read yet.
-        if (in.HasReadNumber()) return false;
-      }
-    } else if (in.IsAsciiSign() && (tz.IsUTC() || !time.IsEmpty())) {
-      // Parse UTC offset (only after UTC or time).
-      tz.SetSign(in.GetAsciiSignValue());
-      in.Next();
-      int n = in.ReadUnsignedNumber();
-      if (in.Skip(':')) {
-        tz.SetAbsoluteHour(n);
-        tz.SetAbsoluteMinute(kNone);
-      } else {
-        tz.SetAbsoluteHour(n / 100);
-        tz.SetAbsoluteMinute(n % 100);
-      }
-    } else if (in.Is('(')) {
-      // Ignore anything from '(' to a matching ')' or end of string.
-      in.SkipParentheses();
-    } else if ((in.IsAsciiSign() || in.Is(')')) && in.HasReadNumber()) {
-      // Extra sign or ')' is illegal if no number read yet.
-      return false;
-    } else {
-      // Ignore other characters.
-      in.Next();
-    }
-  }
-  return day.Write(out) && time.Write(out) && tz.Write(out);
-}
-
+namespace v8 {
+namespace internal {
 
 bool DateParser::DayComposer::Write(FixedArray* output) {
   int year = 0;  // Default year is 0 (=> 2000) for KJS compatibility.
@@ -149,9 +72,15 @@ bool DateParser::DayComposer::Write(FixedArray* output) {
 
   if (!Smi::IsValid(year) || !IsMonth(month) || !IsDay(day)) return false;
 
-  output->set(YEAR, Smi::FromInt(year));
-  output->set(MONTH, Smi::FromInt(month - 1));  // 0-based
-  output->set(DAY, Smi::FromInt(day));
+  output->set(YEAR,
+              Smi::FromInt(year),
+              SKIP_WRITE_BARRIER);
+  output->set(MONTH,
+              Smi::FromInt(month - 1),
+              SKIP_WRITE_BARRIER);  // 0-based
+  output->set(DAY,
+              Smi::FromInt(day),
+              SKIP_WRITE_BARRIER);
   return true;
 }
 
@@ -174,12 +103,17 @@ bool DateParser::TimeComposer::Write(FixedArray* output) {
 
   if (!IsHour(hour) || !IsMinute(minute) || !IsSecond(second)) return false;
 
-  output->set(HOUR, Smi::FromInt(hour));
-  output->set(MINUTE, Smi::FromInt(minute));
-  output->set(SECOND, Smi::FromInt(second));
+  output->set(HOUR,
+              Smi::FromInt(hour),
+              SKIP_WRITE_BARRIER);
+  output->set(MINUTE,
+              Smi::FromInt(minute),
+              SKIP_WRITE_BARRIER);
+  output->set(SECOND,
+              Smi::FromInt(second),
+              SKIP_WRITE_BARRIER);
   return true;
 }
-
 
 bool DateParser::TimeZoneComposer::Write(FixedArray* output) {
   if (sign_ != kNone) {
@@ -187,16 +121,19 @@ bool DateParser::TimeZoneComposer::Write(FixedArray* output) {
     if (minute_ == kNone) minute_ = 0;
     int total_seconds = sign_ * (hour_ * 3600 + minute_ * 60);
     if (!Smi::IsValid(total_seconds)) return false;
-    output->set(UTC_OFFSET, Smi::FromInt(total_seconds));
+    output->set(UTC_OFFSET,
+                Smi::FromInt(total_seconds),
+                SKIP_WRITE_BARRIER);
   } else {
-    output->set(UTC_OFFSET, Heap::null_value());
+    output->set(UTC_OFFSET,
+                Heap::null_value(),
+                SKIP_WRITE_BARRIER);
   }
   return true;
 }
 
-
-const int8_t
-DateParser::KeywordTable::array[][DateParser::KeywordTable::kEntrySize] = {
+const int8_t DateParser::KeywordTable::
+    array[][DateParser::KeywordTable::kEntrySize] = {
   {'j', 'a', 'n', DateParser::MONTH_NAME, 1},
   {'f', 'e', 'b', DateParser::MONTH_NAME, 2},
   {'m', 'a', 'r', DateParser::MONTH_NAME, 3},

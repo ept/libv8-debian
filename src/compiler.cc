@@ -1,4 +1,4 @@
-// Copyright 2006-2008 the V8 project authors. All rights reserved.
+// Copyright 2009 the V8 project authors. All rights reserved.
 // Redistribution and use in source and binary forms, with or without
 // modification, are permitted provided that the following conditions are
 // met:
@@ -28,18 +28,22 @@
 #include "v8.h"
 
 #include "bootstrapper.h"
+#include "cfg.h"
 #include "codegen-inl.h"
 #include "compilation-cache.h"
 #include "compiler.h"
 #include "debug.h"
-#include "scopes.h"
+#include "oprofile-agent.h"
 #include "rewriter.h"
+#include "scopes.h"
 #include "usage-analyzer.h"
 
-namespace v8 { namespace internal {
+namespace v8 {
+namespace internal {
 
 static Handle<Code> MakeCode(FunctionLiteral* literal,
                              Handle<Script> script,
+                             Handle<Context> context,
                              bool is_eval) {
   ASSERT(literal != NULL);
 
@@ -50,12 +54,15 @@ static Handle<Code> MakeCode(FunctionLiteral* literal,
     return Handle<Code>::null();
   }
 
-  // Compute top scope and allocate variables. For lazy compilation
-  // the top scope only contains the single lazily compiled function,
-  // so this doesn't re-allocate variables repeatedly.
-  Scope* top = literal->scope();
-  while (top->outer_scope() != NULL) top = top->outer_scope();
-  top->AllocateVariables();
+  {
+    // Compute top scope and allocate variables. For lazy compilation
+    // the top scope only contains the single lazily compiled function,
+    // so this doesn't re-allocate variables repeatedly.
+    HistogramTimerScope timer(&Counters::variable_allocation);
+    Scope* top = literal->scope();
+    while (top->outer_scope() != NULL) top = top->outer_scope();
+    top->AllocateVariables(context);
+  }
 
 #ifdef DEBUG
   if (Bootstrapper::IsActive() ?
@@ -65,25 +72,81 @@ static Handle<Code> MakeCode(FunctionLiteral* literal,
   }
 #endif
 
+  // Optimize the AST.
+  if (!Rewriter::Optimize(literal)) {
+    // Signal a stack overflow by returning a null handle.  The stack
+    // overflow exception will be thrown by the caller.
+    return Handle<Code>::null();
+  }
+
+  if (FLAG_multipass) {
+    CfgGlobals scope(literal);
+    Cfg* cfg = Cfg::Build();
+#ifdef DEBUG
+    if (FLAG_print_cfg && cfg != NULL) {
+      SmartPointer<char> name = literal->name()->ToCString();
+      PrintF("Function \"%s\":\n", *name);
+      cfg->Print();
+      PrintF("\n");
+    }
+#endif
+    if (cfg != NULL) {
+      return cfg->Compile(script);
+    }
+  }
+
   // Generate code and return it.
   Handle<Code> result = CodeGenerator::MakeCode(literal, script, is_eval);
   return result;
 }
 
 
+static bool IsValidJSON(FunctionLiteral* lit) {
+  if (lit->body()->length() != 1)
+    return false;
+  Statement* stmt = lit->body()->at(0);
+  if (stmt->AsExpressionStatement() == NULL)
+    return false;
+  Expression* expr = stmt->AsExpressionStatement()->expression();
+  return expr->IsValidJSON();
+}
+
+
 static Handle<JSFunction> MakeFunction(bool is_global,
                                        bool is_eval,
+                                       Compiler::ValidationState validate,
                                        Handle<Script> script,
+                                       Handle<Context> context,
                                        v8::Extension* extension,
                                        ScriptDataImpl* pre_data) {
-  ZoneScope zone_scope(DELETE_ON_EXIT);
+  CompilationZoneScope zone_scope(DELETE_ON_EXIT);
 
   // Make sure we have an initial stack limit.
   StackGuard guard;
   PostponeInterruptsScope postpone;
 
+  ASSERT(!i::Top::global_context().is_null());
+  script->set_context_data((*i::Top::global_context())->data());
+
+#ifdef ENABLE_DEBUGGER_SUPPORT
+  bool is_json = (validate == Compiler::VALIDATE_JSON);
+  if (is_eval || is_json) {
+    script->set_compilation_type(
+        is_json ? Smi::FromInt(Script::COMPILATION_TYPE_JSON) :
+                               Smi::FromInt(Script::COMPILATION_TYPE_EVAL));
+    // For eval scripts add information on the function from which eval was
+    // called.
+    if (is_eval) {
+      JavaScriptFrameIterator it;
+      script->set_eval_from_function(it.frame()->function());
+      int offset = it.frame()->pc() - it.frame()->code()->instruction_start();
+      script->set_eval_from_instructions_offset(Smi::FromInt(offset));
+    }
+  }
+
   // Notify debugger
   Debugger::OnBeforeCompile(script);
+#endif
 
   // Only allow non-global compiles for eval.
   ASSERT(is_eval || is_global);
@@ -97,16 +160,29 @@ static Handle<JSFunction> MakeFunction(bool is_global,
     return Handle<JSFunction>::null();
   }
 
+  // When parsing JSON we do an ordinary parse and then afterwards
+  // check the AST to ensure it was well-formed.  If not we give a
+  // syntax error.
+  if (validate == Compiler::VALIDATE_JSON && !IsValidJSON(lit)) {
+    HandleScope scope;
+    Handle<JSArray> args = Factory::NewJSArray(1);
+    Handle<Object> source(script->source());
+    SetElement(args, 0, source);
+    Handle<Object> result = Factory::NewSyntaxError("invalid_json", args);
+    Top::Throw(*result, NULL);
+    return Handle<JSFunction>::null();
+  }
+
   // Measure how long it takes to do the compilation; only take the
   // rest of the function into account to avoid overlap with the
   // parsing statistics.
-  StatsRate* rate = is_eval
+  HistogramTimer* rate = is_eval
       ? &Counters::compile_eval
       : &Counters::compile;
-  StatsRateScope timer(rate);
+  HistogramTimerScope timer(rate);
 
   // Compile the code.
-  Handle<Code> code = MakeCode(lit, script, is_eval);
+  Handle<Code> code = MakeCode(lit, script, context, is_eval);
 
   // Check for stack-overflow exceptions.
   if (code.is_null()) {
@@ -114,13 +190,27 @@ static Handle<JSFunction> MakeFunction(bool is_global,
     return Handle<JSFunction>::null();
   }
 
-  if (script->name()->IsString()) {
-    SmartPointer<char> data =
-        String::cast(script->name())->ToCString(DISALLOW_NULLS);
-    LOG(CodeCreateEvent(is_eval ? "Eval" : "Script", *code, *data));
-  } else {
-    LOG(CodeCreateEvent(is_eval ? "Eval" : "Script", *code, ""));
+#if defined ENABLE_LOGGING_AND_PROFILING || defined ENABLE_OPROFILE_AGENT
+  // Log the code generation for the script. Check explicit whether logging is
+  // to avoid allocating when not required.
+  if (Logger::is_logging() || OProfileAgent::is_enabled()) {
+    if (script->name()->IsString()) {
+      SmartPointer<char> data =
+          String::cast(script->name())->ToCString(DISALLOW_NULLS);
+      LOG(CodeCreateEvent(is_eval ? Logger::EVAL_TAG : Logger::SCRIPT_TAG,
+                          *code, *data));
+      OProfileAgent::CreateNativeCodeRegion(*data,
+                                            code->instruction_start(),
+                                            code->instruction_size());
+    } else {
+      LOG(CodeCreateEvent(is_eval ? Logger::EVAL_TAG : Logger::SCRIPT_TAG,
+                          *code, ""));
+      OProfileAgent::CreateNativeCodeRegion(is_eval ? "Eval" : "Script",
+                                            code->instruction_start(),
+                                            code->instruction_size());
+    }
   }
+#endif
 
   // Allocate function.
   Handle<JSFunction> fun =
@@ -129,18 +219,18 @@ static Handle<JSFunction> MakeFunction(bool is_global,
                                       lit->contains_array_literal(),
                                       code);
 
-  CodeGenerator::SetFunctionInfo(fun, lit->scope()->num_parameters(),
-                                 RelocInfo::kNoPosition,
-                                 lit->start_position(), lit->end_position(),
-                                 lit->is_expression(), true, script);
+  ASSERT_EQ(RelocInfo::kNoPosition, lit->function_token_position());
+  CodeGenerator::SetFunctionInfo(fun, lit, true, script);
 
   // Hint to the runtime system used when allocating space for initial
   // property space by setting the expected number of properties for
   // the instances of the function.
   SetExpectedNofPropertiesFromEstimate(fun, lit->expected_property_count());
 
+#ifdef ENABLE_DEBUGGER_SUPPORT
   // Notify debugger
   Debugger::OnAfterCompile(script, fun);
+#endif
 
   return fun;
 }
@@ -154,8 +244,9 @@ Handle<JSFunction> Compiler::Compile(Handle<String> source,
                                      int line_offset, int column_offset,
                                      v8::Extension* extension,
                                      ScriptDataImpl* input_pre_data) {
-  Counters::total_load_size.Increment(source->length());
-  Counters::total_compile_size.Increment(source->length());
+  int source_length = source->length();
+  Counters::total_load_size.Increment(source_length);
+  Counters::total_compile_size.Increment(source_length);
 
   // The VM is in the COMPILER state until exiting this function.
   VMState state(COMPILER);
@@ -172,10 +263,10 @@ Handle<JSFunction> Compiler::Compile(Handle<String> source,
   if (result.is_null()) {
     // No cache entry found. Do pre-parsing and compile the script.
     ScriptDataImpl* pre_data = input_pre_data;
-    if (pre_data == NULL && source->length() >= FLAG_min_preparse_length) {
+    if (pre_data == NULL && source_length >= FLAG_min_preparse_length) {
       Access<SafeStringInputBuffer> buf(&safe_string_input_buffer);
       buf->Reset(source.location());
-      pre_data = PreParse(buf.value(), extension);
+      pre_data = PreParse(source, buf.value(), extension);
     }
 
     // Create a script object describing the script to be compiled.
@@ -187,9 +278,15 @@ Handle<JSFunction> Compiler::Compile(Handle<String> source,
     }
 
     // Compile the function and add it to the cache.
-    result = MakeFunction(true, false, script, extension, pre_data);
+    result = MakeFunction(true,
+                          false,
+                          DONT_VALIDATE_JSON,
+                          script,
+                          Handle<Context>::null(),
+                          extension,
+                          pre_data);
     if (extension == NULL && !result.is_null()) {
-      CompilationCache::Associate(source, CompilationCache::SCRIPT, result);
+      CompilationCache::PutScript(source, result);
     }
 
     // Get rid of the pre-parsing data (if necessary).
@@ -198,40 +295,58 @@ Handle<JSFunction> Compiler::Compile(Handle<String> source,
     }
   }
 
+  if (result.is_null()) Top::ReportPendingMessages();
   return result;
 }
 
 
 Handle<JSFunction> Compiler::CompileEval(Handle<String> source,
-                                         int line_offset,
-                                         bool is_global) {
-  Counters::total_eval_size.Increment(source->length());
-  Counters::total_compile_size.Increment(source->length());
+                                         Handle<Context> context,
+                                         bool is_global,
+                                         ValidationState validate) {
+  // Note that if validation is required then no path through this
+  // function is allowed to return a value without validating that
+  // the input is legal json.
+
+  int source_length = source->length();
+  Counters::total_eval_size.Increment(source_length);
+  Counters::total_compile_size.Increment(source_length);
 
   // The VM is in the COMPILER state until exiting this function.
   VMState state(COMPILER);
-  CompilationCache::Entry entry = is_global
-      ? CompilationCache::EVAL_GLOBAL
-      : CompilationCache::EVAL_CONTEXTUAL;
 
   // Do a lookup in the compilation cache; if the entry is not there,
-  // invoke the compiler and add the result to the cache.
-  Handle<JSFunction> result = CompilationCache::LookupEval(source, entry);
+  // invoke the compiler and add the result to the cache.  If we're
+  // evaluating json we bypass the cache since we can't be sure a
+  // potential value in the cache has been validated.
+  Handle<JSFunction> result;
+  if (validate == DONT_VALIDATE_JSON)
+    result = CompilationCache::LookupEval(source, context, is_global);
+
   if (result.is_null()) {
     // Create a script object describing the script to be compiled.
     Handle<Script> script = Factory::NewScript(source);
-    script->set_line_offset(Smi::FromInt(line_offset));
-    result = MakeFunction(is_global, true, script, NULL, NULL);
-    if (!result.is_null()) {
-      CompilationCache::Associate(source, entry, result);
+    result = MakeFunction(is_global,
+                          true,
+                          validate,
+                          script,
+                          context,
+                          NULL,
+                          NULL);
+    if (!result.is_null() && validate != VALIDATE_JSON) {
+      // For json it's unlikely that we'll ever see exactly the same
+      // string again so we don't use the compilation cache.
+      CompilationCache::PutEval(source, context, is_global, result);
     }
   }
+
   return result;
 }
 
 
-bool Compiler::CompileLazy(Handle<SharedFunctionInfo> shared) {
-  ZoneScope zone_scope(DELETE_ON_EXIT);
+bool Compiler::CompileLazy(Handle<SharedFunctionInfo> shared,
+                           int loop_nesting) {
+  CompilationZoneScope zone_scope(DELETE_ON_EXIT);
 
   // The VM is in the COMPILER state until exiting this function.
   VMState state(COMPILER);
@@ -262,13 +377,16 @@ bool Compiler::CompileLazy(Handle<SharedFunctionInfo> shared) {
     return false;
   }
 
+  // Update the loop nesting in the function literal.
+  lit->set_loop_nesting(loop_nesting);
+
   // Measure how long it takes to do the lazy compilation; only take
   // the rest of the function into account to avoid overlap with the
   // lazy parsing statistics.
-  StatsRateScope timer(&Counters::compile_lazy);
+  HistogramTimerScope timer(&Counters::compile_lazy);
 
   // Compile the code.
-  Handle<Code> code = MakeCode(lit, script, false);
+  Handle<Code> code = MakeCode(lit, script, Handle<Context>::null(), false);
 
   // Check for stack-overflow exception.
   if (code.is_null()) {
@@ -276,14 +394,43 @@ bool Compiler::CompileLazy(Handle<SharedFunctionInfo> shared) {
     return false;
   }
 
-  // Generate the code, update the function info, and return the code.
-  LOG(CodeCreateEvent("LazyCompile", *code, *lit->name()));
+#if defined ENABLE_LOGGING_AND_PROFILING || defined ENABLE_OPROFILE_AGENT
+  // Log the code generation. If source information is available include script
+  // name and line number. Check explicit whether logging is enabled as finding
+  // the line number is not for free.
+  if (Logger::is_logging() || OProfileAgent::is_enabled()) {
+    Handle<String> func_name(name->length() > 0 ?
+                             *name : shared->inferred_name());
+    if (script->name()->IsString()) {
+      int line_num = GetScriptLineNumber(script, start_position) + 1;
+      LOG(CodeCreateEvent(Logger::LAZY_COMPILE_TAG, *code, *func_name,
+                          String::cast(script->name()), line_num));
+      OProfileAgent::CreateNativeCodeRegion(*func_name,
+                                            String::cast(script->name()),
+                                            line_num,
+                                            code->instruction_start(),
+                                            code->instruction_size());
+    } else {
+      LOG(CodeCreateEvent(Logger::LAZY_COMPILE_TAG, *code, *func_name));
+      OProfileAgent::CreateNativeCodeRegion(*func_name,
+                                            code->instruction_start(),
+                                            code->instruction_size());
+    }
+  }
+#endif
 
   // Update the shared function info with the compiled code.
   shared->set_code(*code);
 
   // Set the expected number of properties for instances.
   SetExpectedNofPropertiesFromEstimate(shared, lit->expected_property_count());
+
+  // Set the optimication hints after performing lazy compilation, as these are
+  // not set when the function is set up as a lazily compiled function.
+  shared->SetThisPropertyAssignmentsInfo(
+      lit->has_only_this_property_assignments(),
+      lit->has_only_simple_this_property_assignments(),
+      *lit->this_property_assignments());
 
   // Check the function has compiled code.
   ASSERT(shared->is_compiled());

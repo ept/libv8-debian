@@ -32,13 +32,15 @@
 #include "debug.h"
 #include "macro-assembler.h"
 
-namespace v8 { namespace internal {
+namespace v8 {
+namespace internal {
 
 
 Address IC::address() {
   // Get the address of the call.
-  Address result = pc() - Assembler::kTargetAddrToReturnAddrDist;
+  Address result = pc() - Assembler::kPatchReturnSequenceLength;
 
+#ifdef ENABLE_DEBUGGER_SUPPORT
   // First check if any break points are active if not just return the address
   // of the call.
   if (!Debug::has_break_points()) return result;
@@ -55,18 +57,18 @@ Address IC::address() {
     // No break point here just return the address of the call.
     return result;
   }
+#else
+  return result;
+#endif
 }
 
 
 Code* IC::GetTargetAtAddress(Address address) {
+  // Get the target address of the IC.
   Address target = Assembler::target_address_at(address);
-  HeapObject* code = HeapObject::FromAddress(target - Code::kHeaderSize);
-  // GetTargetAtAddress is called from IC::Clear which in turn is
-  // called when marking objects during mark sweep. reinterpret_cast
-  // is therefore used instead of the more appropriate
-  // Code::cast. Code::cast does not work when the object's map is
-  // marked.
-  Code* result = reinterpret_cast<Code*>(code);
+  // Convert target address to the code object. Code::GetCodeFromTargetAddress
+  // is safe for use during GC where the map might be marked.
+  Code* result = Code::GetCodeFromTargetAddress(target);
   ASSERT(result->is_inline_cache_stub());
   return result;
 }

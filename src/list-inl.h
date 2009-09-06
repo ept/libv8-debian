@@ -1,4 +1,4 @@
-// Copyright 2006-2008 the V8 project authors. All rights reserved.
+// Copyright 2006-2009 the V8 project authors. All rights reserved.
 // Redistribution and use in source and binary forms, with or without
 // modification, are permitted provided that the following conditions are
 // met:
@@ -30,30 +30,67 @@
 
 #include "list.h"
 
-namespace v8 { namespace internal {
+namespace v8 {
+namespace internal {
 
 
 template<typename T, class P>
-T& List<T, P>::Add(const T& element) {
-  if (length_ >= capacity_) {
-    // Grow the list capacity by 50%, but make sure to let it grow
-    // even when the capacity is zero (possible initial case).
-    int new_capacity = 1 + capacity_ + (capacity_ >> 1);
-    T* new_data = NewData(new_capacity);
-    memcpy(new_data, data_, capacity_ * sizeof(T));
-    DeleteData(data_);
-    data_ = new_data;
-    capacity_ = new_capacity;
+void List<T, P>::Add(const T& element) {
+  if (length_ < capacity_) {
+    data_[length_++] = element;
+  } else {
+    List<T, P>::ResizeAdd(element);
   }
-  return data_[length_++] = element;
 }
 
 
 template<typename T, class P>
-Vector<T> List<T, P>::AddBlock(const T& element, int count) {
+void List<T, P>::AddAll(const List<T, P>& other) {
+  int result_length = length_ + other.length_;
+  if (capacity_ < result_length) Resize(result_length);
+  for (int i = 0; i < other.length_; i++) {
+    data_[length_ + i] = other.data_[i];
+  }
+  length_ = result_length;
+}
+
+
+// Use two layers of inlining so that the non-inlined function can
+// use the same implementation as the inlined version.
+template<typename T, class P>
+void List<T, P>::ResizeAdd(const T& element) {
+  ResizeAddInternal(element);
+}
+
+
+template<typename T, class P>
+void List<T, P>::ResizeAddInternal(const T& element) {
+  ASSERT(length_ >= capacity_);
+  // Grow the list capacity by 50%, but make sure to let it grow
+  // even when the capacity is zero (possible initial case).
+  int new_capacity = 1 + capacity_ + (capacity_ >> 1);
+  // Since the element reference could be an element of the list, copy
+  // it out of the old backing storage before resizing.
+  T temp = element;
+  Resize(new_capacity);
+  data_[length_++] = temp;
+}
+
+
+template<typename T, class P>
+void List<T, P>::Resize(int new_capacity) {
+  T* new_data = List<T, P>::NewData(new_capacity);
+  memcpy(new_data, data_, capacity_ * sizeof(T));
+  List<T, P>::DeleteData(data_);
+  data_ = new_data;
+  capacity_ = new_capacity;
+}
+
+
+template<typename T, class P>
+Vector<T> List<T, P>::AddBlock(T value, int count) {
   int start = length_;
-  for (int i = 0; i < count; i++)
-    Add(element);
+  for (int i = 0; i < count; i++) Add(value);
   return Vector<T>(&data_[start], count);
 }
 
@@ -90,15 +127,28 @@ void List<T, P>::Iterate(void (*callback)(T* x)) {
 
 
 template<typename T, class P>
+bool List<T, P>::Contains(const T& elm) {
+  for (int i = 0; i < length_; i++) {
+    if (data_[i] == elm)
+      return true;
+  }
+  return false;
+}
+
+
+template<typename T, class P>
 void List<T, P>::Sort(int (*cmp)(const T* x, const T* y)) {
-  qsort(data_,
-        length_,
-        sizeof(T),
-        reinterpret_cast<int (*)(const void*, const void*)>(cmp));
+  ToVector().Sort(cmp);
 #ifdef DEBUG
   for (int i = 1; i < length_; i++)
     ASSERT(cmp(&data_[i - 1], &data_[i]) <= 0);
 #endif
+}
+
+
+template<typename T, class P>
+void List<T, P>::Sort() {
+  Sort(PointerValueCompare<T>);
 }
 
 

@@ -36,9 +36,9 @@ TEST(HeapMaps) {
   InitializeVM();
   CheckMap(Heap::meta_map(), MAP_TYPE, Map::kSize);
   CheckMap(Heap::heap_number_map(), HEAP_NUMBER_TYPE, HeapNumber::kSize);
-  CheckMap(Heap::fixed_array_map(), FIXED_ARRAY_TYPE, Array::kHeaderSize);
+  CheckMap(Heap::fixed_array_map(), FIXED_ARRAY_TYPE, FixedArray::kHeaderSize);
   CheckMap(Heap::long_string_map(), LONG_STRING_TYPE,
-           SeqTwoByteString::kHeaderSize);
+           SeqTwoByteString::kAlignedSize);
 }
 
 
@@ -77,7 +77,10 @@ static void CheckFindCodeObject() {
 
   CodeDesc desc;
   assm.GetCode(&desc);
-  Object* code = Heap::CreateCode(desc, NULL, Code::ComputeFlags(Code::STUB));
+  Object* code = Heap::CreateCode(desc,
+                                  NULL,
+                                  Code::ComputeFlags(Code::STUB),
+                                  Handle<Object>(Heap::undefined_value()));
   CHECK(code->IsCode());
 
   HeapObject* obj = HeapObject::cast(code);
@@ -88,7 +91,10 @@ static void CheckFindCodeObject() {
     CHECK_EQ(code, found);
   }
 
-  Object* copy = Heap::CreateCode(desc, NULL, Code::ComputeFlags(Code::STUB));
+  Object* copy = Heap::CreateCode(desc,
+                                  NULL,
+                                  Code::ComputeFlags(Code::STUB),
+                                  Handle<Object>(Heap::undefined_value()));
   CHECK(copy->IsCode());
   HeapObject* obj_copy = HeapObject::cast(copy);
   Object* not_right = Heap::FindCodeObject(obj_copy->address() +
@@ -172,12 +178,16 @@ TEST(HeapObjects) {
 
 TEST(Tagging) {
   InitializeVM();
+  int request = 24;
+  CHECK_EQ(request, static_cast<int>(OBJECT_SIZE_ALIGN(request)));
   CHECK(Smi::FromInt(42)->IsSmi());
-  CHECK(Failure::RetryAfterGC(12, NEW_SPACE)->IsFailure());
-  CHECK_EQ(12, Failure::RetryAfterGC(12, NEW_SPACE)->requested());
-  CHECK_EQ(NEW_SPACE, Failure::RetryAfterGC(12, NEW_SPACE)->allocation_space());
+  CHECK(Failure::RetryAfterGC(request, NEW_SPACE)->IsFailure());
+  CHECK_EQ(request, Failure::RetryAfterGC(request, NEW_SPACE)->requested());
+  CHECK_EQ(NEW_SPACE,
+           Failure::RetryAfterGC(request, NEW_SPACE)->allocation_space());
   CHECK_EQ(OLD_POINTER_SPACE,
-           Failure::RetryAfterGC(12, OLD_POINTER_SPACE)->allocation_space());
+           Failure::RetryAfterGC(request,
+                                 OLD_POINTER_SPACE)->allocation_space());
   CHECK(Failure::Exception()->IsFailure());
   CHECK(Smi::FromInt(Smi::kMinValue)->IsSmi());
   CHECK(Smi::FromInt(Smi::kMaxValue)->IsSmi());
@@ -189,7 +199,7 @@ TEST(GarbageCollection) {
 
   v8::HandleScope sc;
   // check GC when heap is empty
-  int free_bytes = Heap::MaxHeapObjectSize();
+  int free_bytes = Heap::MaxObjectSizeInPagedSpace();
   CHECK(Heap::CollectGarbage(free_bytes, NEW_SPACE));
 
   // allocate a function and keep it in global object's property
@@ -306,10 +316,10 @@ TEST(GlobalHandles) {
 
 static bool WeakPointerCleared = false;
 
-static void TestWeakGlobalHandleCallback(v8::Persistent<v8::Object> handle,
+static void TestWeakGlobalHandleCallback(v8::Persistent<v8::Value> handle,
                                          void* id) {
   USE(handle);
-  if (1234 == reinterpret_cast<int>(id)) WeakPointerCleared = true;
+  if (1234 == reinterpret_cast<intptr_t>(id)) WeakPointerCleared = true;
 }
 
 
@@ -377,9 +387,9 @@ TEST(WeakGlobalHandlesMark) {
 }
 
 static void TestDeleteWeakGlobalHandleCallback(
-    v8::Persistent<v8::Object> handle,
+    v8::Persistent<v8::Value> handle,
     void* id) {
-  if (1234 == reinterpret_cast<int>(id)) WeakPointerCleared = true;
+  if (1234 == reinterpret_cast<intptr_t>(id)) WeakPointerCleared = true;
   handle.Dispose();
 }
 
@@ -473,8 +483,11 @@ static const char* not_so_random_string_table[] = {
 static void CheckSymbols(const char** strings) {
   for (const char* string = *strings; *strings != 0; string = *strings++) {
     Object* a = Heap::LookupAsciiSymbol(string);
+    // LookupAsciiSymbol may return a failure if a GC is needed.
+    if (a->IsFailure()) continue;
     CHECK(a->IsSymbol());
     Object* b = Heap::LookupAsciiSymbol(string);
+    if (b->IsFailure()) continue;
     CHECK_EQ(b, a);
     CHECK(String::cast(b)->IsEqualTo(CStrVector(string)));
   }
@@ -534,7 +547,7 @@ TEST(ObjectProperties) {
   CHECK(obj->HasLocalProperty(first));
 
   // delete first
-  CHECK(obj->DeleteProperty(first));
+  CHECK(obj->DeleteProperty(first, JSObject::NORMAL_DELETION));
   CHECK(!obj->HasLocalProperty(first));
 
   // add first and then second
@@ -544,9 +557,9 @@ TEST(ObjectProperties) {
   CHECK(obj->HasLocalProperty(second));
 
   // delete first and then second
-  CHECK(obj->DeleteProperty(first));
+  CHECK(obj->DeleteProperty(first, JSObject::NORMAL_DELETION));
   CHECK(obj->HasLocalProperty(second));
-  CHECK(obj->DeleteProperty(second));
+  CHECK(obj->DeleteProperty(second, JSObject::NORMAL_DELETION));
   CHECK(!obj->HasLocalProperty(first));
   CHECK(!obj->HasLocalProperty(second));
 
@@ -557,9 +570,9 @@ TEST(ObjectProperties) {
   CHECK(obj->HasLocalProperty(second));
 
   // delete second and then first
-  CHECK(obj->DeleteProperty(second));
+  CHECK(obj->DeleteProperty(second, JSObject::NORMAL_DELETION));
   CHECK(obj->HasLocalProperty(first));
-  CHECK(obj->DeleteProperty(first));
+  CHECK(obj->DeleteProperty(first, JSObject::NORMAL_DELETION));
   CHECK(!obj->HasLocalProperty(first));
   CHECK(!obj->HasLocalProperty(second));
 
@@ -634,7 +647,7 @@ TEST(JSArray) {
   uint32_t int_length = 0;
   CHECK(Array::IndexFromObject(length, &int_length));
   CHECK_EQ(length, array->length());
-  CHECK(!array->HasFastElements());  // Must be in slow mode.
+  CHECK(array->HasDictionaryElements());  // Must be in slow mode.
 
   // array[length] = name.
   array->SetElement(int_length, name);
@@ -664,7 +677,7 @@ TEST(JSObjectCopy) {
   obj->SetElement(1, second);
 
   // Make the clone.
-  JSObject* clone = JSObject::cast(obj->Copy());
+  JSObject* clone = JSObject::cast(Heap::CopyJSObject(obj));
   CHECK(clone != obj);
 
   CHECK_EQ(obj->GetElement(0), clone->GetElement(0));
@@ -763,7 +776,7 @@ TEST(Iteration) {
       Factory::NewStringFromAscii(CStrVector("abcdefghij"), TENURED);
 
   // Allocate a large string (for large object space).
-  int large_size = Heap::MaxHeapObjectSize() + 1;
+  int large_size = Heap::MaxObjectSizeInPagedSpace() + 1;
   char* str = new char[large_size];
   for (int i = 0; i < large_size - 1; ++i) str[i] = 'a';
   str[large_size - 1] = '\0';

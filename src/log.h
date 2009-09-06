@@ -28,7 +28,11 @@
 #ifndef V8_LOG_H_
 #define V8_LOG_H_
 
-namespace v8 { namespace internal {
+#include "platform.h"
+#include "log-utils.h"
+
+namespace v8 {
+namespace internal {
 
 // Logger is used for collecting logging information from V8 during
 // execution. The result is dumped to a file.
@@ -69,24 +73,31 @@ class Ticker;
 class Profiler;
 class Semaphore;
 class SlidingStateWindow;
+class LogMessageBuilder;
+class CompressionHelper;
 
 #undef LOG
 #ifdef ENABLE_LOGGING_AND_PROFILING
-#define LOG(Call) v8::internal::Logger::Call
+#define LOG(Call)                           \
+  do {                                      \
+    if (v8::internal::Logger::is_logging()) \
+      v8::internal::Logger::Call;           \
+  } while (false)
 #else
 #define LOG(Call) ((void) 0)
 #endif
 
 
-class VMState {
+class VMState BASE_EMBEDDED {
 #ifdef ENABLE_LOGGING_AND_PROFILING
  public:
-  explicit VMState(StateTag state);
-  ~VMState();
+  inline explicit VMState(StateTag state);
+  inline ~VMState();
 
   StateTag state() { return state_; }
 
  private:
+  bool disabled_;
   StateTag state_;
   VMState* previous_;
 #else
@@ -96,12 +107,45 @@ class VMState {
 };
 
 
+#define LOG_EVENTS_AND_TAGS_LIST(V) \
+  V(CODE_CREATION_EVENT,            "code-creation",          "cc")       \
+  V(CODE_MOVE_EVENT,                "code-move",              "cm")       \
+  V(CODE_DELETE_EVENT,              "code-delete",            "cd")       \
+  V(TICK_EVENT,                     "tick",                   "t")        \
+  V(REPEAT_META_EVENT,              "repeat",                 "r")        \
+  V(BUILTIN_TAG,                    "Builtin",                "bi")       \
+  V(CALL_DEBUG_BREAK_TAG,           "CallDebugBreak",         "cdb")      \
+  V(CALL_DEBUG_PREPARE_STEP_IN_TAG, "CallDebugPrepareStepIn", "cdbsi")    \
+  V(CALL_IC_TAG,                    "CallIC",                 "cic")      \
+  V(CALL_INITIALIZE_TAG,            "CallInitialize",         "ci")       \
+  V(CALL_MEGAMORPHIC_TAG,           "CallMegamorphic",        "cmm")      \
+  V(CALL_MISS_TAG,                  "CallMiss",               "cm")       \
+  V(CALL_NORMAL_TAG,                "CallNormal",             "cn")       \
+  V(CALL_PRE_MONOMORPHIC_TAG,       "CallPreMonomorphic",     "cpm")      \
+  V(EVAL_TAG,                       "Eval",                   "e")        \
+  V(FUNCTION_TAG,                   "Function",               "f")        \
+  V(KEYED_LOAD_IC_TAG,              "KeyedLoadIC",            "klic")     \
+  V(KEYED_STORE_IC_TAG,             "KeyedStoreIC",           "ksic")     \
+  V(LAZY_COMPILE_TAG,               "LazyCompile",            "lc")       \
+  V(LOAD_IC_TAG,                    "LoadIC",                 "lic")      \
+  V(REG_EXP_TAG,                    "RegExp",                 "re")       \
+  V(SCRIPT_TAG,                     "Script",                 "sc")       \
+  V(STORE_IC_TAG,                   "StoreIC",                "sic")      \
+  V(STUB_TAG,                       "Stub",                   "s")
+
 class Logger {
  public:
-  // Opens the file for logging if the right flags are set.
+#define DECLARE_ENUM(enum_item, ignore1, ignore2) enum_item,
+  enum LogEventsAndTags {
+    LOG_EVENTS_AND_TAGS_LIST(DECLARE_ENUM)
+    NUMBER_OF_LOG_EVENTS
+  };
+#undef DECLARE_ENUM
+
+  // Acquires resources for logging if the right flags are set.
   static bool Setup();
 
-  // Closes file opened in Setup.
+  // Frees resources acquired in Setup.
   static void TearDown();
 
   // Enable the computation of a sliding window of states.
@@ -109,10 +153,10 @@ class Logger {
 
   // Write a raw string to the log to be used as a preamble.
   // No check is made that the 'preamble' is actually at the beginning
-  // of the log.
+  // of the log. The preample is used to write code events saved in the
+  // snapshot.
   static void Preamble(const char* content);
 
-  // ==== Events that are always logged. ====
   // Emits an event with a string value -> (name, value).
   static void StringEvent(const char* name, const char* value);
 
@@ -134,7 +178,7 @@ class Logger {
 
   // Emits an event that an undefined property was read from an
   // object.
-  static void SuspectReadEvent(String* name, String* obj);
+  static void SuspectReadEvent(String* name, Object* obj);
 
   // Emits an event when a message is put on or read from a debugging queue.
   // DebugTag lets us put a call-site specific label on the event.
@@ -157,9 +201,14 @@ class Logger {
 
   // ==== Events logged by --log-code. ====
   // Emits a code create event.
-  static void CodeCreateEvent(const char* tag, Code* code, const char* source);
-  static void CodeCreateEvent(const char* tag, Code* code, String* name);
-  static void CodeCreateEvent(const char* tag, Code* code, int args_count);
+  static void CodeCreateEvent(LogEventsAndTags tag,
+                              Code* code, const char* source);
+  static void CodeCreateEvent(LogEventsAndTags tag, Code* code, String* name);
+  static void CodeCreateEvent(LogEventsAndTags tag, Code* code, String* name,
+                              String* source, int line);
+  static void CodeCreateEvent(LogEventsAndTags tag, Code* code, int args_count);
+  // Emits a code create event for a RegExp.
+  static void RegExpCodeCreateEvent(Code* code, String* source);
   // Emits a code move event.
   static void CodeMoveEvent(Address from, Address to);
   // Emits a code delete event.
@@ -170,31 +219,62 @@ class Logger {
   static void HeapSampleBeginEvent(const char* space, const char* kind);
   static void HeapSampleEndEvent(const char* space, const char* kind);
   static void HeapSampleItemEvent(const char* type, int number, int bytes);
+  static void HeapSampleJSConstructorEvent(const char* constructor,
+                                           int number, int bytes);
+  static void HeapSampleStats(const char* space, const char* kind,
+                              int capacity, int used);
 
   static void SharedLibraryEvent(const char* library_path,
-                                 unsigned start,
-                                 unsigned end);
+                                 uintptr_t start,
+                                 uintptr_t end);
   static void SharedLibraryEvent(const wchar_t* library_path,
-                                 unsigned start,
-                                 unsigned end);
+                                 uintptr_t start,
+                                 uintptr_t end);
 
   // ==== Events logged by --log-regexp ====
   // Regexp compilation and execution events.
 
-  static void RegExpCompileEvent(Handle<JSRegExp> regexp);
+  static void RegExpCompileEvent(Handle<JSRegExp> regexp, bool in_cache);
 
-  static void RegExpExecEvent(Handle<JSRegExp> regexp,
-                              int start_index,
-                              Handle<String> input_string);
+  // Log an event reported from generated code
+  static void LogRuntime(Vector<const char> format, JSArray* args);
 
 #ifdef ENABLE_LOGGING_AND_PROFILING
   static StateTag state() {
     return current_state_ ? current_state_->state() : OTHER;
   }
-#endif
 
-#ifdef ENABLE_LOGGING_AND_PROFILING
+  static bool is_logging() {
+    return is_logging_;
+  }
+
+  // Pause/Resume collection of profiling data.
+  // When data collection is paused, CPU Tick events are discarded until
+  // data collection is Resumed.
+  static void PauseProfiler(int flags);
+  static void ResumeProfiler(int flags);
+  static int GetActiveProfilerModules();
+
+  // If logging is performed into a memory buffer, allows to
+  // retrieve previously written messages. See v8.h.
+  static int GetLogLines(int from_pos, char* dest_buf, int max_size);
+
+  // Logs all compiled functions found in the heap.
+  static void LogCompiledFunctions();
+
  private:
+
+  // Profiler's sampling interval (in milliseconds).
+  static const int kSamplingIntervalMs = 1;
+
+  // Size of window used for log records compression.
+  static const int kCompressionWindowSize = 4;
+
+  // Emits the profiler's first message.
+  static void ProfilerBeginEvent();
+
+  // Emits aliases for compressed messages.
+  static void LogAliases();
 
   // Emits the source code of a regexp. Used by regexp events.
   static void LogRegExpSource(Handle<JSRegExp> regexp);
@@ -204,9 +284,14 @@ class Logger {
 
   static void ApiEvent(const char* name, ...);
 
-  // When logging is active, logfile_ refers the file
-  // events are written to.
-  static FILE* logfile_;
+  // Logs a StringEvent regardless of whether FLAG_log is true.
+  static void UncheckedStringEvent(const char* name, const char* value);
+
+  // Stops logging and profiling in case of insufficient resources.
+  static void StopLoggingAndProfiling();
+
+  // Returns whether profiler's sampler is active.
+  static bool IsProfilerSamplerActive();
 
   // The sampler used by the profiler and the sliding state window.
   static Ticker* ticker_;
@@ -216,25 +301,44 @@ class Logger {
   // of samples.
   static Profiler* profiler_;
 
-  // mutex_ is a Mutex used for enforcing exclusive
-  // access to the log file.
-  static Mutex* mutex_;
-
   // A stack of VM states.
   static VMState* current_state_;
+
+  // Singleton bottom or default vm state.
+  static VMState bottom_state_;
 
   // SlidingStateWindow instance keeping a sliding window of the most
   // recent VM states.
   static SlidingStateWindow* sliding_state_window_;
 
+  // An array of log events names.
+  static const char** log_events_;
+
+  // An instance of helper created if log compression is enabled.
+  static CompressionHelper* compression_helper_;
+
   // Internal implementation classes with access to
   // private members.
+  friend class CompressionHelper;
   friend class EventLog;
   friend class TimeLog;
   friend class Profiler;
   friend class SlidingStateWindow;
   friend class VMState;
+
+  friend class LoggerTestHelper;
+
+  static bool is_logging_;
+#else
+  static bool is_logging() { return false; }
 #endif
+};
+
+
+// Class that extracts stack trace, used for profiling.
+class StackTracer : public AllStatic {
+ public:
+  static void Trace(TickSample* sample);
 };
 
 

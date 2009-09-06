@@ -48,20 +48,34 @@
 #ifndef NOMCX
 #define NOMCX
 #endif
+// Require Windows 2000 or higher (this is required for the IsDebuggerPresent
+// function to be present).
+#ifndef _WIN32_WINNT
+#define _WIN32_WINNT 0x500
+#endif
 
 #include <windows.h>
 
+#include <time.h>  // For LocalOffset() implementation.
 #include <mmsystem.h>  // For timeGetTime().
+#ifdef __MINGW32__
+// Require Windows XP or higher when compiling with MinGW. This is for MinGW
+// header files to expose getaddrinfo.
+#undef _WIN32_WINNT
+#define _WIN32_WINNT 0x501
+#endif  // __MINGW32__
+#ifndef __MINGW32__
 #include <dbghelp.h>  // For SymLoadModule64 and al.
+#endif  // __MINGW32__
+#include <limits.h>  // For INT_MAX and al.
 #include <tlhelp32.h>  // For Module32First and al.
 
-// These aditional WIN32 includes have to be right here as the #undef's below
+// These additional WIN32 includes have to be right here as the #undef's below
 // makes it impossible to have them elsewhere.
 #include <winsock2.h>
+#include <ws2tcpip.h>
 #include <process.h>  // for _beginthreadex()
 #include <stdlib.h>
-
-#pragma comment(lib, "winmm.lib")  // force linkage with winmm.
 
 #undef VOID
 #undef DELETE
@@ -77,15 +91,16 @@
 
 #include "platform.h"
 
-// Extra POSIX/ANSI routines for Win32. Please refer to The Open Group Base
-// Specification for specification of the correct semantics for these
-// functions.
+// Extra POSIX/ANSI routines for Win32 when when using Visual Studio C++. Please
+// refer to The Open Group Base Specification for specification of the correct
+// semantics for these functions.
 // (http://www.opengroup.org/onlinepubs/000095399/)
+#ifdef _MSC_VER
 
-// Test for finite value - usually defined in math.h
 namespace v8 {
 namespace internal {
 
+// Test for finite value - usually defined in math.h
 int isfinite(double x) {
   return _finite(x);
 }
@@ -146,27 +161,63 @@ int signbit(double x) {
 }
 
 
-// Generate a pseudo-random number in the range 0-2^31-1. Usually
-// defined in stdlib.h
-int random() {
-  return rand();
-}
-
-
-// Case-insensitive string comparisons. Use stricmp() on Win32. Usually defined
-// in strings.h.
-int strcasecmp(const char* s1, const char* s2) {
-  return _stricmp(s1, s2);
-}
-
-
 // Case-insensitive bounded string comparisons. Use stricmp() on Win32. Usually
 // defined in strings.h.
 int strncasecmp(const char* s1, const char* s2, int n) {
   return _strnicmp(s1, s2, n);
 }
 
-namespace v8 { namespace internal {
+#endif  // _MSC_VER
+
+
+// Extra functions for MinGW. Most of these are the _s functions which are in
+// the Microsoft Visual Studio C++ CRT.
+#ifdef __MINGW32__
+
+int localtime_s(tm* out_tm, const time_t* time) {
+  tm* posix_local_time_struct = localtime(time);
+  if (posix_local_time_struct == NULL) return 1;
+  *out_tm = *posix_local_time_struct;
+  return 0;
+}
+
+
+// Not sure this the correct interpretation of _mkgmtime
+time_t _mkgmtime(tm* timeptr) {
+  return mktime(timeptr);
+}
+
+
+int fopen_s(FILE** pFile, const char* filename, const char* mode) {
+  *pFile = fopen(filename, mode);
+  return *pFile != NULL ? 0 : 1;
+}
+
+
+int _vsnprintf_s(char* buffer, size_t sizeOfBuffer, size_t count,
+                 const char* format, va_list argptr) {
+  return _vsnprintf(buffer, sizeOfBuffer, format, argptr);
+}
+#define _TRUNCATE 0
+
+
+int strncpy_s(char* strDest, size_t numberOfElements,
+              const char* strSource, size_t count) {
+  strncpy(strDest, strSource, count);
+  return 0;
+}
+
+#endif  // __MINGW32__
+
+// Generate a pseudo-random number in the range 0-2^31-1. Usually
+// defined in stdlib.h. Missing in both Microsoft Visual Studio C++ and MinGW.
+int random() {
+  return rand();
+}
+
+
+namespace v8 {
+namespace internal {
 
 double ceiling(double x) {
   return ceil(x);
@@ -207,7 +258,7 @@ class Time {
 
  private:
   // Constants for time conversion.
-  static const int64_t kTimeEpoc = 116444736000000000;
+  static const int64_t kTimeEpoc = 116444736000000000LL;
   static const int64_t kTimeScaler = 10000;
   static const int64_t kMsPerMinute = 60000;
 
@@ -270,7 +321,7 @@ Time::Time() {
 
 // Initialize timestamp from a JavaScript timestamp.
 Time::Time(double jstime) {
-  t() = static_cast<uint64_t>(jstime) * kTimeScaler + kTimeEpoc;
+  t() = static_cast<int64_t>(jstime) * kTimeScaler + kTimeEpoc;
 }
 
 
@@ -325,6 +376,8 @@ void Time::TzSet() {
   // Just return if timezone information has already been initialized.
   if (tz_initialized_) return;
 
+  // Initialize POSIX time zone data.
+  _tzset();
   // Obtain timezone information from operating system.
   memset(&tzinfo_, 0, sizeof(tzinfo_));
   if (GetTimeZoneInformation(&tzinfo_) == TIME_ZONE_ID_INVALID) {
@@ -398,9 +451,9 @@ void Time::SetToCurrentTime() {
   static bool initialized = false;
   static TimeStamp init_time;
   static DWORD init_ticks;
-  static const int kHundredNanosecondsPerSecond = 10000;
-  static const int kMaxClockElapsedTime =
-      60*60*24*kHundredNanosecondsPerSecond;  // 1 day
+  static const int64_t kHundredNanosecondsPerSecond = 10000000;
+  static const int64_t kMaxClockElapsedTime =
+      60*kHundredNanosecondsPerSecond;  // 1 minute
 
   // If we are uninitialized, we need to resync the clock.
   bool needs_resync = !initialized;
@@ -431,30 +484,37 @@ void Time::SetToCurrentTime() {
 
 // Return the local timezone offset in milliseconds east of UTC. This
 // takes into account whether daylight saving is in effect at the time.
+// Only times in the 32-bit Unix range may be passed to this function.
+// Also, adding the time-zone offset to the input must not overflow.
+// The function EquivalentTime() in date-delay.js guarantees this.
 int64_t Time::LocalOffset() {
   // Initialize timezone information, if needed.
   TzSet();
 
-  // Convert timestamp to date/time components. These are now in UTC
-  // format. NB: Please do not replace the following three calls with one
-  // call to FileTimeToLocalFileTime(), because it does not handle
-  // daylight saving correctly.
-  SYSTEMTIME utc;
-  FileTimeToSystemTime(&ft(), &utc);
+  Time rounded_to_second(*this);
+  rounded_to_second.t() = rounded_to_second.t() / 1000 / kTimeScaler *
+      1000 * kTimeScaler;
+  // Convert to local time using POSIX localtime function.
+  // Windows XP Service Pack 3 made SystemTimeToTzSpecificLocalTime()
+  // very slow.  Other browsers use localtime().
 
-  // Convert to local time, using timezone information.
-  SYSTEMTIME local;
-  SystemTimeToTzSpecificLocalTime(&tzinfo_, &utc, &local);
+  // Convert from JavaScript milliseconds past 1/1/1970 0:00:00 to
+  // POSIX seconds past 1/1/1970 0:00:00.
+  double unchecked_posix_time = rounded_to_second.ToJSTime() / 1000;
+  if (unchecked_posix_time > INT_MAX || unchecked_posix_time < 0) {
+    return 0;
+  }
+  // Because _USE_32BIT_TIME_T is defined, time_t is a 32-bit int.
+  time_t posix_time = static_cast<time_t>(unchecked_posix_time);
 
-  // Convert local time back to a timestamp. This timestamp now
-  // has a bias similar to the local timezone bias in effect
-  // at the time of the original timestamp.
-  Time localtime;
-  SystemTimeToFileTime(&local, &localtime.ft());
+  // Convert to local time, as struct with fields for day, hour, year, etc.
+  tm posix_local_time_struct;
+  if (localtime_s(&posix_local_time_struct, &posix_time)) return 0;
+  // Convert local time in struct to POSIX time as if it were a UTC time.
+  time_t local_posix_time = _mkgmtime(&posix_local_time_struct);
+  Time localtime(1000.0 * local_posix_time);
 
-  // The difference between the new local timestamp and the original
-  // timestamp and is the local timezone offset.
-  return localtime.Diff(this);
+  return localtime.Diff(&rounded_to_second);
 }
 
 
@@ -482,7 +542,7 @@ bool Time::InDST() {
 }
 
 
-// Return the dalight savings time offset for this time.
+// Return the daylight savings time offset for this time.
 int64_t Time::DaylightSavingsOffset() {
   return InDST() ? 60 * kMsPerMinute : 0;
 }
@@ -543,7 +603,7 @@ int64_t OS::Ticks() {
 
 // Returns a string identifying the current timezone taking into
 // account daylight saving.
-char* OS::LocalTimezone(double time) {
+const char* OS::LocalTimezone(double time) {
   return Time(time).LocalTimezone();
 }
 
@@ -630,6 +690,10 @@ FILE* OS::FOpen(const char* path, const char* mode) {
 }
 
 
+// Open log file in binary mode to avoid /n -> /r/n conversion.
+const char* OS::LogFileOpenMode = "wb";
+
+
 // Print (debug) message to console.
 void OS::Print(const char* format, ...) {
   va_list args;
@@ -680,22 +744,15 @@ int OS::VSNPrintF(Vector<char> str, const char* format, va_list args) {
 }
 
 
+char* OS::StrChr(char* str, int c) {
+  return const_cast<char*>(strchr(str, c));
+}
+
+
 void OS::StrNCpy(Vector<char> dest, const char* src, size_t n) {
   int result = strncpy_s(dest.start(), dest.length(), src, n);
   USE(result);
   ASSERT(result == 0);
-}
-
-
-void OS::WcsCpy(Vector<wchar_t> dest, const wchar_t* src) {
-  int result = wcscpy_s(dest.start(), dest.length(), src);
-  USE(result);
-  ASSERT(result == 0);
-}
-
-
-char *OS::StrDup(const char* str) {
-  return _strdup(str);
 }
 
 
@@ -755,12 +812,12 @@ size_t OS::AllocateAlignment() {
 
 void* OS::Allocate(const size_t requested,
                    size_t* allocated,
-                   bool executable) {
+                   bool is_executable) {
   // VirtualAlloc rounds allocated size to page size automatically.
   size_t msize = RoundUp(requested, GetPageSize());
 
   // Windows XP SP2 allows Data Excution Prevention (DEP).
-  int prot = executable ? PAGE_EXECUTE_READWRITE : PAGE_READWRITE;
+  int prot = is_executable ? PAGE_EXECUTE_READWRITE : PAGE_READWRITE;
   LPVOID mbase = VirtualAlloc(NULL, msize, MEM_COMMIT | MEM_RESERVE, prot);
   if (mbase == NULL) {
     LOG(StringEvent("OS::Allocate", "VirtualAlloc failed"));
@@ -775,11 +832,30 @@ void* OS::Allocate(const size_t requested,
 }
 
 
-void OS::Free(void* buf, const size_t length) {
+void OS::Free(void* address, const size_t size) {
   // TODO(1240712): VirtualFree has a return value which is ignored here.
-  VirtualFree(buf, 0, MEM_RELEASE);
-  USE(length);
+  VirtualFree(address, 0, MEM_RELEASE);
+  USE(size);
 }
+
+
+#ifdef ENABLE_HEAP_PROTECTION
+
+void OS::Protect(void* address, size_t size) {
+  // TODO(1240712): VirtualProtect has a return value which is ignored here.
+  DWORD old_protect;
+  VirtualProtect(address, size, PAGE_READONLY, &old_protect);
+}
+
+
+void OS::Unprotect(void* address, size_t size, bool is_executable) {
+  // TODO(1240712): VirtualProtect has a return value which is ignored here.
+  DWORD new_protect = is_executable ? PAGE_EXECUTE_READWRITE : PAGE_READWRITE;
+  DWORD old_protect;
+  VirtualProtect(address, size, new_protect, &old_protect);
+}
+
+#endif
 
 
 void OS::Sleep(int milliseconds) {
@@ -788,14 +864,25 @@ void OS::Sleep(int milliseconds) {
 
 
 void OS::Abort() {
-  // Redirect to windows specific abort to ensure
-  // collaboration with sandboxing.
-  __debugbreak();
+  if (!IsDebuggerPresent()) {
+#ifdef _MSC_VER
+    // Make the MSVCRT do a silent abort.
+    _set_abort_behavior(0, _WRITE_ABORT_MSG);
+    _set_abort_behavior(0, _CALL_REPORTFAULT);
+#endif  // _MSC_VER
+    abort();
+  } else {
+    DebugBreak();
+  }
 }
 
 
 void OS::DebugBreak() {
+#ifdef _MSC_VER
   __debugbreak();
+#else
+  ::DebugBreak();
+#endif
 }
 
 
@@ -838,7 +925,7 @@ Win32MemoryMappedFile::~Win32MemoryMappedFile() {
 
 
 // The following code loads functions defined in DbhHelp.h and TlHelp32.h
-// dynamically. This is to avoid beeing depending on dbghelp.dll and
+// dynamically. This is to avoid being depending on dbghelp.dll and
 // tlhelp32.dll when running (the functions in tlhelp32.dll have been moved to
 // kernel32.dll at some point so loading functions defines in TlHelp32.h
 // dynamically might not be necessary any more - for some versions of Windows?).
@@ -878,6 +965,8 @@ Win32MemoryMappedFile::~Win32MemoryMappedFile() {
 #define VOID void
 #endif
 
+// DbgHelp isn't supported on MinGW yet
+#ifndef __MINGW32__
 // DbgHelp.h functions.
 typedef BOOL (__stdcall *DLL_FUNC_TYPE(SymInitialize))(IN HANDLE hProcess,
                                                        IN PSTR UserSearchPath,
@@ -992,7 +1081,7 @@ TLHELP32_FUNCTION_LIST(DLL_FUNC_LOADED)
 
   dbghelp_loaded = result;
   return result;
-  // NOTE: The modules are never unloaded and will stay arround until the
+  // NOTE: The modules are never unloaded and will stay around until the
   // application is closed.
 }
 
@@ -1079,7 +1168,7 @@ void OS::LogSharedLibraryAddresses() {
 // it is triggered by the use of inline assembler.
 #pragma warning(push)
 #pragma warning(disable : 4748)
-int OS::StackWalk(OS::StackFrame* frames, int frames_size) {
+int OS::StackWalk(Vector<OS::StackFrame> frames) {
   BOOL ok;
 
   // Load the required functions from DLL's.
@@ -1097,6 +1186,9 @@ int OS::StackWalk(OS::StackFrame* frames, int frames_size) {
   memset(&context, 0, sizeof(context));
   context.ContextFlags = CONTEXT_CONTROL;
   context.ContextFlags = CONTEXT_CONTROL;
+#ifdef  _WIN64
+  // TODO(X64): Implement context capture.
+#else
   __asm    call x
   __asm x: pop eax
   __asm    mov context.Eip, eax
@@ -1106,19 +1198,27 @@ int OS::StackWalk(OS::StackFrame* frames, int frames_size) {
   // capture the context instead of inline assembler. However it is
   // only available on XP, Vista, Server 2003 and Server 2008 which
   // might not be sufficient.
+#endif
 
   // Initialize the stack walking
   STACKFRAME64 stack_frame;
   memset(&stack_frame, 0, sizeof(stack_frame));
+#ifdef  _WIN64
+  stack_frame.AddrPC.Offset = context.Rip;
+  stack_frame.AddrFrame.Offset = context.Rbp;
+  stack_frame.AddrStack.Offset = context.Rsp;
+#else
   stack_frame.AddrPC.Offset = context.Eip;
-  stack_frame.AddrPC.Mode = AddrModeFlat;
   stack_frame.AddrFrame.Offset = context.Ebp;
-  stack_frame.AddrFrame.Mode = AddrModeFlat;
   stack_frame.AddrStack.Offset = context.Esp;
+#endif
+  stack_frame.AddrPC.Mode = AddrModeFlat;
+  stack_frame.AddrFrame.Mode = AddrModeFlat;
   stack_frame.AddrStack.Mode = AddrModeFlat;
   int frames_count = 0;
 
   // Collect stack frames.
+  int frames_size = frames.length();
   while (frames_count < frames_size) {
     ok = _StackWalk64(
         IMAGE_FILE_MACHINE_I386,    // MachineType
@@ -1200,16 +1300,28 @@ int OS::StackWalk(OS::StackFrame* frames, int frames_size) {
 // Restore warnings to previous settings.
 #pragma warning(pop)
 
+#else  // __MINGW32__
+void OS::LogSharedLibraryAddresses() { }
+int OS::StackWalk(Vector<OS::StackFrame> frames) { return 0; }
+#endif  // __MINGW32__
+
 
 double OS::nan_value() {
+#ifdef _MSC_VER
   static const __int64 nanval = 0xfff8000000000000;
   return *reinterpret_cast<const double*>(&nanval);
+#else  // _MSC_VER
+  return NAN;
+#endif  // _MSC_VER
 }
 
 
 int OS::ActivationFrameAlignment() {
-  // No constraint on Windows.
-  return 0;
+#ifdef _WIN64
+  return 16;  // Windows 64-bit ABI requires the stack to be 16-byte aligned.
+#else
+  return 8;  // Floating-point math runs faster with 8-byte alignment.
+#endif
 }
 
 
@@ -1231,8 +1343,8 @@ VirtualMemory::~VirtualMemory() {
 }
 
 
-bool VirtualMemory::Commit(void* address, size_t size, bool executable) {
-  int prot = executable ? PAGE_EXECUTE_READWRITE : PAGE_READWRITE;
+bool VirtualMemory::Commit(void* address, size_t size, bool is_executable) {
+  int prot = is_executable ? PAGE_EXECUTE_READWRITE : PAGE_READWRITE;
   if (NULL == VirtualAlloc(address, size, MEM_COMMIT, prot)) {
     return false;
   }
@@ -1244,7 +1356,7 @@ bool VirtualMemory::Commit(void* address, size_t size, bool executable) {
 
 bool VirtualMemory::Uncommit(void* address, size_t size) {
   ASSERT(IsReserved());
-  return VirtualFree(address, size, MEM_DECOMMIT) != NULL;
+  return VirtualFree(address, size, MEM_DECOMMIT) != FALSE;
 }
 
 
@@ -1448,6 +1560,12 @@ class Win32Semaphore : public Semaphore {
     WaitForSingleObject(sem, INFINITE);
   }
 
+  bool Wait(int timeout) {
+    // Timeout in Windows API is in milliseconds.
+    DWORD millis_timeout = timeout / 1000;
+    return WaitForSingleObject(sem, millis_timeout) != WAIT_TIMEOUT;
+  }
+
   void Signal() {
     LONG dummy;
     ReleaseSemaphore(sem, 1, &dummy);
@@ -1461,6 +1579,185 @@ class Win32Semaphore : public Semaphore {
 Semaphore* OS::CreateSemaphore(int count) {
   return new Win32Semaphore(count);
 }
+
+
+// ----------------------------------------------------------------------------
+// Win32 socket support.
+//
+
+class Win32Socket : public Socket {
+ public:
+  explicit Win32Socket() {
+    // Create the socket.
+    socket_ = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+  }
+  explicit Win32Socket(SOCKET socket): socket_(socket) { }
+  virtual ~Win32Socket() { Shutdown(); }
+
+  // Server initialization.
+  bool Bind(const int port);
+  bool Listen(int backlog) const;
+  Socket* Accept() const;
+
+  // Client initialization.
+  bool Connect(const char* host, const char* port);
+
+  // Shutdown socket for both read and write.
+  bool Shutdown();
+
+  // Data Transimission
+  int Send(const char* data, int len) const;
+  int Receive(char* data, int len) const;
+
+  bool SetReuseAddress(bool reuse_address);
+
+  bool IsValid() const { return socket_ != INVALID_SOCKET; }
+
+ private:
+  SOCKET socket_;
+};
+
+
+bool Win32Socket::Bind(const int port) {
+  if (!IsValid())  {
+    return false;
+  }
+
+  sockaddr_in addr;
+  memset(&addr, 0, sizeof(addr));
+  addr.sin_family = AF_INET;
+  addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+  addr.sin_port = htons(port);
+  int status = bind(socket_,
+                    reinterpret_cast<struct sockaddr *>(&addr),
+                    sizeof(addr));
+  return status == 0;
+}
+
+
+bool Win32Socket::Listen(int backlog) const {
+  if (!IsValid()) {
+    return false;
+  }
+
+  int status = listen(socket_, backlog);
+  return status == 0;
+}
+
+
+Socket* Win32Socket::Accept() const {
+  if (!IsValid()) {
+    return NULL;
+  }
+
+  SOCKET socket = accept(socket_, NULL, NULL);
+  if (socket == INVALID_SOCKET) {
+    return NULL;
+  } else {
+    return new Win32Socket(socket);
+  }
+}
+
+
+bool Win32Socket::Connect(const char* host, const char* port) {
+  if (!IsValid()) {
+    return false;
+  }
+
+  // Lookup host and port.
+  struct addrinfo *result = NULL;
+  struct addrinfo hints;
+  memset(&hints, 0, sizeof(addrinfo));
+  hints.ai_family = AF_INET;
+  hints.ai_socktype = SOCK_STREAM;
+  hints.ai_protocol = IPPROTO_TCP;
+  int status = getaddrinfo(host, port, &hints, &result);
+  if (status != 0) {
+    return false;
+  }
+
+  // Connect.
+  status = connect(socket_, result->ai_addr, result->ai_addrlen);
+  freeaddrinfo(result);
+  return status == 0;
+}
+
+
+bool Win32Socket::Shutdown() {
+  if (IsValid()) {
+    // Shutdown socket for both read and write.
+    int status = shutdown(socket_, SD_BOTH);
+    closesocket(socket_);
+    socket_ = INVALID_SOCKET;
+    return status == SOCKET_ERROR;
+  }
+  return true;
+}
+
+
+int Win32Socket::Send(const char* data, int len) const {
+  int status = send(socket_, data, len, 0);
+  return status;
+}
+
+
+int Win32Socket::Receive(char* data, int len) const {
+  int status = recv(socket_, data, len, 0);
+  return status;
+}
+
+
+bool Win32Socket::SetReuseAddress(bool reuse_address) {
+  BOOL on = reuse_address ? TRUE : FALSE;
+  int status = setsockopt(socket_, SOL_SOCKET, SO_REUSEADDR,
+                          reinterpret_cast<char*>(&on), sizeof(on));
+  return status == SOCKET_ERROR;
+}
+
+
+bool Socket::Setup() {
+  // Initialize Winsock32
+  int err;
+  WSADATA winsock_data;
+  WORD version_requested = MAKEWORD(1, 0);
+  err = WSAStartup(version_requested, &winsock_data);
+  if (err != 0) {
+    PrintF("Unable to initialize Winsock, err = %d\n", Socket::LastError());
+  }
+
+  return err == 0;
+}
+
+
+int Socket::LastError() {
+  return WSAGetLastError();
+}
+
+
+uint16_t Socket::HToN(uint16_t value) {
+  return htons(value);
+}
+
+
+uint16_t Socket::NToH(uint16_t value) {
+  return ntohs(value);
+}
+
+
+uint32_t Socket::HToN(uint32_t value) {
+  return htonl(value);
+}
+
+
+uint32_t Socket::NToH(uint32_t value) {
+  return ntohl(value);
+}
+
+
+Socket* OS::CreateSocket() {
+  return new Win32Socket();
+}
+
 
 #ifdef ENABLE_LOGGING_AND_PROFILING
 
@@ -1492,19 +1789,28 @@ class Sampler::PlatformData : public Malloced {
       TickSample sample;
 
       // If profiling, we record the pc and sp of the profiled thread.
-      if (sampler_->IsProfiling()) {
-        // Pause the profiled thread and get its context.
-        SuspendThread(profiled_thread_);
+      if (sampler_->IsProfiling()
+          && SuspendThread(profiled_thread_) != (DWORD)-1) {
         context.ContextFlags = CONTEXT_FULL;
-        GetThreadContext(profiled_thread_, &context);
+        if (GetThreadContext(profiled_thread_, &context) != 0) {
+#if V8_HOST_ARCH_X64
+          UNIMPLEMENTED();
+          sample.pc = context.Rip;
+          sample.sp = context.Rsp;
+          sample.fp = context.Rbp;
+#else
+          sample.pc = context.Eip;
+          sample.sp = context.Esp;
+          sample.fp = context.Ebp;
+#endif
+          sampler_->SampleStack(&sample);
+        }
         ResumeThread(profiled_thread_);
-        // Invoke tick handler with program counter and stack pointer.
-        sample.pc = context.Eip;
-        sample.sp = context.Esp;
       }
 
       // We always sample the VM state.
       sample.state = Logger::state();
+      // Invoke tick handler with program counter and stack pointer.
       sampler_->Tick(&sample);
 
       // Wait until next sampling.
@@ -1541,13 +1847,16 @@ void Sampler::Start() {
   // thread.
   if (IsProfiling()) {
     // Get a handle to the calling thread. This is the thread that we are
-    // going to profile. We need to duplicate the handle because we are
-    // going to use it in the sampler thread. using GetThreadHandle() will
-    // not work in this case.
-    BOOL ok = DuplicateHandle(GetCurrentProcess(), GetCurrentThread(),
-                              GetCurrentProcess(), &data_->profiled_thread_,
-                              THREAD_GET_CONTEXT | THREAD_SUSPEND_RESUME |
-                              THREAD_QUERY_INFORMATION, FALSE, 0);
+    // going to profile. We need to make a copy of the handle because we are
+    // going to use it in the sampler thread. Using GetThreadHandle() will
+    // not work in this case. We're using OpenThread because DuplicateHandle
+    // for some reason doesn't work in Chrome's sandbox.
+    data_->profiled_thread_ = OpenThread(THREAD_GET_CONTEXT |
+                                         THREAD_SUSPEND_RESUME |
+                                         THREAD_QUERY_INFORMATION,
+                                         FALSE,
+                                         GetCurrentThreadId());
+    BOOL ok = data_->profiled_thread_ != NULL;
     if (!ok) return;
   }
 

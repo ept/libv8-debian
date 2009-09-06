@@ -28,6 +28,7 @@
 #ifndef V8_API_H_
 #define V8_API_H_
 
+#include "apiutils.h"
 #include "factory.h"
 
 namespace v8 {
@@ -159,45 +160,6 @@ class RegisteredExtension {
 };
 
 
-class ImplementationUtilities {
- public:
-  static v8::Handle<v8::Primitive> Undefined();
-  static v8::Handle<v8::Primitive> Null();
-  static v8::Handle<v8::Boolean> True();
-  static v8::Handle<v8::Boolean> False();
-
-  static int GetNameCount(ExtensionConfiguration* that) {
-    return that->name_count_;
-  }
-
-  static const char** GetNames(ExtensionConfiguration* that) {
-    return that->names_;
-  }
-
-  static v8::Arguments NewArguments(Local<Value> data,
-                                    Local<Object> holder,
-                                    Local<Function> callee,
-                                    bool is_construct_call,
-                                    void** argv, int argc) {
-    return v8::Arguments(data, holder, callee, is_construct_call, argv, argc);
-  }
-
-  // Introduce an alias for the handle scope data to allow non-friends
-  // to access the HandleScope data.
-  typedef v8::HandleScope::Data HandleScopeData;
-
-  static HandleScopeData* CurrentHandleScope() {
-    return &v8::HandleScope::current_;
-  }
-
-#ifdef DEBUG
-  static void ZapHandleRange(void** begin, void** end) {
-    v8::HandleScope::ZapRange(begin, end);
-  }
-#endif
-};
-
-
 class Utils {
  public:
   static bool ReportApiFailure(const char* location, const char* message);
@@ -237,31 +199,33 @@ class Utils {
       v8::internal::Handle<v8::internal::TypeSwitchInfo> obj);
 
   static inline v8::internal::Handle<v8::internal::TemplateInfo>
-      OpenHandle(Template* that);
+      OpenHandle(const Template* that);
   static inline v8::internal::Handle<v8::internal::FunctionTemplateInfo>
-      OpenHandle(FunctionTemplate* that);
+      OpenHandle(const FunctionTemplate* that);
   static inline v8::internal::Handle<v8::internal::ObjectTemplateInfo>
-      OpenHandle(ObjectTemplate* that);
+      OpenHandle(const ObjectTemplate* that);
   static inline v8::internal::Handle<v8::internal::Object>
-      OpenHandle(Data* data);
+      OpenHandle(const Data* data);
   static inline v8::internal::Handle<v8::internal::JSObject>
-      OpenHandle(v8::Object* data);
+      OpenHandle(const v8::Object* data);
   static inline v8::internal::Handle<v8::internal::JSArray>
-      OpenHandle(v8::Array* data);
+      OpenHandle(const v8::Array* data);
   static inline v8::internal::Handle<v8::internal::String>
-      OpenHandle(String* data);
+      OpenHandle(const String* data);
   static inline v8::internal::Handle<v8::internal::JSFunction>
-      OpenHandle(Script* data);
+      OpenHandle(const Script* data);
   static inline v8::internal::Handle<v8::internal::JSFunction>
-      OpenHandle(Function* data);
+      OpenHandle(const Function* data);
   static inline v8::internal::Handle<v8::internal::JSObject>
-      OpenHandle(Message* message);
+      OpenHandle(const Message* message);
   static inline v8::internal::Handle<v8::internal::Context>
-      OpenHandle(v8::Context* context);
+      OpenHandle(const v8::Context* context);
   static inline v8::internal::Handle<v8::internal::SignatureInfo>
-      OpenHandle(v8::Signature* sig);
+      OpenHandle(const v8::Signature* sig);
   static inline v8::internal::Handle<v8::internal::TypeSwitchInfo>
-      OpenHandle(v8::TypeSwitch* that);
+      OpenHandle(const v8::TypeSwitch* that);
+  static inline v8::internal::Handle<v8::internal::Proxy>
+      OpenHandle(const v8::External* that);
 };
 
 
@@ -273,16 +237,17 @@ static inline T* ToApi(v8::internal::Handle<v8::internal::Object> obj) {
 
 template <class T>
 v8::internal::Handle<T> v8::internal::Handle<T>::EscapeFrom(
-    HandleScope* scope) {
+    v8::HandleScope* scope) {
   return Utils::OpenHandle(*scope->Close(Utils::ToLocal(*this)));
 }
 
 
 // Implementations of ToLocal
 
-#define MAKE_TO_LOCAL(Name, From, To) \
+#define MAKE_TO_LOCAL(Name, From, To)                                       \
   Local<v8::To> Utils::Name(v8::internal::Handle<v8::internal::From> obj) { \
-    return Local<To>(reinterpret_cast<To*>(obj.location())); \
+    ASSERT(!obj->IsTheHole());                                              \
+    return Local<To>(reinterpret_cast<To*>(obj.location()));                \
   }
 
 MAKE_TO_LOCAL(ToLocal, Context, Context)
@@ -307,9 +272,10 @@ MAKE_TO_LOCAL(Uint32ToLocal, Object, Uint32)
 // Implementations of OpenHandle
 
 #define MAKE_OPEN_HANDLE(From, To) \
-  v8::internal::Handle<v8::internal::To> Utils::OpenHandle(v8::From* that) { \
+  v8::internal::Handle<v8::internal::To> Utils::OpenHandle(\
+    const v8::From* that) { \
     return v8::internal::Handle<v8::internal::To>( \
-        reinterpret_cast<v8::internal::To**>(that)); \
+        reinterpret_cast<v8::internal::To**>(const_cast<v8::From*>(that))); \
   }
 
 MAKE_OPEN_HANDLE(Template, TemplateInfo)
@@ -325,6 +291,7 @@ MAKE_OPEN_HANDLE(Script, JSFunction)
 MAKE_OPEN_HANDLE(Function, JSFunction)
 MAKE_OPEN_HANDLE(Message, JSObject)
 MAKE_OPEN_HANDLE(Context, Context)
+MAKE_OPEN_HANDLE(External, Proxy)
 
 #undef MAKE_OPEN_HANDLE
 
@@ -346,8 +313,7 @@ class HandleScopeImplementer {
   HandleScopeImplementer()
       : blocks(0),
         entered_contexts_(0),
-        saved_contexts_(0),
-        saved_security_contexts_(0) {
+        saved_contexts_(0) {
     Initialize();
   }
 
@@ -355,7 +321,6 @@ class HandleScopeImplementer {
     blocks.Initialize(0);
     entered_contexts_.Initialize(0);
     saved_contexts_.Initialize(0);
-    saved_security_contexts_.Initialize(0);
     spare = NULL;
     ignore_out_of_memory = false;
     call_depth = 0;
@@ -373,7 +338,7 @@ class HandleScopeImplementer {
   static char* Iterate(v8::internal::ObjectVisitor* v, char* data);
 
 
-  inline void** GetSpareOrNewBlock();
+  inline internal::Object** GetSpareOrNewBlock();
   inline void DeleteExtensions(int extensions);
 
   inline void IncrementCallDepth() {call_depth++;}
@@ -391,32 +356,26 @@ class HandleScopeImplementer {
   inline Handle<Object> RestoreContext();
   inline bool HasSavedContexts();
 
-  inline void SaveSecurityContext(Handle<Object> context);
-  inline Handle<Object> RestoreSecurityContext();
-  inline bool HasSavedSecurityContexts();
-
-  inline List<void**>* Blocks() { return &blocks; }
+  inline List<internal::Object**>* Blocks() { return &blocks; }
 
   inline bool IgnoreOutOfMemory() { return ignore_out_of_memory; }
   inline void SetIgnoreOutOfMemory(bool value) { ignore_out_of_memory = value; }
 
  private:
-  List<void**> blocks;
+  List<internal::Object**> blocks;
   Object** spare;
   int call_depth;
   // Used as a stack to keep track of entered contexts.
   List<Handle<Object> > entered_contexts_;
   // Used as a stack to keep track of saved contexts.
   List<Handle<Object> > saved_contexts_;
-  // Used as a stack to keep track of saved security contexts.
-  List<Handle<Object> > saved_security_contexts_;
   bool ignore_out_of_memory;
   // This is only used for threading support.
-  ImplementationUtilities::HandleScopeData handle_scope_data_;
+  v8::ImplementationUtilities::HandleScopeData handle_scope_data_;
 
   static void Iterate(ObjectVisitor* v,
-                      List<void**>* blocks,
-                      ImplementationUtilities::HandleScopeData* handle_data);
+      List<internal::Object**>* blocks,
+      v8::ImplementationUtilities::HandleScopeData* handle_data);
   char* RestoreThreadHelper(char* from);
   char* ArchiveThreadHelper(char* to);
 
@@ -442,21 +401,6 @@ bool HandleScopeImplementer::HasSavedContexts() {
 }
 
 
-void HandleScopeImplementer::SaveSecurityContext(Handle<Object> context) {
-  saved_security_contexts_.Add(context);
-}
-
-
-Handle<Object> HandleScopeImplementer::RestoreSecurityContext() {
-  return saved_security_contexts_.RemoveLast();
-}
-
-
-bool HandleScopeImplementer::HasSavedSecurityContexts() {
-  return !saved_security_contexts_.is_empty();
-}
-
-
 void HandleScopeImplementer::EnterContext(Handle<Object> context) {
   entered_contexts_.Add(context);
 }
@@ -476,10 +420,10 @@ Handle<Object> HandleScopeImplementer::LastEnteredContext() {
 
 
 // If there's a spare block, use it for growing the current scope.
-void** HandleScopeImplementer::GetSpareOrNewBlock() {
-  void** block = (spare != NULL) ?
-      reinterpret_cast<void**>(spare) :
-      NewArray<void*>(kHandleBlockSize);
+internal::Object** HandleScopeImplementer::GetSpareOrNewBlock() {
+  internal::Object** block = (spare != NULL) ?
+      spare :
+      NewArray<internal::Object*>(kHandleBlockSize);
   spare = NULL;
   return block;
 }
@@ -491,17 +435,18 @@ void HandleScopeImplementer::DeleteExtensions(int extensions) {
     spare = NULL;
   }
   for (int i = extensions; i > 1; --i) {
-    void** block = blocks.RemoveLast();
+    internal::Object** block = blocks.RemoveLast();
 #ifdef DEBUG
-    ImplementationUtilities::ZapHandleRange(block, &block[kHandleBlockSize]);
+    v8::ImplementationUtilities::ZapHandleRange(block,
+                                                &block[kHandleBlockSize]);
 #endif
     DeleteArray(block);
   }
-  spare = reinterpret_cast<Object**>(blocks.RemoveLast());
+  spare = blocks.RemoveLast();
 #ifdef DEBUG
-  ImplementationUtilities::ZapHandleRange(
-      reinterpret_cast<void**>(spare),
-      reinterpret_cast<void**>(&spare[kHandleBlockSize]));
+  v8::ImplementationUtilities::ZapHandleRange(
+      spare,
+      &spare[kHandleBlockSize]);
 #endif
 }
 

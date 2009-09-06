@@ -1,4 +1,4 @@
-// Copyright 2007-2008 the V8 project authors. All rights reserved.
+// Copyright 2009 the V8 project authors. All rights reserved.
 // Redistribution and use in source and binary forms, with or without
 // modification, are permitted provided that the following conditions are
 // met:
@@ -30,43 +30,97 @@
 #include "bootstrapper.h"
 #include "codegen-inl.h"
 #include "debug.h"
+#include "oprofile-agent.h"
 #include "prettyprinter.h"
-#include "scopeinfo.h"
+#include "register-allocator-inl.h"
+#include "rewriter.h"
 #include "runtime.h"
+#include "scopeinfo.h"
 #include "stub-cache.h"
 
-namespace v8 { namespace internal {
+namespace v8 {
+namespace internal {
 
-DeferredCode::DeferredCode(CodeGenerator* generator)
-  : masm_(generator->masm()),
-    generator_(generator),
-    statement_position_(masm_->last_statement_position()),
-    position_(masm_->last_position()) {
-  generator->AddDeferred(this);
+
+CodeGenerator* CodeGeneratorScope::top_ = NULL;
+
+
+DeferredCode::DeferredCode()
+    : masm_(CodeGeneratorScope::Current()->masm()),
+      statement_position_(masm_->current_statement_position()),
+      position_(masm_->current_position()) {
+  ASSERT(statement_position_ != RelocInfo::kNoPosition);
+  ASSERT(position_ != RelocInfo::kNoPosition);
+
+  CodeGeneratorScope::Current()->AddDeferred(this);
 #ifdef DEBUG
   comment_ = "";
 #endif
+
+  // Copy the register locations from the code generator's frame.
+  // These are the registers that will be spilled on entry to the
+  // deferred code and restored on exit.
+  VirtualFrame* frame = CodeGeneratorScope::Current()->frame();
+  int sp_offset = frame->fp_relative(frame->stack_pointer_);
+  for (int i = 0; i < RegisterAllocator::kNumRegisters; i++) {
+    int loc = frame->register_location(i);
+    if (loc == VirtualFrame::kIllegalIndex) {
+      registers_[i] = kIgnore;
+    } else if (frame->elements_[loc].is_synced()) {
+      // Needs to be restored on exit but not saved on entry.
+      registers_[i] = frame->fp_relative(loc) | kSyncedFlag;
+    } else {
+      int offset = frame->fp_relative(loc);
+      registers_[i] = (offset < sp_offset) ? kPush : offset;
+    }
+  }
 }
 
 
 void CodeGenerator::ProcessDeferred() {
   while (!deferred_.is_empty()) {
     DeferredCode* code = deferred_.RemoveLast();
-    MacroAssembler* masm = code->masm();
+    ASSERT(masm_ == code->masm());
     // Record position of deferred code stub.
-    if (code->statement_position() != RelocInfo::kNoPosition) {
-      masm->RecordStatementPosition(code->statement_position());
-    }
+    masm_->RecordStatementPosition(code->statement_position());
     if (code->position() != RelocInfo::kNoPosition) {
-      masm->RecordPosition(code->position());
+      masm_->RecordPosition(code->position());
     }
-    // Bind labels and generate the code.
-    masm->bind(code->enter());
-    Comment cmnt(masm, code->comment());
+    // Generate the code.
+    Comment cmnt(masm_, code->comment());
+    masm_->bind(code->entry_label());
+    code->SaveRegisters();
     code->Generate();
-    if (code->exit()->is_bound()) {
-      masm->jmp(code->exit());  // platform independent?
-    }
+    code->RestoreRegisters();
+    masm_->jmp(code->exit_label());
+  }
+}
+
+
+void CodeGenerator::SetFrame(VirtualFrame* new_frame,
+                             RegisterFile* non_frame_registers) {
+  RegisterFile saved_counts;
+  if (has_valid_frame()) {
+    frame_->DetachFromCodeGenerator();
+    // The remaining register reference counts are the non-frame ones.
+    allocator_->SaveTo(&saved_counts);
+  }
+
+  if (new_frame != NULL) {
+    // Restore the non-frame register references that go with the new frame.
+    allocator_->RestoreFrom(non_frame_registers);
+    new_frame->AttachToCodeGenerator();
+  }
+
+  frame_ = new_frame;
+  saved_counts.CopyTo(non_frame_registers);
+}
+
+
+void CodeGenerator::DeleteFrame() {
+  if (has_valid_frame()) {
+    frame_->DetachFromCodeGenerator();
+    frame_ = NULL;
   }
 }
 
@@ -78,7 +132,9 @@ Handle<Code> CodeGenerator::MakeCode(FunctionLiteral* flit,
                                      Handle<Script> script,
                                      bool is_eval) {
 #ifdef ENABLE_DISASSEMBLER
-  bool print_code = FLAG_print_code && !Bootstrapper::IsActive();
+  bool print_code = Bootstrapper::IsActive()
+      ? FLAG_print_builtin_code
+      : FLAG_print_code;
 #endif
 
 #ifdef DEBUG
@@ -89,7 +145,6 @@ Handle<Code> CodeGenerator::MakeCode(FunctionLiteral* flit,
   if (Bootstrapper::IsActive()) {
     print_source = FLAG_print_builtin_source;
     print_ast = FLAG_print_builtin_ast;
-    print_code = FLAG_print_builtin_code;
     ftype = "builtin";
   } else {
     print_source = FLAG_print_source;
@@ -115,21 +170,25 @@ Handle<Code> CodeGenerator::MakeCode(FunctionLiteral* flit,
   // Generate code.
   const int initial_buffer_size = 4 * KB;
   CodeGenerator cgen(initial_buffer_size, script, is_eval);
+  CodeGeneratorScope scope(&cgen);
   cgen.GenCode(flit);
   if (cgen.HasStackOverflow()) {
     ASSERT(!Top::has_pending_exception());
     return Handle<Code>::null();
   }
 
-  // Process any deferred code.
-  cgen.ProcessDeferred();
-
-  // Allocate and install the code.
+  // Allocate and install the code.  Time the rest of this function as
+  // code creation.
+  HistogramTimerScope timer(&Counters::code_creation);
   CodeDesc desc;
   cgen.masm()->GetCode(&desc);
-  ScopeInfo<> sinfo(flit->scope());
-  Code::Flags flags = Code::ComputeFlags(Code::FUNCTION);
-  Handle<Code> code = Factory::NewCode(desc, &sinfo, flags);
+  ZoneScopeInfo sinfo(flit->scope());
+  InLoopFlag in_loop = (cgen.loop_nesting() != 0) ? IN_LOOP : NOT_IN_LOOP;
+  Code::Flags flags = Code::ComputeFlags(Code::FUNCTION, in_loop);
+  Handle<Code> code = Factory::NewCode(desc,
+                                       &sinfo,
+                                       flags,
+                                       cgen.masm()->CodeObject());
 
   // Add unresolved entries in the code to the fixup list.
   Bootstrapper::AddFixup(*code, cgen.masm());
@@ -150,7 +209,7 @@ Handle<Code> CodeGenerator::MakeCode(FunctionLiteral* flit,
       PrintF("\n\n");
     }
     PrintF("--- Code ---\n");
-    code->Disassemble();
+    code->Disassemble(*flit->name()->ToCString());
   }
 #endif  // ENABLE_DISASSEMBLER
 
@@ -162,26 +221,44 @@ Handle<Code> CodeGenerator::MakeCode(FunctionLiteral* flit,
 }
 
 
+#ifdef ENABLE_LOGGING_AND_PROFILING
+
+bool CodeGenerator::ShouldGenerateLog(Expression* type) {
+  ASSERT(type != NULL);
+  if (!Logger::is_logging()) return false;
+  Handle<String> name = Handle<String>::cast(type->AsLiteral()->handle());
+  if (FLAG_log_regexp) {
+    static Vector<const char> kRegexp = CStrVector("regexp");
+    if (name->IsEqualTo(kRegexp))
+      return true;
+  }
+  return false;
+}
+
+#endif
+
+
 // Sets the function info on a function.
 // The start_position points to the first '(' character after the function name
 // in the full script source. When counting characters in the script source the
 // the first character is number 0 (not 1).
 void CodeGenerator::SetFunctionInfo(Handle<JSFunction> fun,
-                                    int length,
-                                    int function_token_position,
-                                    int start_position,
-                                    int end_position,
-                                    bool is_expression,
+                                    FunctionLiteral* lit,
                                     bool is_toplevel,
                                     Handle<Script> script) {
-  fun->shared()->set_length(length);
-  fun->shared()->set_formal_parameter_count(length);
+  fun->shared()->set_length(lit->num_parameters());
+  fun->shared()->set_formal_parameter_count(lit->num_parameters());
   fun->shared()->set_script(*script);
-  fun->shared()->set_function_token_position(function_token_position);
-  fun->shared()->set_start_position(start_position);
-  fun->shared()->set_end_position(end_position);
-  fun->shared()->set_is_expression(is_expression);
+  fun->shared()->set_function_token_position(lit->function_token_position());
+  fun->shared()->set_start_position(lit->start_position());
+  fun->shared()->set_end_position(lit->end_position());
+  fun->shared()->set_is_expression(lit->is_expression());
   fun->shared()->set_is_toplevel(is_toplevel);
+  fun->shared()->set_inferred_name(*lit->inferred_name());
+  fun->shared()->SetThisPropertyAssignmentsInfo(
+      lit->has_only_this_property_assignments(),
+      lit->has_only_simple_this_property_assignments(),
+      *lit->this_property_assignments());
 }
 
 
@@ -191,6 +268,12 @@ static Handle<Code> ComputeLazyCompile(int argc) {
 
 
 Handle<JSFunction> CodeGenerator::BuildBoilerplate(FunctionLiteral* node) {
+#ifdef DEBUG
+  // We should not try to compile the same function literal more than
+  // once.
+  node->mark_as_compiled();
+#endif
+
   // Determine if the function can be lazily compiled. This is
   // necessary to allow some of our builtin JS files to be lazily
   // compiled. These builtins cannot be handled lazily by the parser,
@@ -203,6 +286,12 @@ Handle<JSFunction> CodeGenerator::BuildBoilerplate(FunctionLiteral* node) {
   if (FLAG_lazy && allow_lazy) {
     code = ComputeLazyCompile(node->num_parameters());
   } else {
+    // The bodies of function literals have not yet been visited by
+    // the AST optimizer/analyzer.
+    if (!Rewriter::Optimize(node)) {
+      return Handle<JSFunction>::null();
+    }
+
     code = MakeCode(node, script_, false);
 
     // Check for stack-overflow exception.
@@ -212,7 +301,13 @@ Handle<JSFunction> CodeGenerator::BuildBoilerplate(FunctionLiteral* node) {
     }
 
     // Function compilation complete.
-    LOG(CodeCreateEvent("Function", *code, *node->name()));
+    LOG(CodeCreateEvent(Logger::FUNCTION_TAG, *code, *node->name()));
+
+#ifdef ENABLE_OPROFILE_AGENT
+    OProfileAgent::CreateNativeCodeRegion(*node->name(),
+                                          code->instruction_start(),
+                                          code->instruction_size());
+#endif
   }
 
   // Create a boilerplate function.
@@ -221,13 +316,12 @@ Handle<JSFunction> CodeGenerator::BuildBoilerplate(FunctionLiteral* node) {
                                       node->materialized_literal_count(),
                                       node->contains_array_literal(),
                                       code);
-  CodeGenerator::SetFunctionInfo(function, node->num_parameters(),
-                                 node->function_token_position(),
-                                 node->start_position(), node->end_position(),
-                                 node->is_expression(), false, script_);
+  CodeGenerator::SetFunctionInfo(function, node, false, script_);
 
+#ifdef ENABLE_DEBUGGER_SUPPORT
   // Notify debugger that a new function has been added.
   Debugger::OnNewFunction(function);
+#endif
 
   // Set the expected number of properties for instances and return
   // the resulting function.
@@ -237,8 +331,18 @@ Handle<JSFunction> CodeGenerator::BuildBoilerplate(FunctionLiteral* node) {
 }
 
 
-Handle<Code> CodeGenerator::ComputeCallInitialize(int argc) {
-  CALL_HEAP_FUNCTION(StubCache::ComputeCallInitialize(argc), Code);
+Handle<Code> CodeGenerator::ComputeCallInitialize(
+    int argc,
+    InLoopFlag in_loop) {
+  if (in_loop == IN_LOOP) {
+    // Force the creation of the corresponding stub outside loops,
+    // because it may be used when clearing the ICs later - it is
+    // possible for a series of IC transitions to lose the in-loop
+    // information, and the IC clearing code can't generate a stub
+    // that it needs so we need to ensure it is generated already.
+    ComputeCallInitialize(argc, NOT_IN_LOOP);
+  }
+  CALL_HEAP_FUNCTION(StubCache::ComputeCallInitialize(argc, in_loop), Code);
 }
 
 
@@ -297,152 +401,113 @@ void CodeGenerator::ProcessDeclarations(ZoneList<Declaration*>* declarations) {
 }
 
 
-struct InlineRuntimeLUT {
-  void (CodeGenerator::*method)(ZoneList<Expression*>*);
-  const char* name;
+
+// Special cases: These 'runtime calls' manipulate the current
+// frame and are only used 1 or two places, so we generate them
+// inline instead of generating calls to them.  They are used
+// for implementing Function.prototype.call() and
+// Function.prototype.apply().
+CodeGenerator::InlineRuntimeLUT CodeGenerator::kInlineRuntimeLUT[] = {
+  {&CodeGenerator::GenerateIsSmi, "_IsSmi"},
+  {&CodeGenerator::GenerateIsNonNegativeSmi, "_IsNonNegativeSmi"},
+  {&CodeGenerator::GenerateIsArray, "_IsArray"},
+  {&CodeGenerator::GenerateIsConstructCall, "_IsConstructCall"},
+  {&CodeGenerator::GenerateArgumentsLength, "_ArgumentsLength"},
+  {&CodeGenerator::GenerateArgumentsAccess, "_Arguments"},
+  {&CodeGenerator::GenerateClassOf, "_ClassOf"},
+  {&CodeGenerator::GenerateValueOf, "_ValueOf"},
+  {&CodeGenerator::GenerateSetValueOf, "_SetValueOf"},
+  {&CodeGenerator::GenerateFastCharCodeAt, "_FastCharCodeAt"},
+  {&CodeGenerator::GenerateObjectEquals, "_ObjectEquals"},
+  {&CodeGenerator::GenerateLog, "_Log"},
+  {&CodeGenerator::GenerateRandomPositiveSmi, "_RandomPositiveSmi"},
+  {&CodeGenerator::GenerateMathSin, "_Math_sin"},
+  {&CodeGenerator::GenerateMathCos, "_Math_cos"}
 };
+
+
+CodeGenerator::InlineRuntimeLUT* CodeGenerator::FindInlineRuntimeLUT(
+    Handle<String> name) {
+  const int entries_count =
+      sizeof(kInlineRuntimeLUT) / sizeof(InlineRuntimeLUT);
+  for (int i = 0; i < entries_count; i++) {
+    InlineRuntimeLUT* entry = &kInlineRuntimeLUT[i];
+    if (name->IsEqualTo(CStrVector(entry->name))) {
+      return entry;
+    }
+  }
+  return NULL;
+}
 
 
 bool CodeGenerator::CheckForInlineRuntimeCall(CallRuntime* node) {
   ZoneList<Expression*>* args = node->arguments();
-  // Special cases: These 'runtime calls' manipulate the current
-  // frame and are only used 1 or two places, so we generate them
-  // inline instead of generating calls to them.  They are used
-  // for implementing Function.prototype.call() and
-  // Function.prototype.apply().
-  static const InlineRuntimeLUT kInlineRuntimeLUT[] = {
-    {&v8::internal::CodeGenerator::GenerateIsSmi,
-     "_IsSmi"},
-    {&v8::internal::CodeGenerator::GenerateIsNonNegativeSmi,
-     "_IsNonNegativeSmi"},
-    {&v8::internal::CodeGenerator::GenerateIsArray,
-     "_IsArray"},
-    {&v8::internal::CodeGenerator::GenerateArgumentsLength,
-     "_ArgumentsLength"},
-    {&v8::internal::CodeGenerator::GenerateArgumentsAccess,
-     "_Arguments"},
-    {&v8::internal::CodeGenerator::GenerateValueOf,
-     "_ValueOf"},
-    {&v8::internal::CodeGenerator::GenerateSetValueOf,
-     "_SetValueOf"},
-    {&v8::internal::CodeGenerator::GenerateFastCharCodeAt,
-     "_FastCharCodeAt"},
-    {&v8::internal::CodeGenerator::GenerateObjectEquals,
-     "_ObjectEquals"}
-  };
-  if (node->name()->length() > 0 && node->name()->Get(0) == '_') {
-    for (unsigned i = 0;
-         i < sizeof(kInlineRuntimeLUT) / sizeof(InlineRuntimeLUT);
-         i++) {
-      const InlineRuntimeLUT* entry = kInlineRuntimeLUT + i;
-      if (node->name()->IsEqualTo(CStrVector(entry->name))) {
-        ((*this).*(entry->method))(args);
-        return true;
-      }
+  Handle<String> name = node->name();
+  if (name->length() > 0 && name->Get(0) == '_') {
+    InlineRuntimeLUT* entry = FindInlineRuntimeLUT(name);
+    if (entry != NULL) {
+      ((*this).*(entry->method))(args);
+      return true;
     }
   }
   return false;
 }
 
 
-void CodeGenerator::GenerateFastCaseSwitchStatement(
-    SwitchStatement *node, int min_index, int range, int default_index) {
-
-  ZoneList<CaseClause*>* cases = node->cases();
-  int length = cases->length();
-
-  // Label pointer per number in range
-  SmartPointer<Label*> case_targets(NewArray<Label*>(range));
-
-  // Label per switch case
-  SmartPointer<Label> case_labels(NewArray<Label>(length));
-
-  Label* fail_label = (default_index >= 0 ? &(case_labels[default_index])
-                                          : node->break_target());
-
-  // Populate array of label pointers for each number in the range.
-  // Initally put the failure label everywhere.
-  for (int i = 0; i < range; i++) {
-    case_targets[i] = fail_label;
+bool CodeGenerator::PatchInlineRuntimeEntry(Handle<String> name,
+    const CodeGenerator::InlineRuntimeLUT& new_entry,
+    CodeGenerator::InlineRuntimeLUT* old_entry) {
+  InlineRuntimeLUT* entry = FindInlineRuntimeLUT(name);
+  if (entry == NULL) return false;
+  if (old_entry != NULL) {
+    old_entry->name = entry->name;
+    old_entry->method = entry->method;
   }
-
-  // Overwrite with label of a case for the number value of that case.
-  // (In reverse order, so that if the same label occurs twice, the
-  // first one wins).
-  for (int i = length-1; i >= 0 ; i--) {
-    CaseClause* clause = cases->at(i);
-    if (!clause->is_default()) {
-      Object* label_value = *(clause->label()->AsLiteral()->handle());
-      int case_value = Smi::cast(label_value)->value();
-      case_targets[case_value - min_index] = &(case_labels[i]);
-    }
-  }
-
-  GenerateFastCaseSwitchJumpTable(node, min_index, range, fail_label,
-                                  case_targets, case_labels);
-}
-
-void CodeGenerator::GenerateFastCaseSwitchCases(
-    SwitchStatement* node, SmartPointer<Label> &case_labels) {
-
-  ZoneList<CaseClause*>* cases = node->cases();
-  int length = cases->length();
-
-  for (int i = 0; i < length; i++) {
-    Comment cmnt(masm(), "[ case clause");
-    masm()->bind(&(case_labels[i]));
-    VisitStatements(cases->at(i)->statements());
-  }
-
-  masm()->bind(node->break_target());
-}
-
-
-bool CodeGenerator::TryGenerateFastCaseSwitchStatement(SwitchStatement* node) {
-  ZoneList<CaseClause*>* cases = node->cases();
-  int length = cases->length();
-
-  if (length < FastCaseSwitchMinCaseCount()) {
-    return false;
-  }
-
-  // Test whether fast-case should be used.
-  int default_index = -1;
-  int min_index = Smi::kMaxValue;
-  int max_index = Smi::kMinValue;
-  for (int i = 0; i < length; i++) {
-    CaseClause* clause = cases->at(i);
-    if (clause->is_default()) {
-      if (default_index >= 0) {
-        return false;  // More than one default label:
-                       // Defer to normal case for error.
-    }
-      default_index = i;
-    } else {
-      Expression* label = clause->label();
-      Literal* literal = label->AsLiteral();
-      if (literal == NULL) {
-        return false;  // fail fast case
-      }
-      Object* value = *(literal->handle());
-      if (!value->IsSmi()) {
-        return false;
-      }
-      int smi = Smi::cast(value)->value();
-      if (smi < min_index) { min_index = smi; }
-      if (smi > max_index) { max_index = smi; }
-    }
-  }
-
-  // All labels are known to be Smis.
-  int range = max_index - min_index + 1;  // |min..max| inclusive
-  if (range / FastCaseSwitchMaxOverheadFactor() > length) {
-    return false;  // range of labels is too sparse
-  }
-
-  // Optimization accepted, generate code.
-  GenerateFastCaseSwitchStatement(node, min_index, range, default_index);
+  entry->name = new_entry.name;
+  entry->method = new_entry.method;
   return true;
+}
+
+
+void CodeGenerator::CodeForFunctionPosition(FunctionLiteral* fun) {
+  if (FLAG_debug_info) {
+    int pos = fun->start_position();
+    if (pos != RelocInfo::kNoPosition) {
+      masm()->RecordStatementPosition(pos);
+      masm()->RecordPosition(pos);
+    }
+  }
+}
+
+
+void CodeGenerator::CodeForReturnPosition(FunctionLiteral* fun) {
+  if (FLAG_debug_info) {
+    int pos = fun->end_position();
+    if (pos != RelocInfo::kNoPosition) {
+      masm()->RecordStatementPosition(pos);
+      masm()->RecordPosition(pos);
+    }
+  }
+}
+
+
+void CodeGenerator::CodeForStatementPosition(AstNode* node) {
+  if (FLAG_debug_info) {
+    int pos = node->statement_pos();
+    if (pos != RelocInfo::kNoPosition) {
+      masm()->RecordStatementPosition(pos);
+      masm()->RecordPosition(pos);
+    }
+  }
+}
+
+
+void CodeGenerator::CodeForSourcePosition(int pos) {
+  if (FLAG_debug_info) {
+    if (pos != RelocInfo::kNoPosition) {
+      masm()->RecordPosition(pos);
+    }
+  }
 }
 
 

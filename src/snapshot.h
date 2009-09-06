@@ -28,7 +28,8 @@
 #ifndef V8_SNAPSHOT_H_
 #define V8_SNAPSHOT_H_
 
-namespace v8 { namespace internal {
+namespace v8 {
+namespace internal {
 
 class Snapshot {
  public:
@@ -45,10 +46,10 @@ class Snapshot {
   static bool WriteToFile(const char* snapshot_file);
 
  private:
-  static const char data_[];
+  static const byte data_[];
   static int size_;
 
-  static bool Deserialize(const char* content, int len);
+  static bool Deserialize(const byte* content, int len);
 
   DISALLOW_IMPLICIT_CONSTRUCTORS(Snapshot);
 };

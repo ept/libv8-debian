@@ -28,7 +28,8 @@
 #ifndef V8_V8THREADS_H_
 #define V8_V8THREADS_H_
 
-namespace v8 { namespace internal {
+namespace v8 {
+namespace internal {
 
 
 class ThreadState {
@@ -45,6 +46,16 @@ class ThreadState {
 
   static ThreadState* GetFree();
 
+  // Id of thread.
+  void set_id(int id) { id_ = id; }
+  int id() { return id_; }
+
+  // Should the thread be terminated when it is restored?
+  bool terminate_on_restore() { return terminate_on_restore_; }
+  void set_terminate_on_restore(bool terminate_on_restore) {
+    terminate_on_restore_ = terminate_on_restore;
+  }
+
   // Get data area for archiving a thread.
   char* data() { return data_; }
  private:
@@ -52,9 +63,12 @@ class ThreadState {
 
   void AllocateSpace();
 
+  int id_;
+  bool terminate_on_restore_;
   char* data_;
   ThreadState* next_;
   ThreadState* previous_;
+
   // In the following two lists there is always at least one object on the list.
   // The first object is a flying anchor that is only there to simplify linking
   // and unlinking.
@@ -74,12 +88,20 @@ class ThreadManager : public AllStatic {
   static bool RestoreThread();
 
   static void Iterate(ObjectVisitor* v);
-  static void MarkCompactPrologue();
-  static void MarkCompactEpilogue();
+  static void MarkCompactPrologue(bool is_compacting);
+  static void MarkCompactEpilogue(bool is_compacting);
   static bool IsLockedByCurrentThread() { return mutex_owner_.IsSelf(); }
+
+  static int CurrentId();
+  static void AssignId();
+
+  static void TerminateExecution(int thread_id);
+
+  static const int kInvalidId = -1;
  private:
   static void EagerlyArchiveThread();
 
+  static int next_id_;  // V8 threads are identified through an integer.
   static Mutex* mutex_;
   static ThreadHandle mutex_owner_;
   static ThreadHandle lazily_archived_thread_;
@@ -87,19 +109,31 @@ class ThreadManager : public AllStatic {
 };
 
 
+// The ContextSwitcher thread is used to schedule regular preemptions to
+// multiple running V8 threads. Generally it is necessary to call
+// StartPreemption if there is more than one thread running. If not, a single
+// JavaScript can take full control of V8 and not allow other threads to run.
 class ContextSwitcher: public Thread {
  public:
-  void Run();
+  // Set the preemption interval for the ContextSwitcher thread.
   static void StartPreemption(int every_n_ms);
+
+  // Stop sending preemption requests to threads.
   static void StopPreemption();
+
+  // Preempted thread needs to call back to the ContextSwitcher to acknowledge
+  // the handling of a preemption request.
   static void PreemptionReceived();
+
  private:
   explicit ContextSwitcher(int every_n_ms);
-  void WaitForPreemption();
-  void Stop();
-  Semaphore* preemption_semaphore_;
+
+  void Run();
+
   bool keep_going_;
   int sleep_ms_;
+
+  static ContextSwitcher* singleton_;
 };
 
 } }  // namespace v8::internal

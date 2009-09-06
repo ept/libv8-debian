@@ -30,6 +30,7 @@
 
 #include <math.h>
 #include <float.h>         // required for DBL_MAX and on Win32 for finite()
+#include <stdarg.h>
 
 // ----------------------------------------------------------------------------
 // Extra POSIX/ANSI functions for Win32/MSVC.
@@ -37,7 +38,8 @@
 #include "conversions.h"
 #include "platform.h"
 
-namespace v8 { namespace internal {
+namespace v8 {
+namespace internal {
 
 // The fast double-to-int conversion routine does not guarantee
 // rounding towards zero.

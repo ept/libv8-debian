@@ -28,7 +28,8 @@
 #ifndef V8_MARK_COMPACT_H_
 #define V8_MARK_COMPACT_H_
 
-namespace v8 { namespace internal {
+namespace v8 {
+namespace internal {
 
 // Callback function, returns whether an object is alive. The heap size
 // of the object is returned in size. It optionally updates the offset
@@ -44,12 +45,12 @@ class RootMarkingVisitor;
 class MarkingVisitor;
 
 
-// ----------------------------------------------------------------------------
+// -------------------------------------------------------------------------
 // Mark-Compact collector
 //
 // All methods are static.
 
-class MarkCompactCollector : public AllStatic {
+class MarkCompactCollector: public AllStatic {
  public:
   // Type of functions to compute forwarding addresses of objects in
   // compacted spaces.  Given an object and its size, return a (non-failure)
@@ -74,8 +75,18 @@ class MarkCompactCollector : public AllStatic {
   // Type of functions to process non-live objects.
   typedef void (*ProcessNonLiveFunction)(HeapObject* object);
 
+  // Set the global force_compaction flag, it must be called before Prepare
+  // to take effect.
+  static void SetForceCompaction(bool value) {
+    force_compaction_ = value;
+  }
+
+  // Prepares for GC by resetting relocation info in old and map spaces and
+  // choosing spaces to compact.
+  static void Prepare(GCTracer* tracer);
+
   // Performs a global garbage collection.
-  static void CollectGarbage(GCTracer* tracer);
+  static void CollectGarbage();
 
   // True if the last full GC performed heap compaction.
   static bool HasCompacted() { return compacting_collection_; }
@@ -112,6 +123,10 @@ class MarkCompactCollector : public AllStatic {
   // The current stage of the collector.
   static CollectorState state_;
 #endif
+
+  // Global flag that forces a compaction.
+  static bool force_compaction_;
+
   // Global flag indicating whether spaces were compacted on the last GC.
   static bool compacting_collection_;
 
@@ -123,25 +138,18 @@ class MarkCompactCollector : public AllStatic {
   // collection (NULL before and after).
   static GCTracer* tracer_;
 
-  // Prepares for GC by resetting relocation info in old and map spaces and
-  // choosing spaces to compact.
-  static void Prepare();
-
-  // Finishes GC, performs heap verification.
+  // Finishes GC, performs heap verification if enabled.
   static void Finish();
 
-  // --------------------------------------------------------------------------
-  // Phase 1: functions related to marking phase.
-  //   before: Heap is in normal state, collector is 'IDLE'.
+  // -----------------------------------------------------------------------
+  // Phase 1: Marking live objects.
   //
-  //           The first word of a page in old spaces has the end of
-  //           allocation address of the page.
+  //  Before: The heap has been prepared for garbage collection by
+  //          MarkCompactCollector::Prepare() and is otherwise in its
+  //          normal state.
   //
-  //           The word at Chunk::high_ address has the address of the
-  //           first page in the next chunk. (The address is tagged to
-  //           distinguish it from end-of-allocation address).
-  //
-  //    after: live objects are marked.
+  //   After: Live objects are marked and non-live objects are unmarked.
+
 
   friend class RootMarkingVisitor;
   friend class MarkingVisitor;
@@ -152,11 +160,34 @@ class MarkCompactCollector : public AllStatic {
   static void MarkUnmarkedObject(HeapObject* obj);
 
   static inline void MarkObject(HeapObject* obj) {
-     if (!obj->IsMarked()) MarkUnmarkedObject(obj);
+    if (!obj->IsMarked()) MarkUnmarkedObject(obj);
   }
 
+  static inline void SetMark(HeapObject* obj) {
+    tracer_->increment_marked_count();
+#ifdef DEBUG
+    UpdateLiveObjectCount(obj);
+#endif
+    obj->SetMark();
+  }
+
+  // Creates back pointers for all map transitions, stores them in
+  // the prototype field.  The original prototype pointers are restored
+  // in ClearNonLiveTransitions().  All JSObject maps
+  // connected by map transitions have the same prototype object, which
+  // is why we can use this field temporarily for back pointers.
+  static void CreateBackPointers();
+
+  // Mark a Map and its DescriptorArray together, skipping transitions.
+  static void MarkMapContents(Map* map);
+  static void MarkDescriptorArray(DescriptorArray* descriptors);
+
   // Mark the heap roots and all objects reachable from them.
-  static void ProcessRoots(RootMarkingVisitor* visitor);
+  static void MarkRoots(RootMarkingVisitor* visitor);
+
+  // Mark the symbol table specially.  References to symbols from the
+  // symbol table are weak.
+  static void MarkSymbolTable();
 
   // Mark objects in object groups that have at least one object in the
   // group marked.
@@ -182,38 +213,65 @@ class MarkCompactCollector : public AllStatic {
   // flag on the marking stack.
   static void RefillMarkingStack();
 
-  // Callback function for telling whether the object *p must be marked.
-  static bool MustBeMarked(Object** p);
+  // Callback function for telling whether the object *p is an unmarked
+  // heap object.
+  static bool IsUnmarkedHeapObject(Object** p);
 
 #ifdef DEBUG
   static void UpdateLiveObjectCount(HeapObject* obj);
-  static void VerifyHeapAfterMarkingPhase();
 #endif
 
   // We sweep the large object space in the same way whether we are
   // compacting or not, because the large object space is never compacted.
   static void SweepLargeObjectSpace();
 
-  // --------------------------------------------------------------------------
-  // Phase 2: functions related to computing and encoding forwarding pointers
-  //   before: live objects' map pointers are marked as '00'
-  //    after: Map pointers of live old and map objects have encoded
-  //           forwarding pointers and map pointers
+  // Test whether a (possibly marked) object is a Map.
+  static inline bool SafeIsMap(HeapObject* object);
+
+  // Map transitions from a live map to a dead map must be killed.
+  // We replace them with a null descriptor, with the same key.
+  static void ClearNonLiveTransitions();
+
+  // -----------------------------------------------------------------------
+  // Phase 2: Sweeping to clear mark bits and free non-live objects for
+  // a non-compacting collection, or else computing and encoding
+  // forwarding addresses for a compacting collection.
   //
-  //           The 3rd word of a page has the page top offset after compaction.
+  //  Before: Live objects are marked and non-live objects are unmarked.
   //
-  //           The 4th word of a page in the map space has the map index
-  //           of this page in the map table. This word is not used in
-  //           the old space.
+  //   After: (Non-compacting collection.)  Live objects are unmarked,
+  //          non-live regions have been added to their space's free
+  //          list.
   //
-  //           The 5th and 6th words of a page have the start and end
-  //           addresses of the first free region in the page.
+  //   After: (Compacting collection.)  The forwarding address of live
+  //          objects in the paged spaces is encoded in their map word
+  //          along with their (non-forwarded) map pointer.
   //
-  //           The 7th word of a page in old spaces has the forwarding address
-  //           of the first live object in the page.
+  //          The forwarding address of live objects in the new space is
+  //          written to their map word's offset in the inactive
+  //          semispace.
   //
-  //           Live young objects have their forwarding pointers in
-  //           the from space at the same offset to the beginning of the space.
+  //          Bookkeeping data is written to the remembered-set are of
+  //          eached paged-space page that contains live objects after
+  //          compaction:
+  //
+  //          The 3rd word of the page (first word of the remembered
+  //          set) contains the relocation top address, the address of
+  //          the first word after the end of the last live object in
+  //          the page after compaction.
+  //
+  //          The 4th word contains the zero-based index of the page in
+  //          its space.  This word is only used for map space pages, in
+  //          order to encode the map addresses in 21 bits to free 11
+  //          bits per map word for the forwarding address.
+  //
+  //          The 5th word contains the (nonencoded) forwarding address
+  //          of the first live object in the page.
+  //
+  //          In both the new space and the paged spaces, a linked list
+  //          of live regions is constructructed (linked through
+  //          pointers in the non-live region immediately following each
+  //          live region) to speed further passes of the collector.
 
   // Encodes forwarding addresses of objects in compactable parts of the
   // heap.
@@ -245,20 +303,23 @@ class MarkCompactCollector : public AllStatic {
   static void DeallocateOldDataBlock(Address start, int size_in_bytes);
   static void DeallocateCodeBlock(Address start, int size_in_bytes);
   static void DeallocateMapBlock(Address start, int size_in_bytes);
+  static void DeallocateCellBlock(Address start, int size_in_bytes);
 
-  // Phase 2: If we are not compacting the heap, we simply sweep the spaces
-  // except for the large object space, clearing mark bits and adding
-  // unmarked regions to each space's free list.
+  // If we are not compacting the heap, we simply sweep the spaces except
+  // for the large object space, clearing mark bits and adding unmarked
+  // regions to each space's free list.
   static void SweepSpaces();
 
-#ifdef DEBUG
-  static void VerifyHeapAfterEncodingForwardingAddresses();
-#endif
-
-  // --------------------------------------------------------------------------
-  // Phase 3: function related to updating pointers and decode map pointers
-  //   before: see after phase 2
-  //    after: all pointers are updated to forwarding addresses.
+  // -----------------------------------------------------------------------
+  // Phase 3: Updating pointers in live objects.
+  //
+  //  Before: Same as after phase 2 (compacting collection).
+  //
+  //   After: All pointers in live objects, including encoded map
+  //          pointers, are updated to point to their target's new
+  //          location.  The remembered set area of each paged-space
+  //          page containing live objects still contains bookkeeping
+  //          information.
 
   friend class UpdatingVisitor;  // helper for updating visited objects
 
@@ -276,14 +337,17 @@ class MarkCompactCollector : public AllStatic {
   // Calculates the forwarding address of an object in an old space.
   static Address GetForwardingAddressInOldSpace(HeapObject* obj);
 
-#ifdef DEBUG
-  static void VerifyHeapAfterUpdatingPointers();
-#endif
-
-  // --------------------------------------------------------------------------
-  // Phase 4: functions related to relocating objects
-  //     before: see after phase 3
-  //      after: heap is in a normal state, except remembered set is not built
+  // -----------------------------------------------------------------------
+  // Phase 4: Relocating objects.
+  //
+  //  Before: Pointers to live objects are updated to point to their
+  //          target's new location.  The remembered set area of each
+  //          paged-space page containing live objects still contains
+  //          bookkeeping information.
+  //
+  //   After: Objects have been moved to their new addresses. The
+  //          remembered set area of each paged-space page containing
+  //          live objects still contains bookkeeping information.
 
   // Relocates objects in all spaces.
   static void RelocateObjects();
@@ -299,8 +363,12 @@ class MarkCompactCollector : public AllStatic {
   static int RelocateOldPointerObject(HeapObject* obj);
   static int RelocateOldDataObject(HeapObject* obj);
 
+  // Relocate a property cell object.
+  static int RelocateCellObject(HeapObject* obj);
+
   // Helper function.
-  static inline int RelocateOldNonCodeObject(HeapObject* obj, OldSpace* space);
+  static inline int RelocateOldNonCodeObject(HeapObject* obj,
+                                             PagedSpace* space);
 
   // Relocates an object in the code space.
   static int RelocateCodeObject(HeapObject* obj);
@@ -308,18 +376,19 @@ class MarkCompactCollector : public AllStatic {
   // Copy a new object.
   static int RelocateNewObject(HeapObject* obj);
 
-#ifdef DEBUG
-  static void VerifyHeapAfterRelocatingObjects();
-#endif
-
-  // ---------------------------------------------------------------------------
-  // Phase 5: functions related to rebuilding remembered sets
+  // -----------------------------------------------------------------------
+  // Phase 5: Rebuilding remembered sets.
+  //
+  //  Before: The heap is in a normal state except that remembered sets
+  //          in the paged spaces are not correct.
+  //
+  //   After: The heap is in a normal state.
 
   // Rebuild remembered set in old and map spaces.
   static void RebuildRSets();
 
 #ifdef DEBUG
-  // ---------------------------------------------------------------------------
+  // -----------------------------------------------------------------------
   // Debugging variables, functions and classes
   // Counters used for debugging the marking phase of mark-compact or
   // mark-sweep collection.
@@ -339,17 +408,14 @@ class MarkCompactCollector : public AllStatic {
   // Number of live objects in Heap::map_space_.
   static int live_map_objects_;
 
+  // Number of live objects in Heap::cell_space_.
+  static int live_cell_objects_;
+
   // Number of live objects in Heap::lo_space_.
   static int live_lo_objects_;
 
   // Number of live bytes in this collection.
   static int live_bytes_;
-
-  static void VerifyPageHeaders(PagedSpace* space);
-
-  // Verification functions when relocating objects.
-  friend class VerifyCopyingVisitor;
-  static void VerifyCopyingObjects(Object** p);
 
   friend class MarkObjectVisitor;
   static void VisitObject(HeapObject* obj);

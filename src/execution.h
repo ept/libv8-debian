@@ -28,14 +28,17 @@
 #ifndef V8_EXECUTION_H_
 #define V8_EXECUTION_H_
 
-namespace v8 { namespace internal {
+namespace v8 {
+namespace internal {
 
 
 // Flag used to set the interrupt causes.
 enum InterruptFlag {
   INTERRUPT = 1 << 0,
   DEBUGBREAK = 1 << 1,
-  PREEMPT = 1 << 2
+  DEBUGCOMMAND = 1 << 2,
+  PREEMPT = 1 << 3,
+  TERMINATE = 1 << 4
 };
 
 class Execution : public AllStatic {
@@ -117,10 +120,21 @@ class Execution : public AllStatic {
                                           Handle<JSFunction> fun,
                                           Handle<Object> pos,
                                           Handle<Object> is_global);
+#ifdef ENABLE_DEBUGGER_SUPPORT
+  static Object* DebugBreakHelper();
+#endif
+
+  // If the stack guard is triggered, but it is not an actual
+  // stack overflow, then handle the interruption accordingly.
+  static Object* HandleStackGuardInterrupt();
 
   // Get a function delegate (or undefined) for the given non-function
   // object. Used for support calling objects as functions.
   static Handle<Object> GetFunctionDelegate(Handle<Object> object);
+
+  // Get a function delegate (or undefined) for the given non-function
+  // object. Used for support calling objects as constructors.
+  static Handle<Object> GetConstructorDelegate(Handle<Object> object);
 };
 
 
@@ -151,9 +165,19 @@ class StackGuard BASE_EMBEDDED {
   static void Preempt();
   static bool IsInterrupted();
   static void Interrupt();
+  static bool IsTerminateExecution();
+  static void TerminateExecution();
+#ifdef ENABLE_DEBUGGER_SUPPORT
   static bool IsDebugBreak();
   static void DebugBreak();
+  static bool IsDebugCommand();
+  static void DebugCommand();
+#endif
   static void Continue(InterruptFlag after_what);
+
+  static uintptr_t jslimit() {
+    return thread_local_.jslimit_;
+  }
 
  private:
   // You should hold the ExecutionAccess lock when calling this method.
@@ -168,6 +192,7 @@ class StackGuard BASE_EMBEDDED {
 
   // You should hold the ExecutionAccess lock when calling this method.
   static void set_limits(uintptr_t value, const ExecutionAccess& lock) {
+    Heap::SetStackLimit(value);
     thread_local_.jslimit_ = value;
     thread_local_.climit_ = value;
   }
@@ -180,6 +205,7 @@ class StackGuard BASE_EMBEDDED {
       set_limits(kIllegalLimit, lock);
     } else {
       thread_local_.jslimit_ = thread_local_.initial_jslimit_;
+      Heap::SetStackLimit(thread_local_.jslimit_);
       thread_local_.climit_ = thread_local_.initial_climit_;
     }
   }
@@ -188,20 +214,27 @@ class StackGuard BASE_EMBEDDED {
   static void EnableInterrupts();
   static void DisableInterrupts();
 
-  static const uintptr_t kLimitSize = 512 * KB;
+  static const uintptr_t kLimitSize = kPointerSize * 128 * KB;
+#ifdef V8_TARGET_ARCH_X64
+  static const uintptr_t kInterruptLimit = V8_UINT64_C(0xfffffffffffffffe);
+  static const uintptr_t kIllegalLimit = V8_UINT64_C(0xffffffffffffffff);
+#else
   static const uintptr_t kInterruptLimit = 0xfffffffe;
   static const uintptr_t kIllegalLimit = 0xffffffff;
+#endif
 
   class ThreadLocal {
    public:
     ThreadLocal()
-     : initial_jslimit_(kIllegalLimit),
-       jslimit_(kIllegalLimit),
-       initial_climit_(kIllegalLimit),
-       climit_(kIllegalLimit),
-       nesting_(0),
-       postpone_interrupts_nesting_(0),
-       interrupt_flags_(0) {}
+      : initial_jslimit_(kIllegalLimit),
+        jslimit_(kIllegalLimit),
+        initial_climit_(kIllegalLimit),
+        climit_(kIllegalLimit),
+        nesting_(0),
+        postpone_interrupts_nesting_(0),
+        interrupt_flags_(0) {
+      Heap::SetStackLimit(kIllegalLimit);
+    }
     uintptr_t initial_jslimit_;
     uintptr_t jslimit_;
     uintptr_t initial_climit_;
@@ -222,7 +255,12 @@ class StackGuard BASE_EMBEDDED {
 class StackLimitCheck BASE_EMBEDDED {
  public:
   bool HasOverflowed() const {
-    return reinterpret_cast<uintptr_t>(this) < StackGuard::climit();
+    // Stack has overflowed in C++ code only if stack pointer exceeds the C++
+    // stack guard and the limits are not set to interrupt values.
+    // TODO(214): Stack overflows are ignored if a interrupt is pending. This
+    // code should probably always use the initial C++ limit.
+    return (reinterpret_cast<uintptr_t>(this) < StackGuard::climit()) &&
+           StackGuard::IsStackOverflow();
   }
 };
 
