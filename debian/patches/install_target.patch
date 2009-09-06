@@ -2,16 +2,9 @@
  SConstruct |   22 ++++++++++++++++++++++
  1 file changed, 22 insertions(+)
 
-Index: chromium-v8-1.2.14~svn20090715r2463/SConstruct
-===================================================================
---- chromium-v8-1.2.14~svn20090715r2463.orig/SConstruct
-+++ chromium-v8-1.2.14~svn20090715r2463/SConstruct
-@@ -614,16 +614,17 @@
-   }
- }
- 
- 
- def GetOptions():
+--- a/SConstruct
++++ b/SConstruct
+@@ -630,6 +630,7 @@
    result = Options()
    result.Add('mode', 'compilation mode (debug, release)', 'release')
    result.Add('sample', 'build sample (shell, process)', '')
@@ -19,17 +12,7 @@ Index: chromium-v8-1.2.14~svn20090715r2463/SConstruct
    result.Add('env', 'override environment settings (NAME0:value0,NAME1:value1,...)', '')
    result.Add('importenv', 'import environment settings (NAME0,NAME1,...)', '')
    for (name, option) in SIMPLE_OPTIONS.iteritems():
-     help = '%s (%s)' % (name, ", ".join(option['values']))
-     result.Add(name, help, option.get('default'))
-   return result
- 
- 
-@@ -923,20 +924,41 @@
-     d8s += context.d8_targets
- 
-   env.Alias('library', libraries)
-   env.Alias('mksnapshot', mksnapshots)
-   env.Alias('cctests', cctests)
+@@ -951,12 +952,33 @@
    env.Alias('sample', samples)
    env.Alias('d8', d8s)
  
@@ -57,12 +40,9 @@ Index: chromium-v8-1.2.14~svn20090715r2463/SConstruct
 +    env.Default('install')
    else:
      env.Default('library')
-+  
  
  
++
  # We disable deprecation warnings because we need to be able to use
  # env.Copy without getting warnings for compatibility with older
  # version of scons.  Also, there's a bug in some revisions that
- # doesn't allow this flag to be set, so we swallow any exceptions.
- # Lovely.
- try:

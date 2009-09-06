@@ -1,8 +1,6 @@
-diff --git a/SConstruct b/SConstruct
-index 78b050d..200911c 100644
 --- a/SConstruct
 +++ b/SConstruct
-@@ -48,9 +48,11 @@ if ANDROID_TOP is None:
+@@ -48,9 +48,11 @@
  # and avoid dtoa.c strict aliasing issues
  if os.environ.get('GCC_VERSION') == '44':
      GCC_EXTRA_CCFLAGS = ['-fno-tree-vrp']
@@ -14,10 +12,10 @@ index 78b050d..200911c 100644
      GCC_DTOA_EXTRA_CCFLAGS = []
  
  ANDROID_FLAGS = ['-march=armv5te',
-@@ -100,12 +102,16 @@ LIBRARY_FLAGS = {
-       'arch:ia32' : {
-         'CPPDEFINES': ['V8_NATIVE_REGEXP']
-       }
+@@ -103,12 +105,16 @@
+     },
+     'mode:debug': {
+       'CPPDEFINES': ['V8_ENABLE_CHECKS']
 -    }
 +    },
 +    'LINKFLAGS': ['$LDFLAGS'],
@@ -27,29 +25,24 @@ index 78b050d..200911c 100644
        'CCFLAGS':      ['$DIALECTFLAGS', '$WARNINGFLAGS'],
 -      'CXXFLAGS':     ['$CCFLAGS', '-fno-rtti', '-fno-exceptions'],
 +      'CXXFLAGS':     ['$CCFLAGS', '-fno-rtti', '-fno-exceptions'] + GCC_EXTRA_CXXFLAGS,
-+    },
-+    'shlibtype:hidden': {
-+      'CPPFLAGS':     ['$CPPFLAGS', '-include' + join(root_dir, 'src/gcc-hidden.h'), '-isystem' + join(root_dir, 'obj/sysheaders/')],
++     },
++     'shlibtype:hidden': {
++       'CPPFLAGS':     ['$CPPFLAGS', '-include' + join(root_dir, 'src/gcc-hidden.h'), '-isystem' + join(root_dir, 'obj/sysheaders/')],
      },
      'mode:debug': {
        'CCFLAGS':      ['-g', '-O0'],
-@@ -611,7 +617,12 @@ SIMPLE_OPTIONS = {
-     'values': ['dumb', 'readline'],
+@@ -607,6 +613,11 @@
      'default': 'dumb',
      'help': 'the console to use for the d8 shell'
--  }
-+  },
+   },
 +  'shlibtype': {
 +    'values': ['default', 'hidden'],
 +    'default': 'default',
 +    'help': 'visibility type for gcc >= 4 shared library'
 +  },
- }
- 
- 
-diff --git a/create-sysheaders.sh b/create-sysheaders.sh
-new file mode 100644
-index 0000000..3bc4002
+   'verbose': {
+     'values': ['on', 'off'],
+     'default': 'off',
 --- /dev/null
 +++ b/create-sysheaders.sh
 @@ -0,0 +1,19 @@
@@ -72,12 +65,10 @@ index 0000000..3bc4002
 +	echo "#include_next <$h>" >> $SYS_HEADERS_DIR/$h
 +	echo "#pragma GCC visibility pop" >> $SYS_HEADERS_DIR/$h
 +done
-diff --git a/include/v8.h b/include/v8.h
-index 8f22c81..b1bf8d7 100644
 --- a/include/v8.h
 +++ b/include/v8.h
-@@ -92,9 +92,11 @@ typedef unsigned __int64 uint64_t;
- #if defined(__GNUC__) && (__GNUC__ >= 4)
+@@ -91,9 +91,11 @@
+ #if defined(__GNUC__) && (__GNUC__ >= 4) && defined(V8_SHARED)
  #define V8EXPORT __attribute__ ((visibility("default")))
  #define V8EXPORT_INLINE __attribute__ ((visibility("default")))
 +#define V8NOEXPORT __attribute__ ((visibility("hidden")))
@@ -88,20 +79,15 @@ index 8f22c81..b1bf8d7 100644
  #endif  // defined(__GNUC__) && (__GNUC__ >= 4)
  
  #endif  // _WIN32
-diff --git a/src/gcc-hidden.h b/src/gcc-hidden.h
-new file mode 100644
-index 0000000..6e6c5fb
 --- /dev/null
 +++ b/src/gcc-hidden.h
 @@ -0,0 +1,3 @@
 +#if defined(__GNUC__) && (__GNUC__ >= 4)
 +#pragma GCC visibility push(hidden)
 +#endif
-diff --git a/test/cctest/test-conversions.cc b/test/cctest/test-conversions.cc
-index 6c0b9a6..137f6dd 100644
 --- a/test/cctest/test-conversions.cc
 +++ b/test/cctest/test-conversions.cc
-@@ -96,8 +96,8 @@ TEST(BitField) {
+@@ -96,8 +96,8 @@
    uint32_t x;
  
    // One bit bit field can hold values 0 and 1.
@@ -112,7 +98,7 @@ index 6c0b9a6..137f6dd 100644
    CHECK(!OneBit1::is_valid(static_cast<uint32_t>(-1)));
    CHECK(!OneBit2::is_valid(static_cast<uint32_t>(-1)));
    for (int i = 0; i < 2; i++) {
-@@ -113,8 +113,8 @@ TEST(BitField) {
+@@ -113,8 +113,8 @@
    CHECK(!OneBit2::is_valid(2));
  
    // Eight bit bit field can hold values from 0 tp 255.
@@ -123,11 +109,9 @@ index 6c0b9a6..137f6dd 100644
    CHECK(!EightBit1::is_valid(static_cast<uint32_t>(-1)));
    CHECK(!EightBit2::is_valid(static_cast<uint32_t>(-1)));
    for (int i = 0; i < 256; i++) {
-diff --git a/test/cctest/test-strings.cc b/test/cctest/test-strings.cc
-index 3065ba1..e1988f8 100644
 --- a/test/cctest/test-strings.cc
 +++ b/test/cctest/test-strings.cc
-@@ -83,8 +83,8 @@ static void InitializeBuildingBlocks(
+@@ -83,8 +83,8 @@
          break;
        }
        case 2: {
