@@ -2,7 +2,7 @@ Source: libv8
 Priority: extra
 Maintainer: Antonio Radici <antonio@dyne.org>
 Build-Depends: debhelper (>= 7), g++-multilib [amd64], pkg-config, scons, quilt,
- patchutils (>= 0.2.25), python
+ patchutils (>= 0.2.25), python, cdbs
 Standards-Version: 3.8.3
 Section: libs
 Homepage: http://code.google.com/p/v8/
@@ -13,7 +13,7 @@ DM-Upload-Allowed: yes
 Package: libv8-dev
 Section: libdevel
 Architecture: any
-Depends: libv8-0 (= ${binary:Version})
+Depends: libv8-0 (= ${binary:Version}), ${misc:Depends}
 Description: Development files for the V8 JavaScript Engine
  V8 is Google's open source, high performance JavaScript engine. It is written
  in C++ and is used in Google Chrome, Google's open source browser.
@@ -22,19 +22,20 @@ Description: Development files for the V8 JavaScript Engine
  V8 JavaScript Engine
 
 Package: libv8-0
-Section: libs
 Architecture: any
 Depends: ${shlibs:Depends}, ${misc:Depends}
 Description: V8 JavaScript Engine
  V8 is Google's open source, high performance JavaScript engine. It is written
  in C++ and is used in Google Chrome, Google's open source browser.
+ .
+ This package includes the dynamic library against which you can link your
+ program.
 
 Package: libv8-dbg
-Section: libdevel
-Priority: extra
+Section: debug
 Architecture: any
-Depends: libv8-0 (= ${binary:Version})
-Description: Development files for the V8 JavaScript Engine
+Depends: libv8-0 (= ${binary:Version}), ${misc:Depends}
+Description: Development symbols for the V8 JavaScript Engine
  V8 is Google's open source, high performance JavaScript engine. It is written
  in C++ and is used in Google Chrome, Google's open source browser.
  .

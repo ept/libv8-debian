@@ -1,6 +1,4 @@
----
- SConstruct |   22 ++++++++++++++++++++++
- 1 file changed, 22 insertions(+)
+add the install target, it is missing from the shipped source
 
 --- a/SConstruct
 +++ b/SConstruct

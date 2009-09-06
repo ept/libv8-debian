@@ -1,6 +1,4 @@
----
- SConstruct |    4 +++-
- 1 file changed, 3 insertions(+), 1 deletion(-)
+patch to enable the soname that is not automatically shipped with SConstruct
 
 --- a/SConstruct
 +++ b/SConstruct
