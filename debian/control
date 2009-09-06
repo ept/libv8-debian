@@ -1,21 +1,41 @@
 Source: libv8
 Priority: extra
 Maintainer: Antonio Radici <antonio@dyne.org>
-Build-Depends: debhelper (>= 7)
-Standards-Version: 3.8.0
+Build-Depends: debhelper (>= 7), g++-multilib [amd64], pkg-config, scons, quilt,
+ patchutils (>= 0.2.25), python
+Standards-Version: 3.8.3
 Section: libs
-Homepage: <insert the upstream URL, if relevant>
+Homepage: http://code.google.com/p/v8/
+Vcs-Browser: http://git.debian.org/?p=collab-maint/libv8.git
+Vcs-Git: git://git.debian.org/git/collab-maint/libv8.git
+DM-Upload-Allowed: yes
 
 Package: libv8-dev
 Section: libdevel
 Architecture: any
-Depends: libv8BROKEN (= ${binary:Version})
-Description: <insert up to 60 chars description>
- <insert long description, indented with spaces>
+Depends: libv8-0 (= ${binary:Version})
+Description: Development files for the V8 JavaScript Engine
+ V8 is Google's open source, high performance JavaScript engine. It is written
+ in C++ and is used in Google Chrome, Google's open source browser.
+ .
+ Install this package if you wish to develop your own programs using the
+ V8 JavaScript Engine
 
-Package: libv8BROKEN
+Package: libv8-0
 Section: libs
 Architecture: any
 Depends: ${shlibs:Depends}, ${misc:Depends}
-Description: <insert up to 60 chars description>
- <insert long description, indented with spaces>
+Description: V8 JavaScript Engine
+ V8 is Google's open source, high performance JavaScript engine. It is written
+ in C++ and is used in Google Chrome, Google's open source browser.
+
+Package: libv8-dbg
+Section: libdevel
+Priority: extra
+Architecture: any
+Depends: libv8-0 (= ${binary:Version})
+Description: Development files for the V8 JavaScript Engine
+ V8 is Google's open source, high performance JavaScript engine. It is written
+ in C++ and is used in Google Chrome, Google's open source browser.
+ .
+ This package provides the debugging symbols for the library.

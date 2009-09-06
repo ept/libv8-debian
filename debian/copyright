@@ -1,24 +1,37 @@
-This package was debianized by Antonio Radici <antonio@dyne.org> on
-Sat, 07 Feb 2009 01:38:09 +0100.
+This package was debianized by Fabien Tassin <fta@sofaraway.org> on
+Fri, 07 Nov 2008 13:10:21 +0100; the package was debianized for Ubuntu and later
+adapted to Debian by Antonio Radici <antonio@dyne.org>
 
-It was downloaded from <url://example.com>
+Copyright :
 
-Upstream Author(s):
+(taken from http://code.google.com/apis/v8/terms.html)
 
-    <put author's name and email here>
-    <likewise for another author>
+V8 is copyright © 2008, The Chromium Authors
+All rights reserved.
 
-Copyright:
+V8 is licensed under the BSD license. Source code for software included in this
+distribution is available from the V8 project page [1]. Other software included in
+this distribution is provided under other licenses, as listed in the Included
+Software and Licenses section at the bottom of this page.
 
-    <Copyright (C) YYYY Name OfAuthor>
-    <likewise for another author>
+For third party implementations, we have provided guidelines on the proper
+usage of Google branding and attribution.
 
-License:
+[1] http://code.google.com/p/v8/
 
-    <Put the license of the package here indented by 4 spaces>
+=====
 
-The Debian packaging is copyright 2009, Antonio Radici <antonio@dyne.org> and
-is licensed under the GPL, see `/usr/share/common-licenses/GPL'.
+On Debian systems, the complete text of the BSD License can be found in the
+file `/usr/share/common-licenses/BSD' ;
 
-# Please also look if there are files or directories which have a
-# different copyright/license attached and list them here.
+=====
+
+Included Software and Licenses
+
+The following third party software is distributed with V8.
+
+Package Name 	License
+------------	-----------
+dtoa 		BSD license
+JSCRE 		BSD license
+V8 assembler 	BSD license

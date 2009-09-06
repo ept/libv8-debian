@@ -1,0 +1,29 @@
+---
+ SConstruct |    4 +++-
+ 1 file changed, 3 insertions(+), 1 deletion(-)
+
+Index: chromium-v8-1.2.14~svn20090728r2558/SConstruct
+===================================================================
+--- chromium-v8-1.2.14~svn20090728r2558.orig/SConstruct
++++ chromium-v8-1.2.14~svn20090728r2558/SConstruct
+@@ -842,17 +842,19 @@
+ 
+   # Generate library base name.
+   target_id = mode
+   suffix = SUFFIXES[target_id]
+   library_name = 'v8' + suffix
+   version = GetVersion()
+   if context.options['soname'] == 'on':
+     # When building shared object with SONAME version the library name.
+-    library_name += '-' + version
++    soname = GetSpecificSONAME()
++    if soname == '':
++      library_name += '-' + version
+   env['LIBRARY'] = library_name
+ 
+   # Generate library SONAME if required by the build.
+   if context.options['soname'] == 'on':
+     soname = GetSpecificSONAME()
+     if soname == '':
+       soname = 'lib' + library_name + '.so'
+     env['SONAME'] = soname
