@@ -48,7 +48,7 @@ Patch to hide symbols that are make public by default otherwise
 --- /dev/null
 +++ b/create-sysheaders.sh
 @@ -0,0 +1,19 @@
-+#°/bin/sh
++#!/bin/sh
 +
 +SYS_HEADERS_DIR=obj/sysheaders
 +basen=`basename $0`
