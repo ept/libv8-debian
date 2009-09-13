@@ -1,8 +1,7 @@
 Source: libv8
 Priority: extra
 Maintainer: Antonio Radici <antonio@dyne.org>
-Build-Depends: debhelper (>= 7), pkg-config, scons, quilt, 
- patchutils (>= 0.2.25), python, cdbs
+Build-Depends: debhelper (>= 7), pkg-config, scons, quilt, cdbs
 Standards-Version: 3.8.3
 Section: libs
 Homepage: http://code.google.com/p/v8/
@@ -11,7 +10,7 @@ Vcs-Git: git://git.debian.org/git/collab-maint/libv8.git
 
 Package: libv8-dev
 Section: libdevel
-Architecture: i386 amd64 armel
+Architecture: i386 amd64 ia64 armel
 Depends: libv8-0 (= ${binary:Version}), ${misc:Depends}
 Description: Development files for the V8 JavaScript Engine
  V8 is Google's open source, high performance JavaScript engine. It is written
@@ -21,7 +20,7 @@ Description: Development files for the V8 JavaScript Engine
  V8 JavaScript Engine
 
 Package: libv8-0
-Architecture: i386 amd64 armel
+Architecture: i386 amd64 ia64 armel
 Depends: ${shlibs:Depends}, ${misc:Depends}
 Description: V8 JavaScript Engine
  V8 is Google's open source, high performance JavaScript engine. It is written
@@ -32,7 +31,7 @@ Description: V8 JavaScript Engine
 
 Package: libv8-dbg
 Section: debug
-Architecture: i386 amd64 armel
+Architecture: i386 amd64 ia64 armel
 Depends: libv8-0 (= ${binary:Version}), ${misc:Depends}
 Description: Development symbols for the V8 JavaScript Engine
  V8 is Google's open source, high performance JavaScript engine. It is written
