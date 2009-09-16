@@ -1,0 +1,13 @@
+Patch from Jérémy Lal to export some symbols which are used by the public API
+
+--- a/include/v8.h
++++ b/include/v8.h
+@@ -2708,7 +2708,7 @@
+  * is necessary to implement inline functions in the v8 api.  Don't
+  * depend on functions and constants defined here.
+  */
+-class Internals {
++class V8EXPORT Internals {
+  public:
+ 
+   // These values match non-compiler-dependent values defined within
