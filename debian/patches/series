@@ -1,4 +1,2 @@
-hidden.patch
 install_target.patch
 enable_soname.patch
-export_internals.patch

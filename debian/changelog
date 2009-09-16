@@ -1,5 +1,5 @@
-libv8 (1.3.9-1) unstable; urgency=low
+libv8 (1.3.11-1) unstable; urgency=low
 
   * Initial release (Closes: #497701)
 
- -- Antonio Radici <antonio@dyne.org>  Sun, 06 Sep 2009 14:24:09 +0100
+ -- Antonio Radici <antonio@dyne.org>  Wed, 16 Sep 2009 23:01:31 +0100
