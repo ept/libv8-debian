@@ -979,8 +979,9 @@ class V8EXPORT String : public Primitive {
    public:
     explicit Utf8Value(Handle<v8::Value> obj);
     ~Utf8Value();
-    char* operator*() const { return str_; }
-    int length() { return length_; }
+    char* operator*() { return str_; }
+    const char* operator*() const { return str_; }
+    int length() const { return length_; }
    private:
     char* str_;
     int length_;
@@ -1001,8 +1002,9 @@ class V8EXPORT String : public Primitive {
    public:
     explicit AsciiValue(Handle<v8::Value> obj);
     ~AsciiValue();
-    char* operator*() const { return str_; }
-    int length() { return length_; }
+    char* operator*() { return str_; }
+    const char* operator*() const { return str_; }
+    int length() const { return length_; }
    private:
     char* str_;
     int length_;
@@ -1022,8 +1024,9 @@ class V8EXPORT String : public Primitive {
    public:
     explicit Value(Handle<v8::Value> obj);
     ~Value();
-    uint16_t* operator*() const { return str_; }
-    int length() { return length_; }
+    uint16_t* operator*() { return str_; }
+    const uint16_t* operator*() const { return str_; }
+    int length() const { return length_; }
    private:
     uint16_t* str_;
     int length_;
@@ -2722,9 +2725,9 @@ class Internals {
 
   // These constants are compiler dependent so their values must be
   // defined within the implementation.
-  static int kJSObjectType;
-  static int kFirstNonstringType;
-  static int kProxyType;
+  V8EXPORT static int kJSObjectType;
+  V8EXPORT static int kFirstNonstringType;
+  V8EXPORT static int kProxyType;
 
   static inline bool HasHeapObjectTag(internal::Object* value) {
     return ((reinterpret_cast<intptr_t>(value) & kHeapObjectTagMask) ==

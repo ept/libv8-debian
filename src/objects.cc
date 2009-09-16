@@ -1186,10 +1186,26 @@ void HeapNumber::HeapNumberPrint(StringStream* accumulator) {
 
 
 String* JSObject::class_name() {
-  if (IsJSFunction()) return Heap::function_class_symbol();
+  if (IsJSFunction()) {
+    return Heap::function_class_symbol();
+  }
   if (map()->constructor()->IsJSFunction()) {
     JSFunction* constructor = JSFunction::cast(map()->constructor());
     return String::cast(constructor->shared()->instance_class_name());
+  }
+  // If the constructor is not present, return "Object".
+  return Heap::Object_symbol();
+}
+
+
+String* JSObject::constructor_name() {
+  if (IsJSFunction()) {
+    return Heap::function_class_symbol();
+  }
+  if (map()->constructor()->IsJSFunction()) {
+    JSFunction* constructor = JSFunction::cast(map()->constructor());
+    String* name = String::cast(constructor->shared()->name());
+    return name->length() > 0 ? name : constructor->shared()->inferred_name();
   }
   // If the constructor is not present, return "Object".
   return Heap::Object_symbol();
@@ -4951,7 +4967,7 @@ void Code::ConvertICTargetsFromAddressToObject() {
        !it.done(); it.next()) {
     Address ic_addr = it.rinfo()->target_address();
     ASSERT(ic_addr != NULL);
-    HeapObject* code = HeapObject::FromAddress(ic_addr - Code::kHeaderSize);
+    HeapObject* code = Code::GetCodeFromTargetAddress(ic_addr);
     ASSERT(code->IsHeapObject());
     it.rinfo()->set_target_object(code);
   }
@@ -4964,7 +4980,7 @@ void Code::ConvertICTargetsFromAddressToObject() {
       if (it.rinfo()->IsCallInstruction()) {
         Address addr = it.rinfo()->call_address();
         ASSERT(addr != NULL);
-        HeapObject* code = HeapObject::FromAddress(addr - Code::kHeaderSize);
+        HeapObject* code = Code::GetCodeFromTargetAddress(addr);
         ASSERT(code->IsHeapObject());
         it.rinfo()->set_call_object(code);
       }

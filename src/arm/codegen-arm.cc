@@ -299,7 +299,10 @@ void CodeGenerator::GenCode(FunctionLiteral* fun) {
   }
 
   // Generate the return sequence if necessary.
-  if (frame_ != NULL || function_return_.is_linked()) {
+  if (has_valid_frame() || function_return_.is_linked()) {
+    if (!function_return_.is_linked()) {
+      CodeForReturnPosition(fun);
+    }
     // exit
     // r0: result
     // sp: stack pointer
@@ -315,12 +318,23 @@ void CodeGenerator::GenCode(FunctionLiteral* fun) {
       frame_->CallRuntime(Runtime::kTraceExit, 1);
     }
 
+    // Add a label for checking the size of the code used for returning.
+    Label check_exit_codesize;
+    masm_->bind(&check_exit_codesize);
+
     // Tear down the frame which will restore the caller's frame pointer and
     // the link register.
     frame_->Exit();
 
-    __ add(sp, sp, Operand((scope_->num_parameters() + 1) * kPointerSize));
-    __ Jump(lr);
+    // Here we use masm_-> instead of the __ macro to avoid the code coverage
+    // tool from instrumenting as we rely on the code size here.
+    masm_->add(sp, sp, Operand((scope_->num_parameters() + 1) * kPointerSize));
+    masm_->Jump(lr);
+
+    // Check that the size of the code used for returning matches what is
+    // expected by the debugger.
+    ASSERT_EQ(kJSReturnSequenceLength,
+              masm_->InstructionsGeneratedSince(&check_exit_codesize));
   }
 
   // Code generation state must be reset.
@@ -1111,10 +1125,10 @@ void CodeGenerator::CheckStack() {
   if (FLAG_check_stack) {
     Comment cmnt(masm_, "[ check stack");
     __ LoadRoot(ip, Heap::kStackLimitRootIndex);
-    // Put the lr setup instruction in the delay slot.  The 'sizeof(Instr)' is
-    // added to the implicit 8 byte offset that always applies to operations
-    // with pc and gives a return address 12 bytes down.
-    masm_->add(lr, pc, Operand(sizeof(Instr)));
+    // Put the lr setup instruction in the delay slot.  kInstrSize is added to
+    // the implicit 8 byte offset that always applies to operations with pc and
+    // gives a return address 12 bytes down.
+    masm_->add(lr, pc, Operand(Assembler::kInstrSize));
     masm_->cmp(sp, Operand(ip));
     StackCheckStub stub;
     // Call the stub if lower.
@@ -1380,16 +1394,12 @@ void CodeGenerator::VisitReturnStatement(ReturnStatement* node) {
   VirtualFrame::SpilledScope spilled_scope;
   Comment cmnt(masm_, "[ ReturnStatement");
 
+  CodeForStatementPosition(node);
+  LoadAndSpill(node->expression());
   if (function_return_is_shadowed_) {
-    CodeForStatementPosition(node);
-    LoadAndSpill(node->expression());
     frame_->EmitPop(r0);
     function_return_.Jump();
   } else {
-    // Load the returned value.
-    CodeForStatementPosition(node);
-    LoadAndSpill(node->expression());
-
     // Pop the result from the frame and prepare the frame for
     // returning thus making it easier to merge.
     frame_->EmitPop(r0);
@@ -4950,12 +4960,12 @@ static void AllocateHeapNumber(
     Register scratch2) {  // Another scratch register.
   // Allocate an object in the heap for the heap number and tag it as a heap
   // object.
-  __ AllocateObjectInNewSpace(HeapNumber::kSize,
+  __ AllocateObjectInNewSpace(HeapNumber::kSize / kPointerSize,
                               result,
                               scratch1,
                               scratch2,
                               need_gc,
-                              true);
+                              TAG_OBJECT);
 
   // Get heap number map and store it in the allocated object.
   __ LoadRoot(scratch1, Heap::kHeapNumberMapRootIndex);
@@ -5623,7 +5633,7 @@ void StackCheckStub::Generate(MacroAssembler* masm) {
   // argument, so give it a Smi.
   __ mov(r0, Operand(Smi::FromInt(0)));
   __ push(r0);
-  __ TailCallRuntime(ExternalReference(Runtime::kStackGuard), 1);
+  __ TailCallRuntime(ExternalReference(Runtime::kStackGuard), 1, 1);
 
   __ StubReturn(1);
 }
@@ -5675,6 +5685,13 @@ void UnarySubStub::Generate(MacroAssembler* masm) {
     __ mov(r0, Operand(r1));
   }
   __ StubReturn(1);
+}
+
+
+int CEntryStub::MinorKey() {
+  ASSERT(result_size_ <= 2);
+  // Result returned in r0 or r0+r1 by default.
+  return 0;
 }
 
 
@@ -6195,7 +6212,7 @@ void ArgumentsAccessStub::GenerateReadElement(MacroAssembler* masm) {
   // by calling the runtime system.
   __ bind(&slow);
   __ push(r1);
-  __ TailCallRuntime(ExternalReference(Runtime::kGetArgumentsProperty), 1);
+  __ TailCallRuntime(ExternalReference(Runtime::kGetArgumentsProperty), 1, 1);
 }
 
 
@@ -6216,7 +6233,7 @@ void ArgumentsAccessStub::GenerateNewObject(MacroAssembler* masm) {
 
   // Do the runtime call to allocate the arguments object.
   __ bind(&runtime);
-  __ TailCallRuntime(ExternalReference(Runtime::kNewArgumentsFast), 3);
+  __ TailCallRuntime(ExternalReference(Runtime::kNewArgumentsFast), 3, 1);
 }
 
 

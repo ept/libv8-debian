@@ -36,8 +36,6 @@ test-api/ApplyInterruption: PASS || TIMEOUT
 
 [ $arch == arm ]
 
-test-debug: SKIP
-
 # BUG(113): Test seems flaky on ARM.
 test-spaces/LargeObjectSpace: PASS || FAIL
 
@@ -49,10 +47,6 @@ test-api/RegExpInterruption: SKIP
 # a long time.
 test-api/OutOfMemory: SKIP
 test-api/OutOfMemoryNested: SKIP
-
-# BUG(432): Fail on ARM hardware.
-test-regexp/MacroAssemblerNativeSimple: PASS || FAIL
-test-regexp/MacroAssemblerNativeSimpleUC16: PASS || FAIL
 
 # BUG(355): Test crashes on ARM.
 test-log/ProfLazyMode: SKIP
