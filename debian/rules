@@ -31,12 +31,6 @@ include /usr/share/cdbs/1/rules/patchsys-quilt.mk
 include /usr/share/cdbs/1/rules/debhelper.mk
 include $(CURDIR)/debian/cdbs/scons.mk
 
-post-patches::
-	sh create-sysheaders.sh
-	# Add soname, now done by enable_soname.patch
-	#sed -i~ 's/^\(#define SONAME            \)"[^"]*"/\1"libv8.so.$(SONAME)"/' src/version.cc
-	#diff -u src/version.cc~ src/version.cc || true
-
 clean::
 	#if [ -f src/version.cc~ ] ; then mv src/version.cc~ src/version.cc ; fi
 	rm -f tools/*.pyc libv8.so
