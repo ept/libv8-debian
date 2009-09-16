@@ -889,11 +889,11 @@ class Object BASE_EMBEDDED {
 
 
 // Smi represents integer Numbers that can be stored in 31 bits.
-// TODO(X64) Increase to 53 bits?
 // Smis are immediate which means they are NOT allocated in the heap.
-// The this pointer has the following format: [31 bit signed int] 0
-// TODO(X64): 31 bits signed int sign-extended to 63 bits.
 // Smi stands for small integer.
+// The this pointer has the following format: [31 bit signed int] 0
+// On 64-bit, the top 32 bits of the pointer is allowed to have any
+// value.
 class Smi: public Object {
  public:
   // Returns the integer value.
@@ -1391,6 +1391,10 @@ class JSObject: public HeapObject {
 
   // Returns the class name ([[Class]] property in the specification).
   String* class_name();
+
+  // Returns the constructor name (the name (possibly, inferred name) of the
+  // function that was used to instantiate the object).
+  String* constructor_name();
 
   // Retrieve interceptors.
   InterceptorInfo* GetNamedInterceptor();
@@ -2634,8 +2638,8 @@ class Code: public HeapObject {
   // the layout of the code object into account.
   int ExecutableSize() {
     // Check that the assumptions about the layout of the code object holds.
-    ASSERT_EQ(instruction_start() - address(),
-              static_cast<intptr_t>(Code::kHeaderSize));
+    ASSERT_EQ(static_cast<int>(instruction_start() - address()),
+              Code::kHeaderSize);
     return instruction_size() + Code::kHeaderSize;
   }
 
@@ -2891,8 +2895,12 @@ class Map: public HeapObject {
 
   // Byte offsets within kInstanceSizesOffset.
   static const int kInstanceSizeOffset = kInstanceSizesOffset + 0;
-  static const int kInObjectPropertiesOffset = kInstanceSizesOffset + 1;
-  static const int kPreAllocatedPropertyFieldsOffset = kInstanceSizesOffset + 2;
+  static const int kInObjectPropertiesByte = 1;
+  static const int kInObjectPropertiesOffset =
+      kInstanceSizesOffset + kInObjectPropertiesByte;
+  static const int kPreAllocatedPropertyFieldsByte = 2;
+  static const int kPreAllocatedPropertyFieldsOffset =
+      kInstanceSizesOffset + kPreAllocatedPropertyFieldsByte;
   // The byte at position 3 is not in use at the moment.
 
   // Byte offsets within kInstanceAttributesOffset attributes.
@@ -3097,9 +3105,7 @@ class SharedFunctionInfo: public HeapObject {
   inline bool is_expression();
   inline void set_is_expression(bool value);
 
-  // Is this function a top-level function. Used for accessing the
-  // caller of functions. Top-level functions (scripts, evals) are
-  // returned as null; see JSFunction::GetCallerAccessor(...).
+  // Is this function a top-level function (scripts, evals).
   inline bool is_toplevel();
   inline void set_is_toplevel(bool value);
 
@@ -3528,9 +3534,13 @@ class JSRegExp: public JSObject {
 
   static const int kAtomDataSize = kAtomPatternIndex + 1;
 
-  // Irregexp compiled code or bytecode for ASCII.
+  // Irregexp compiled code or bytecode for ASCII. If compilation
+  // fails, this fields hold an exception object that should be
+  // thrown if the regexp is used again.
   static const int kIrregexpASCIICodeIndex = kDataIndex;
-  // Irregexp compiled code or bytecode for UC16.
+  // Irregexp compiled code or bytecode for UC16.  If compilation
+  // fails, this fields hold an exception object that should be
+  // thrown if the regexp is used again.
   static const int kIrregexpUC16CodeIndex = kDataIndex + 1;
   // Maximal number of registers used by either ASCII or UC16.
   // Only used to check that there is enough stack space

@@ -2301,13 +2301,8 @@ TEST(DebugStepLinearMixedICs) {
   break_point_hit_count = 0;
   foo->Call(env->Global(), 0, NULL);
 
-  // With stepping all break locations are hit. For ARM the keyed load/store
-  // is not hit as they are not implemented as ICs.
-#if defined (__arm__) || defined(__thumb__)
-  CHECK_EQ(6, break_point_hit_count);
-#else
+  // With stepping all break locations are hit.
   CHECK_EQ(8, break_point_hit_count);
-#endif
 
   v8::Debug::SetDebugEventListener(NULL);
   CheckDebuggerUnloaded();
@@ -4503,14 +4498,16 @@ TEST(DebuggerHostDispatch) {
 
 
 TEST(DebuggerAgent) {
-  // Make sure this port is not used by other tests to allow tests to run in
+  // Make sure these ports is not used by other tests to allow tests to run in
   // parallel.
-  const int kPort = 5858;
+  const int kPort1 = 5858;
+  const int kPort2 = 5857;
+  const int kPort3 = 5856;
 
-  // Make a string with the port number.
+  // Make a string with the port2 number.
   const int kPortBufferLen = 6;
-  char port_str[kPortBufferLen];
-  OS::SNPrintF(i::Vector<char>(port_str, kPortBufferLen), "%d", kPort);
+  char port2_str[kPortBufferLen];
+  OS::SNPrintF(i::Vector<char>(port2_str, kPortBufferLen), "%d", kPort2);
 
   bool ok;
 
@@ -4518,15 +4515,15 @@ TEST(DebuggerAgent) {
   i::Socket::Setup();
 
   // Test starting and stopping the agent without any client connection.
-  i::Debugger::StartAgent("test", kPort);
+  i::Debugger::StartAgent("test", kPort1);
   i::Debugger::StopAgent();
 
   // Test starting the agent, connecting a client and shutting down the agent
   // with the client connected.
-  ok = i::Debugger::StartAgent("test", kPort);
+  ok = i::Debugger::StartAgent("test", kPort2);
   CHECK(ok);
   i::Socket* client = i::OS::CreateSocket();
-  ok = client->Connect("localhost", port_str);
+  ok = client->Connect("localhost", port2_str);
   CHECK(ok);
   i::Debugger::StopAgent();
   delete client;
@@ -4534,9 +4531,9 @@ TEST(DebuggerAgent) {
   // Test starting and stopping the agent with the required port already
   // occoupied.
   i::Socket* server = i::OS::CreateSocket();
-  server->Bind(kPort);
+  server->Bind(kPort3);
 
-  i::Debugger::StartAgent("test", kPort);
+  i::Debugger::StartAgent("test", kPort3);
   i::Debugger::StopAgent();
 
   delete server;

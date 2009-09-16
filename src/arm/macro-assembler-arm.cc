@@ -56,6 +56,7 @@ MacroAssembler::MacroAssembler(void* buffer, int size)
 #if defined(USE_THUMB_INTERWORK)
 #if !defined(__ARM_ARCH_5T__) && \
   !defined(__ARM_ARCH_5TE__) &&  \
+  !defined(__ARM_ARCH_6__) &&  \
   !defined(__ARM_ARCH_7A__) &&   \
   !defined(__ARM_ARCH_7__)
 // add tests for other versions above v5t as required
@@ -132,7 +133,7 @@ void MacroAssembler::Call(intptr_t target, RelocInfo::Mode rmode,
   // and the target address of the call would be referenced by the first
   // instruction rather than the second one, which would make it harder to patch
   // (two instructions before the return address, instead of one).
-  ASSERT(kPatchReturnSequenceLength == sizeof(Instr));
+  ASSERT(kCallTargetAddressOffset == kInstrSize);
 }
 
 
@@ -166,7 +167,7 @@ void MacroAssembler::SmiJumpTable(Register index, Vector<Label*> targets) {
   add(pc, pc, Operand(index,
                       LSL,
                       assembler::arm::Instr::kInstrSizeLog2 - kSmiTagSize));
-  BlockConstPoolBefore(pc_offset() + (targets.length() + 1) * sizeof(Instr));
+  BlockConstPoolBefore(pc_offset() + (targets.length() + 1) * kInstrSize);
   nop();  // Jump table alignment.
   for (int i = 0; i < targets.length(); i++) {
     b(targets[i]);
@@ -773,7 +774,7 @@ void MacroAssembler::AllocateObjectInNewSpace(int object_size,
                                               Register scratch1,
                                               Register scratch2,
                                               Label* gc_required,
-                                              bool tag_allocated_object) {
+                                              AllocationFlags flags) {
   ASSERT(!result.is(scratch1));
   ASSERT(!scratch1.is(scratch2));
 
@@ -782,7 +783,18 @@ void MacroAssembler::AllocateObjectInNewSpace(int object_size,
   ExternalReference new_space_allocation_top =
       ExternalReference::new_space_allocation_top_address();
   mov(scratch1, Operand(new_space_allocation_top));
-  ldr(result, MemOperand(scratch1));
+  if ((flags & RESULT_CONTAINS_TOP) == 0) {
+    ldr(result, MemOperand(scratch1));
+  } else {
+#ifdef DEBUG
+    // Assert that result actually contains top on entry. scratch2 is used
+    // immediately below so this use of scratch2 does not cause difference with
+    // respect to register content between debug and release mode.
+    ldr(scratch2, MemOperand(scratch1));
+    cmp(result, scratch2);
+    Check(eq, "Unexpected allocation top");
+#endif
+  }
 
   // Calculate new top and bail out if new space is exhausted. Use result
   // to calculate the new top.
@@ -790,7 +802,7 @@ void MacroAssembler::AllocateObjectInNewSpace(int object_size,
       ExternalReference::new_space_allocation_limit_address();
   mov(scratch2, Operand(new_space_allocation_limit));
   ldr(scratch2, MemOperand(scratch2));
-  add(result, result, Operand(object_size));
+  add(result, result, Operand(object_size * kPointerSize));
   cmp(result, Operand(scratch2));
   b(hi, gc_required);
 
@@ -798,11 +810,83 @@ void MacroAssembler::AllocateObjectInNewSpace(int object_size,
   str(result, MemOperand(scratch1));
 
   // Tag and adjust back to start of new object.
-  if (tag_allocated_object) {
-    sub(result, result, Operand(object_size - kHeapObjectTag));
+  if ((flags & TAG_OBJECT) != 0) {
+    sub(result, result, Operand((object_size * kPointerSize) -
+                                kHeapObjectTag));
   } else {
-    sub(result, result, Operand(object_size));
+    sub(result, result, Operand(object_size * kPointerSize));
   }
+}
+
+
+void MacroAssembler::AllocateObjectInNewSpace(Register object_size,
+                                              Register result,
+                                              Register scratch1,
+                                              Register scratch2,
+                                              Label* gc_required,
+                                              AllocationFlags flags) {
+  ASSERT(!result.is(scratch1));
+  ASSERT(!scratch1.is(scratch2));
+
+  // Load address of new object into result and allocation top address into
+  // scratch1.
+  ExternalReference new_space_allocation_top =
+      ExternalReference::new_space_allocation_top_address();
+  mov(scratch1, Operand(new_space_allocation_top));
+  if ((flags & RESULT_CONTAINS_TOP) == 0) {
+    ldr(result, MemOperand(scratch1));
+  } else {
+#ifdef DEBUG
+    // Assert that result actually contains top on entry. scratch2 is used
+    // immediately below so this use of scratch2 does not cause difference with
+    // respect to register content between debug and release mode.
+    ldr(scratch2, MemOperand(scratch1));
+    cmp(result, scratch2);
+    Check(eq, "Unexpected allocation top");
+#endif
+  }
+
+  // Calculate new top and bail out if new space is exhausted. Use result
+  // to calculate the new top. Object size is in words so a shift is required to
+  // get the number of bytes
+  ExternalReference new_space_allocation_limit =
+      ExternalReference::new_space_allocation_limit_address();
+  mov(scratch2, Operand(new_space_allocation_limit));
+  ldr(scratch2, MemOperand(scratch2));
+  add(result, result, Operand(object_size, LSL, kPointerSizeLog2));
+  cmp(result, Operand(scratch2));
+  b(hi, gc_required);
+
+  // Update allocation top. result temporarily holds the new top,
+  str(result, MemOperand(scratch1));
+
+  // Adjust back to start of new object.
+  sub(result, result, Operand(object_size, LSL, kPointerSizeLog2));
+
+  // Tag object if requested.
+  if ((flags & TAG_OBJECT) != 0) {
+    add(result, result, Operand(kHeapObjectTag));
+  }
+}
+
+
+void MacroAssembler::UndoAllocationInNewSpace(Register object,
+                                              Register scratch) {
+  ExternalReference new_space_allocation_top =
+      ExternalReference::new_space_allocation_top_address();
+
+  // Make sure the object has no tag before resetting top.
+  and_(object, object, Operand(~kHeapObjectTagMask));
+#ifdef DEBUG
+  // Check that the object un-allocated is below the current top.
+  mov(scratch, Operand(new_space_allocation_top));
+  ldr(scratch, MemOperand(scratch));
+  cmp(object, scratch);
+  Check(lt, "Undo allocation of non allocated memory");
+#endif
+  // Write the address of the object to un-allocate as the current top.
+  mov(scratch, Operand(new_space_allocation_top));
+  str(object, MemOperand(scratch));
 }
 
 
@@ -811,6 +895,13 @@ void MacroAssembler::CompareObjectType(Register function,
                                        Register type_reg,
                                        InstanceType type) {
   ldr(map, FieldMemOperand(function, HeapObject::kMapOffset));
+  CompareInstanceType(map, type_reg, type);
+}
+
+
+void MacroAssembler::CompareInstanceType(Register map,
+                                         Register type_reg,
+                                         InstanceType type) {
   ldrb(type_reg, FieldMemOperand(map, Map::kInstanceTypeOffset));
   cmp(type_reg, Operand(type));
 }
@@ -909,7 +1000,8 @@ void MacroAssembler::CallRuntime(Runtime::FunctionId fid, int num_arguments) {
 
 
 void MacroAssembler::TailCallRuntime(const ExternalReference& ext,
-                                     int num_arguments) {
+                                     int num_arguments,
+                                     int result_size) {
   // TODO(1236192): Most runtime routines don't need the number of
   // arguments passed in because it is constant. At some point we
   // should remove this need and make the runtime routine entry code
@@ -925,7 +1017,7 @@ void MacroAssembler::JumpToBuiltin(const ExternalReference& builtin) {
   ASSERT((reinterpret_cast<intptr_t>(builtin.address()) & 1) == 1);
 #endif
   mov(r1, Operand(builtin));
-  CEntryStub stub;
+  CEntryStub stub(1);
   Jump(stub.GetCode(), RelocInfo::CODE_TARGET);
 }
 
@@ -962,7 +1054,7 @@ void MacroAssembler::InvokeBuiltin(Builtins::JavaScript id,
         Bootstrapper::FixupFlagsArgumentsCount::encode(argc) |
         Bootstrapper::FixupFlagsIsPCRelative::encode(true) |
         Bootstrapper::FixupFlagsUseCodeObject::encode(false);
-    Unresolved entry = { pc_offset() - sizeof(Instr), flags, name };
+    Unresolved entry = { pc_offset() - kInstrSize, flags, name };
     unresolved_.Add(entry);
   }
 }
@@ -980,7 +1072,7 @@ void MacroAssembler::GetBuiltinEntry(Register target, Builtins::JavaScript id) {
         Bootstrapper::FixupFlagsArgumentsCount::encode(argc) |
         Bootstrapper::FixupFlagsIsPCRelative::encode(true) |
         Bootstrapper::FixupFlagsUseCodeObject::encode(true);
-    Unresolved entry = { pc_offset() - sizeof(Instr), flags, name };
+    Unresolved entry = { pc_offset() - kInstrSize, flags, name };
     unresolved_.Add(entry);
   }
 
@@ -1059,6 +1151,40 @@ void MacroAssembler::Abort(const char* msg) {
   CallRuntime(Runtime::kAbort, 2);
   // will not return here
 }
+
+
+#ifdef ENABLE_DEBUGGER_SUPPORT
+CodePatcher::CodePatcher(byte* address, int instructions)
+    : address_(address),
+      instructions_(instructions),
+      size_(instructions * Assembler::kInstrSize),
+      masm_(address, size_ + Assembler::kGap) {
+  // Create a new macro assembler pointing to the address of the code to patch.
+  // The size is adjusted with kGap on order for the assembler to generate size
+  // bytes of instructions without failing with buffer size constraints.
+  ASSERT(masm_.reloc_info_writer.pos() == address_ + size_ + Assembler::kGap);
+}
+
+
+CodePatcher::~CodePatcher() {
+  // Indicate that code has changed.
+  CPU::FlushICache(address_, size_);
+
+  // Check that the code was patched as expected.
+  ASSERT(masm_.pc_ == address_ + size_);
+  ASSERT(masm_.reloc_info_writer.pos() == address_ + size_ + Assembler::kGap);
+}
+
+
+void CodePatcher::Emit(Instr x) {
+  masm()->emit(x);
+}
+
+
+void CodePatcher::Emit(Address addr) {
+  masm()->emit(reinterpret_cast<Instr>(addr));
+}
+#endif  // ENABLE_DEBUGGER_SUPPORT
 
 
 } }  // namespace v8::internal
