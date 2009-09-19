@@ -4,13 +4,15 @@ Upstream-Maintainer: the V8 Project Authors <v8-dev@googlegroups.com>
 Upstream-Source: http://code.google.com/p/v8
 Upstream-Name: v8
 
+X-Repackaging-Reasoning:
+  Upstream sources are repackaged to remove a file which contains a file
+  (tools/jsmin.py) licensed under the JSON license, which is a non-free license
+  .
+  Repackaging is done via debian/repack.sh and can be replayed using "uscan -f"
+
 Files: *
 Copyright: 2006-2009 the V8 Project Authors
 License: BSD
-
-Files: tools/jsmin.py
-Copyright: 2002 Douglas Crockford
-License: JSON
 
 Files: benchmarks/crypto.js
 Copyright: 2003-2005 Tom Wu
@@ -62,6 +64,10 @@ Copyright:
  2008-2009 Fabien Tassin <fta@sofaraway.org>
 License: BSD
 
+Files: debian/repack.sh
+Copyright: 2008, Damyan Ivanov <dmn@debian.org>
+License: Artistic | GPL-1+
+
 License: BSD
     On Debian GNU/Linux systems, the complete text of the BSD license
     can be found in `/usr/share/common-licenses/BSD'
@@ -81,3 +87,17 @@ License: MIT
 License: JSON
     The complete text of the JSON license can be seen on:
     http://www.json.org/license.html
+
+License: GPL-1+
+    This program is free software; you can redistribute it and/or modify
+    it under the terms of the GNU General Public License as published by
+    the Free Software Foundation; either version 1, or (at your option)
+    any later version.
+    On Debian GNU/Linux systems, the complete text of the GNU General
+    Public License can be found in `/usr/share/common-licenses/GPL'
+
+License: Artistic
+    This program is free software; you can redistribute it and/or modify
+    it under the terms of the Artistic License, which comes with Perl.
+    On Debian GNU/Linux systems, the complete text of the Artistic License
+    can be found in `/usr/share/common-licenses/Artistic'
