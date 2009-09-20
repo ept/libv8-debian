@@ -1,0 +1,25 @@
+Patch to remove the dependency to a non-free jsmin.py (JSON licensed); the patch
+was written by Joey Hess
+
+--- a/tools/js2c.py
++++ b/tools/js2c.py
+@@ -32,7 +32,7 @@
+ # library.
+ 
+ import os, re, sys, string
+-import jsmin
++# import jsmin # JSON licensed, non-free
+ 
+ 
+ def ToCArray(lines):
+@@ -55,8 +55,8 @@
+ def CompressScript(lines, do_jsmin):
+   # If we're not expecting this code to be user visible, we can run it through
+   # a more aggressive minifier.
+-  if do_jsmin:
+-    return jsmin.jsmin(lines)
++#  if do_jsmin: # non-free JEH
++#    return jsmin.jsmin(lines)
+ 
+   # Remove stuff from the source that we don't want to appear when
+   # people print the source code using Function.prototype.toString().
