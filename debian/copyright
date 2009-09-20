@@ -81,12 +81,17 @@ License: GPL-2+
     Public License can be found in `/usr/share/common-licenses/GPL-2'
 
 License: MIT
-    The complete text of the MIT license can be seen on:
-    http://www.opensource.org/licenses/mit-license.php
+    Permission to use, copy, modify, and distribute this software for any
+    purpose without fee is hereby granted, provided that this entire
+    notice is included in all copies of any software which is or includes
+    a copy or modification of this software and in all copies of the
+    supporting documentation for such software.
 
-License: JSON
-    The complete text of the JSON license can be seen on:
-    http://www.json.org/license.html
+    THIS SOFTWARE IS BEING PROVIDED "AS IS", WITHOUT ANY EXPRESS OR
+    IMPLIED WARRANTY.  IN PARTICULAR, NEITHER THE AUTHOR NOR LUCENT MAKES
+    ANY REPRESENTATION OR WARRANTY OF ANY KIND CONCERNING THE
+    MERCHANTABILITY OF THIS SOFTWARE OR ITS FITNESS FOR ANY PARTICULAR
+    PURPOSE.
 
 License: GPL-1+
     This program is free software; you can redistribute it and/or modify

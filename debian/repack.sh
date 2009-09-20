@@ -31,8 +31,7 @@ fi
 
 ## Remove stuff
 
-# remove this test, it contains an embedded webpage which cannot
-# be redistributed
+# removed because it is licensed under a non-free license (JSON license)
 rm $UP_BASE/tools/jsmin.py
 
 mv "$UP_BASE" "$DIR/$REPACK_DIR"
