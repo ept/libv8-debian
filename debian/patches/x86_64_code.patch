@@ -1,0 +1,17 @@
+build 64 bit code on x86_64, see upstream
+http://code.google.com/p/v8/issues/detail?id=429
+
+--- a/tools/utils.py
++++ b/tools/utils.py
+@@ -63,8 +63,10 @@
+   id = platform.machine()
+   if id.startswith('arm'):
+     return 'arm'
+-  elif (not id) or (not re.match('(x|i[3-6])86', id) is None):
++  elif (not id) or (not re.match('(x|i[3-6])86$', id) is None):
+     return 'ia32'
++  elif id == 'x86_64':
++    return 'x64'
+   else:
+     return None
+ 
