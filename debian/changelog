@@ -4,6 +4,7 @@ libv8 (1.3.11+dfsg-2) unstable; urgency=low
     + armel-build.patch: adding march armv5t to build on armel (Closes: 8636294)
     + x86_64_code.patch: build 64 bit code on x86_64 (Closes: 548467, 550448)
   * debian/watch: excluded '..' from the versions (Closes: 550581)
+  * debian/changelog: added DM-Upload-Allowed: yes
 
  -- Antonio Radici <antonio@dyne.org>  Sun, 11 Oct 2009 13:33:11 +0100
 

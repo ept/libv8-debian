@@ -5,6 +5,7 @@ Build-Depends: debhelper (>= 7), pkg-config, scons, quilt, cdbs
 Standards-Version: 3.8.3
 Section: libs
 Homepage: http://code.google.com/p/v8/
+DM-Upload-Allowed: yes
 Vcs-Browser: http://git.debian.org/?p=collab-maint/libv8.git
 Vcs-Git: git://git.debian.org/git/collab-maint/libv8.git
 
