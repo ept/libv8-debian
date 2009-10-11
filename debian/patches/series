@@ -1,2 +1,4 @@
 install_target.patch
 enable_soname.patch
+remove-jsmin.patch
+armel-build.patch

@@ -1,0 +1,14 @@
+adding -march=armv5t to build libv8 on armel
+
+--- a/SConstruct
++++ b/SConstruct
+@@ -167,7 +167,8 @@
+       'LINKFLAGS':    ['-m32']
+     },
+     'arch:arm': {
+-      'CPPDEFINES':   ['V8_TARGET_ARCH_ARM']
++      'CPPDEFINES':   ['V8_TARGET_ARCH_ARM'],
++      'CCFLAGS':      ['-march=armv5t']
+     },
+     'simulator:arm': {
+       'CCFLAGS':      ['-m32'],
