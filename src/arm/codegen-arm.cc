@@ -1188,7 +1188,6 @@ void CodeGenerator::VisitDeclaration(Declaration* node) {
 #endif
   VirtualFrame::SpilledScope spilled_scope;
   Comment cmnt(masm_, "[ Declaration");
-  CodeForStatementPosition(node);
   Variable* var = node->proxy()->var();
   ASSERT(var != NULL);  // must have been resolved
   Slot* slot = var->slot();
@@ -1540,191 +1539,200 @@ void CodeGenerator::VisitSwitchStatement(SwitchStatement* node) {
 }
 
 
-void CodeGenerator::VisitLoopStatement(LoopStatement* node) {
+void CodeGenerator::VisitDoWhileStatement(DoWhileStatement* node) {
 #ifdef DEBUG
   int original_height = frame_->height();
 #endif
   VirtualFrame::SpilledScope spilled_scope;
-  Comment cmnt(masm_, "[ LoopStatement");
+  Comment cmnt(masm_, "[ DoWhileStatement");
   CodeForStatementPosition(node);
   node->break_target()->set_direction(JumpTarget::FORWARD_ONLY);
+  JumpTarget body(JumpTarget::BIDIRECTIONAL);
 
-  // Simple condition analysis.  ALWAYS_TRUE and ALWAYS_FALSE represent a
-  // known result for the test expression, with no side effects.
-  enum { ALWAYS_TRUE, ALWAYS_FALSE, DONT_KNOW } info = DONT_KNOW;
-  if (node->cond() == NULL) {
-    ASSERT(node->type() == LoopStatement::FOR_LOOP);
-    info = ALWAYS_TRUE;
-  } else {
-    Literal* lit = node->cond()->AsLiteral();
-    if (lit != NULL) {
-      if (lit->IsTrue()) {
-        info = ALWAYS_TRUE;
-      } else if (lit->IsFalse()) {
-        info = ALWAYS_FALSE;
-      }
-    }
-  }
-
-  switch (node->type()) {
-    case LoopStatement::DO_LOOP: {
-      JumpTarget body(JumpTarget::BIDIRECTIONAL);
-
-      // Label the top of the loop for the backward CFG edge.  If the test
-      // is always true we can use the continue target, and if the test is
-      // always false there is no need.
-      if (info == ALWAYS_TRUE) {
-        node->continue_target()->set_direction(JumpTarget::BIDIRECTIONAL);
-        node->continue_target()->Bind();
-      } else if (info == ALWAYS_FALSE) {
-        node->continue_target()->set_direction(JumpTarget::FORWARD_ONLY);
-      } else {
-        ASSERT(info == DONT_KNOW);
-        node->continue_target()->set_direction(JumpTarget::FORWARD_ONLY);
-        body.Bind();
-      }
-
-      CheckStack();  // TODO(1222600): ignore if body contains calls.
-      VisitAndSpill(node->body());
-
-      // Compile the test.
-      if (info == ALWAYS_TRUE) {
-        if (has_valid_frame()) {
-          // If control can fall off the end of the body, jump back to the
-          // top.
-          node->continue_target()->Jump();
-        }
-      } else if (info == ALWAYS_FALSE) {
-        // If we have a continue in the body, we only have to bind its jump
-        // target.
-        if (node->continue_target()->is_linked()) {
-          node->continue_target()->Bind();
-        }
-      } else {
-        ASSERT(info == DONT_KNOW);
-        // We have to compile the test expression if it can be reached by
-        // control flow falling out of the body or via continue.
-        if (node->continue_target()->is_linked()) {
-          node->continue_target()->Bind();
-        }
-        if (has_valid_frame()) {
-          LoadConditionAndSpill(node->cond(), NOT_INSIDE_TYPEOF,
-                                &body, node->break_target(), true);
-          if (has_valid_frame()) {
-            // A invalid frame here indicates that control did not
-            // fall out of the test expression.
-            Branch(true, &body);
-          }
-        }
-      }
-      break;
-    }
-
-    case LoopStatement::WHILE_LOOP: {
-      // If the test is never true and has no side effects there is no need
-      // to compile the test or body.
-      if (info == ALWAYS_FALSE) break;
-
-      // Label the top of the loop with the continue target for the backward
-      // CFG edge.
+  // Label the top of the loop for the backward CFG edge.  If the test
+  // is always true we can use the continue target, and if the test is
+  // always false there is no need.
+  ConditionAnalysis info = AnalyzeCondition(node->cond());
+  switch (info) {
+    case ALWAYS_TRUE:
       node->continue_target()->set_direction(JumpTarget::BIDIRECTIONAL);
       node->continue_target()->Bind();
+      break;
+    case ALWAYS_FALSE:
+      node->continue_target()->set_direction(JumpTarget::FORWARD_ONLY);
+      break;
+    case DONT_KNOW:
+      node->continue_target()->set_direction(JumpTarget::FORWARD_ONLY);
+      body.Bind();
+      break;
+  }
 
-      if (info == DONT_KNOW) {
-        JumpTarget body;
-        LoadConditionAndSpill(node->cond(), NOT_INSIDE_TYPEOF,
-                              &body, node->break_target(), true);
-        if (has_valid_frame()) {
-          // A NULL frame indicates that control did not fall out of the
-          // test expression.
-          Branch(false, node->break_target());
-        }
-        if (has_valid_frame() || body.is_linked()) {
-          body.Bind();
-        }
-      }
+  CheckStack();  // TODO(1222600): ignore if body contains calls.
+  VisitAndSpill(node->body());
 
+      // Compile the test.
+  switch (info) {
+    case ALWAYS_TRUE:
+      // If control can fall off the end of the body, jump back to the
+      // top.
       if (has_valid_frame()) {
-        CheckStack();  // TODO(1222600): ignore if body contains calls.
-        VisitAndSpill(node->body());
-
-        // If control flow can fall out of the body, jump back to the top.
-        if (has_valid_frame()) {
-          node->continue_target()->Jump();
-        }
+        node->continue_target()->Jump();
       }
       break;
-    }
-
-    case LoopStatement::FOR_LOOP: {
-      JumpTarget loop(JumpTarget::BIDIRECTIONAL);
-
-      if (node->init() != NULL) {
-        VisitAndSpill(node->init());
-      }
-
-      // There is no need to compile the test or body.
-      if (info == ALWAYS_FALSE) break;
-
-      // If there is no update statement, label the top of the loop with the
-      // continue target, otherwise with the loop target.
-      if (node->next() == NULL) {
-        node->continue_target()->set_direction(JumpTarget::BIDIRECTIONAL);
+    case ALWAYS_FALSE:
+      // If we have a continue in the body, we only have to bind its
+      // jump target.
+      if (node->continue_target()->is_linked()) {
         node->continue_target()->Bind();
-      } else {
-        node->continue_target()->set_direction(JumpTarget::FORWARD_ONLY);
-        loop.Bind();
       }
-
-      // If the test is always true, there is no need to compile it.
-      if (info == DONT_KNOW) {
-        JumpTarget body;
+      break;
+    case DONT_KNOW:
+      // We have to compile the test expression if it can be reached by
+      // control flow falling out of the body or via continue.
+      if (node->continue_target()->is_linked()) {
+        node->continue_target()->Bind();
+      }
+      if (has_valid_frame()) {
         LoadConditionAndSpill(node->cond(), NOT_INSIDE_TYPEOF,
                               &body, node->break_target(), true);
         if (has_valid_frame()) {
-          Branch(false, node->break_target());
-        }
-        if (has_valid_frame() || body.is_linked()) {
-          body.Bind();
-        }
-      }
-
-      if (has_valid_frame()) {
-        CheckStack();  // TODO(1222600): ignore if body contains calls.
-        VisitAndSpill(node->body());
-
-        if (node->next() == NULL) {
-          // If there is no update statement and control flow can fall out
-          // of the loop, jump directly to the continue label.
-          if (has_valid_frame()) {
-            node->continue_target()->Jump();
-          }
-        } else {
-          // If there is an update statement and control flow can reach it
-          // via falling out of the body of the loop or continuing, we
-          // compile the update statement.
-          if (node->continue_target()->is_linked()) {
-            node->continue_target()->Bind();
-          }
-          if (has_valid_frame()) {
-            // Record source position of the statement as this code which is
-            // after the code for the body actually belongs to the loop
-            // statement and not the body.
-            CodeForStatementPosition(node);
-            VisitAndSpill(node->next());
-            loop.Jump();
-          }
+          // A invalid frame here indicates that control did not
+          // fall out of the test expression.
+          Branch(true, &body);
         }
       }
       break;
-    }
   }
 
   if (node->break_target()->is_linked()) {
     node->break_target()->Bind();
   }
-  node->continue_target()->Unuse();
-  node->break_target()->Unuse();
+  ASSERT(!has_valid_frame() || frame_->height() == original_height);
+}
+
+
+void CodeGenerator::VisitWhileStatement(WhileStatement* node) {
+#ifdef DEBUG
+  int original_height = frame_->height();
+#endif
+  VirtualFrame::SpilledScope spilled_scope;
+  Comment cmnt(masm_, "[ WhileStatement");
+  CodeForStatementPosition(node);
+
+  // If the test is never true and has no side effects there is no need
+  // to compile the test or body.
+  ConditionAnalysis info = AnalyzeCondition(node->cond());
+  if (info == ALWAYS_FALSE) return;
+
+  node->break_target()->set_direction(JumpTarget::FORWARD_ONLY);
+
+  // Label the top of the loop with the continue target for the backward
+  // CFG edge.
+  node->continue_target()->set_direction(JumpTarget::BIDIRECTIONAL);
+  node->continue_target()->Bind();
+
+  if (info == DONT_KNOW) {
+    JumpTarget body;
+    LoadConditionAndSpill(node->cond(), NOT_INSIDE_TYPEOF,
+                          &body, node->break_target(), true);
+    if (has_valid_frame()) {
+      // A NULL frame indicates that control did not fall out of the
+      // test expression.
+      Branch(false, node->break_target());
+    }
+    if (has_valid_frame() || body.is_linked()) {
+      body.Bind();
+    }
+  }
+
+  if (has_valid_frame()) {
+    CheckStack();  // TODO(1222600): ignore if body contains calls.
+    VisitAndSpill(node->body());
+
+    // If control flow can fall out of the body, jump back to the top.
+    if (has_valid_frame()) {
+      node->continue_target()->Jump();
+    }
+  }
+  if (node->break_target()->is_linked()) {
+    node->break_target()->Bind();
+  }
+  ASSERT(!has_valid_frame() || frame_->height() == original_height);
+}
+
+
+void CodeGenerator::VisitForStatement(ForStatement* node) {
+#ifdef DEBUG
+  int original_height = frame_->height();
+#endif
+  VirtualFrame::SpilledScope spilled_scope;
+  Comment cmnt(masm_, "[ ForStatement");
+  CodeForStatementPosition(node);
+  if (node->init() != NULL) {
+    VisitAndSpill(node->init());
+  }
+
+  // If the test is never true there is no need to compile the test or
+  // body.
+  ConditionAnalysis info = AnalyzeCondition(node->cond());
+  if (info == ALWAYS_FALSE) return;
+
+  node->break_target()->set_direction(JumpTarget::FORWARD_ONLY);
+
+  // If there is no update statement, label the top of the loop with the
+  // continue target, otherwise with the loop target.
+  JumpTarget loop(JumpTarget::BIDIRECTIONAL);
+  if (node->next() == NULL) {
+    node->continue_target()->set_direction(JumpTarget::BIDIRECTIONAL);
+    node->continue_target()->Bind();
+  } else {
+    node->continue_target()->set_direction(JumpTarget::FORWARD_ONLY);
+    loop.Bind();
+  }
+
+  // If the test is always true, there is no need to compile it.
+  if (info == DONT_KNOW) {
+    JumpTarget body;
+    LoadConditionAndSpill(node->cond(), NOT_INSIDE_TYPEOF,
+                          &body, node->break_target(), true);
+    if (has_valid_frame()) {
+      Branch(false, node->break_target());
+    }
+    if (has_valid_frame() || body.is_linked()) {
+      body.Bind();
+    }
+  }
+
+  if (has_valid_frame()) {
+    CheckStack();  // TODO(1222600): ignore if body contains calls.
+    VisitAndSpill(node->body());
+
+    if (node->next() == NULL) {
+      // If there is no update statement and control flow can fall out
+      // of the loop, jump directly to the continue label.
+      if (has_valid_frame()) {
+        node->continue_target()->Jump();
+      }
+    } else {
+      // If there is an update statement and control flow can reach it
+      // via falling out of the body of the loop or continuing, we
+      // compile the update statement.
+      if (node->continue_target()->is_linked()) {
+        node->continue_target()->Bind();
+      }
+      if (has_valid_frame()) {
+        // Record source position of the statement as this code which is
+        // after the code for the body actually belongs to the loop
+        // statement and not the body.
+        CodeForStatementPosition(node);
+        VisitAndSpill(node->next());
+        loop.Jump();
+      }
+    }
+  }
+  if (node->break_target()->is_linked()) {
+    node->break_target()->Bind();
+  }
   ASSERT(!has_valid_frame() || frame_->height() == original_height);
 }
 
@@ -1919,12 +1927,12 @@ void CodeGenerator::VisitForInStatement(ForInStatement* node) {
 }
 
 
-void CodeGenerator::VisitTryCatch(TryCatch* node) {
+void CodeGenerator::VisitTryCatchStatement(TryCatchStatement* node) {
 #ifdef DEBUG
   int original_height = frame_->height();
 #endif
   VirtualFrame::SpilledScope spilled_scope;
-  Comment cmnt(masm_, "[ TryCatch");
+  Comment cmnt(masm_, "[ TryCatchStatement");
   CodeForStatementPosition(node);
 
   JumpTarget try_block;
@@ -2044,12 +2052,12 @@ void CodeGenerator::VisitTryCatch(TryCatch* node) {
 }
 
 
-void CodeGenerator::VisitTryFinally(TryFinally* node) {
+void CodeGenerator::VisitTryFinallyStatement(TryFinallyStatement* node) {
 #ifdef DEBUG
   int original_height = frame_->height();
 #endif
   VirtualFrame::SpilledScope spilled_scope;
-  Comment cmnt(masm_, "[ TryFinally");
+  Comment cmnt(masm_, "[ TryFinallyStatement");
   CodeForStatementPosition(node);
 
   // State: Used to keep track of reason for entering the finally
@@ -2811,7 +2819,6 @@ void CodeGenerator::VisitAssignment(Assignment* node) {
 #endif
   VirtualFrame::SpilledScope spilled_scope;
   Comment cmnt(masm_, "[ Assignment");
-  CodeForStatementPosition(node);
 
   { Reference target(this, node->target());
     if (target.is_illegal()) {
@@ -2909,13 +2916,11 @@ void CodeGenerator::VisitCall(Call* node) {
   VirtualFrame::SpilledScope spilled_scope;
   Comment cmnt(masm_, "[ Call");
 
+  Expression* function = node->expression();
   ZoneList<Expression*>* args = node->arguments();
 
-  CodeForStatementPosition(node);
   // Standard function call.
-
   // Check if the function is a variable or a property.
-  Expression* function = node->expression();
   Variable* var = function->AsVariableProxy()->AsVariable();
   Property* property = function->AsProperty();
 
@@ -2928,7 +2933,56 @@ void CodeGenerator::VisitCall(Call* node) {
   // is resolved in cache misses (this also holds for megamorphic calls).
   // ------------------------------------------------------------------------
 
-  if (var != NULL && !var->is_this() && var->is_global()) {
+  if (var != NULL && var->is_possibly_eval()) {
+    // ----------------------------------
+    // JavaScript example: 'eval(arg)'  // eval is not known to be shadowed
+    // ----------------------------------
+
+    // In a call to eval, we first call %ResolvePossiblyDirectEval to
+    // resolve the function we need to call and the receiver of the
+    // call.  Then we call the resolved function using the given
+    // arguments.
+    // Prepare stack for call to resolved function.
+    LoadAndSpill(function);
+    __ LoadRoot(r2, Heap::kUndefinedValueRootIndex);
+    frame_->EmitPush(r2);  // Slot for receiver
+    int arg_count = args->length();
+    for (int i = 0; i < arg_count; i++) {
+      LoadAndSpill(args->at(i));
+    }
+
+    // Prepare stack for call to ResolvePossiblyDirectEval.
+    __ ldr(r1, MemOperand(sp, arg_count * kPointerSize + kPointerSize));
+    frame_->EmitPush(r1);
+    if (arg_count > 0) {
+      __ ldr(r1, MemOperand(sp, arg_count * kPointerSize));
+      frame_->EmitPush(r1);
+    } else {
+      frame_->EmitPush(r2);
+    }
+
+    // Resolve the call.
+    frame_->CallRuntime(Runtime::kResolvePossiblyDirectEval, 2);
+
+    // Touch up stack with the right values for the function and the receiver.
+    __ ldr(r1, FieldMemOperand(r0, FixedArray::kHeaderSize));
+    __ str(r1, MemOperand(sp, (arg_count + 1) * kPointerSize));
+    __ ldr(r1, FieldMemOperand(r0, FixedArray::kHeaderSize + kPointerSize));
+    __ str(r1, MemOperand(sp, arg_count * kPointerSize));
+
+    // Call the function.
+    CodeForSourcePosition(node->position());
+
+    InLoopFlag in_loop = loop_nesting() > 0 ? IN_LOOP : NOT_IN_LOOP;
+    CallFunctionStub call_function(arg_count, in_loop);
+    frame_->CallStub(&call_function, arg_count + 1);
+
+    __ ldr(cp, frame_->Context());
+    // Remove the function from the stack.
+    frame_->Drop();
+    frame_->EmitPush(r0);
+
+  } else if (var != NULL && !var->is_this() && var->is_global()) {
     // ----------------------------------
     // JavaScript example: 'foo(1, 2, 3)'  // foo is global
     // ----------------------------------
@@ -3053,72 +3107,12 @@ void CodeGenerator::VisitCall(Call* node) {
 }
 
 
-void CodeGenerator::VisitCallEval(CallEval* node) {
-#ifdef DEBUG
-  int original_height = frame_->height();
-#endif
-  VirtualFrame::SpilledScope spilled_scope;
-  Comment cmnt(masm_, "[ CallEval");
-
-  // In a call to eval, we first call %ResolvePossiblyDirectEval to resolve
-  // the function we need to call and the receiver of the call.
-  // Then we call the resolved function using the given arguments.
-
-  ZoneList<Expression*>* args = node->arguments();
-  Expression* function = node->expression();
-
-  CodeForStatementPosition(node);
-
-  // Prepare stack for call to resolved function.
-  LoadAndSpill(function);
-  __ LoadRoot(r2, Heap::kUndefinedValueRootIndex);
-  frame_->EmitPush(r2);  // Slot for receiver
-  int arg_count = args->length();
-  for (int i = 0; i < arg_count; i++) {
-    LoadAndSpill(args->at(i));
-  }
-
-  // Prepare stack for call to ResolvePossiblyDirectEval.
-  __ ldr(r1, MemOperand(sp, arg_count * kPointerSize + kPointerSize));
-  frame_->EmitPush(r1);
-  if (arg_count > 0) {
-    __ ldr(r1, MemOperand(sp, arg_count * kPointerSize));
-    frame_->EmitPush(r1);
-  } else {
-    frame_->EmitPush(r2);
-  }
-
-  // Resolve the call.
-  frame_->CallRuntime(Runtime::kResolvePossiblyDirectEval, 2);
-
-  // Touch up stack with the right values for the function and the receiver.
-  __ ldr(r1, FieldMemOperand(r0, FixedArray::kHeaderSize));
-  __ str(r1, MemOperand(sp, (arg_count + 1) * kPointerSize));
-  __ ldr(r1, FieldMemOperand(r0, FixedArray::kHeaderSize + kPointerSize));
-  __ str(r1, MemOperand(sp, arg_count * kPointerSize));
-
-  // Call the function.
-  CodeForSourcePosition(node->position());
-
-  InLoopFlag in_loop = loop_nesting() > 0 ? IN_LOOP : NOT_IN_LOOP;
-  CallFunctionStub call_function(arg_count, in_loop);
-  frame_->CallStub(&call_function, arg_count + 1);
-
-  __ ldr(cp, frame_->Context());
-  // Remove the function from the stack.
-  frame_->Drop();
-  frame_->EmitPush(r0);
-  ASSERT(frame_->height() == original_height + 1);
-}
-
-
 void CodeGenerator::VisitCallNew(CallNew* node) {
 #ifdef DEBUG
   int original_height = frame_->height();
 #endif
   VirtualFrame::SpilledScope spilled_scope;
   Comment cmnt(masm_, "[ CallNew");
-  CodeForStatementPosition(node);
 
   // According to ECMA-262, section 11.2.2, page 44, the function
   // expression in new calls must be evaluated before the
@@ -4335,7 +4329,7 @@ static void CountLeadingZeros(
     Register source,
     Register scratch,
     Register zeros) {
-#ifdef __ARM_ARCH_5__
+#ifdef CAN_USE_ARMV5_INSTRUCTIONS
   __ clz(zeros, source);  // This instruction is only supported after ARM5.
 #else
   __ mov(zeros, Operand(0));
@@ -4960,12 +4954,12 @@ static void AllocateHeapNumber(
     Register scratch2) {  // Another scratch register.
   // Allocate an object in the heap for the heap number and tag it as a heap
   // object.
-  __ AllocateObjectInNewSpace(HeapNumber::kSize / kPointerSize,
-                              result,
-                              scratch1,
-                              scratch2,
-                              need_gc,
-                              TAG_OBJECT);
+  __ AllocateInNewSpace(HeapNumber::kSize / kPointerSize,
+                        result,
+                        scratch1,
+                        scratch2,
+                        need_gc,
+                        TAG_OBJECT);
 
   // Get heap number map and store it in the allocated object.
   __ LoadRoot(scratch1, Heap::kHeapNumberMapRootIndex);
@@ -5076,11 +5070,14 @@ static void HandleBinaryOpSlowCases(MacroAssembler* masm,
   // r5: Address of heap number for result.
   __ push(lr);   // For later.
   __ push(r5);   // Address of heap number that is answer.
+  __ AlignStack(0);
   // Call C routine that may not cause GC or other trouble.
   __ mov(r5, Operand(ExternalReference::double_fp_operation(operation)));
   __ Call(r5);
+  __ pop(r4);  // Address of heap number.
+  __ cmp(r4, Operand(Smi::FromInt(0)));
+  __ pop(r4, eq);  // Conditional pop instruction to get rid of alignment push.
   // Store answer in the overwritable heap number.
-  __ pop(r4);
 #if !defined(USE_ARM_EABI)
   // Double returned in fp coprocessor register 0 and 1, encoded as register
   // cr8.  Offsets must be divisible by 4 for coprocessor so we need to

@@ -201,20 +201,13 @@ bool PendingFixups::Process(Handle<JSBuiltinsObject> builtins) {
     }
     Code* code = Code::cast(code_[i]);
     Address pc = code->instruction_start() + pc_[i];
-    bool is_pc_relative = Bootstrapper::FixupFlagsIsPCRelative::decode(flags);
+    RelocInfo target(pc, RelocInfo::CODE_TARGET, 0);
     bool use_code_object = Bootstrapper::FixupFlagsUseCodeObject::decode(flags);
-
     if (use_code_object) {
-      if (is_pc_relative) {
-        Assembler::set_target_address_at(
-            pc, reinterpret_cast<Address>(f->code()));
-      } else {
-        *reinterpret_cast<Object**>(pc) = f->code();
-      }
+      target.set_target_object(f->code());
     } else {
-      Assembler::set_target_address_at(pc, f->code()->instruction_start());
+      target.set_target_address(f->code()->instruction_start());
     }
-
     LOG(StringEvent("resolved", name));
   }
   Clear();
@@ -654,6 +647,8 @@ void Genesis::CreateRoots(v8::Handle<v8::ObjectTemplate> global_template,
         InstallFunction(global, "Array", JS_ARRAY_TYPE, JSArray::kSize,
                         Top::initial_object_prototype(), Builtins::ArrayCode,
                         true);
+    array_function->shared()->set_construct_stub(
+        Builtins::builtin(Builtins::ArrayConstructCode));
     array_function->shared()->DontAdaptArguments();
 
     // This seems a bit hackish, but we need to make sure Array.length
@@ -1471,7 +1466,7 @@ void Genesis::MakeFunctionInstancePrototypeWritable() {
   HandleScope scope;
 
   Handle<DescriptorArray> function_map_descriptors =
-      ComputeFunctionInstanceDescriptor(false, true);
+      ComputeFunctionInstanceDescriptor(false);
   Handle<Map> fm = Factory::CopyMapDropDescriptors(Top::function_map());
   fm->set_instance_descriptors(*function_map_descriptors);
   Top::context()->global_context()->set_function_map(*fm);
@@ -1581,6 +1576,12 @@ char* Bootstrapper::ArchiveState(char* to) {
 // Restore statics that are thread local.
 char* Bootstrapper::RestoreState(char* from) {
   return Genesis::RestoreState(from);
+}
+
+
+// Called when the top-level V8 mutex is destroyed.
+void Bootstrapper::FreeThreadResources() {
+  ASSERT(Genesis::current() == NULL);
 }
 
 

@@ -47,19 +47,24 @@ static void ProbeTable(MacroAssembler* masm,
                        StubCache::Table table,
                        Register name,
                        Register offset) {
-  // The offset register must hold a *positive* smi.
+  ASSERT_EQ(8, kPointerSize);
+  ASSERT_EQ(16, sizeof(StubCache::Entry));
+  // The offset register holds the entry offset times four (due to masking
+  // and shifting optimizations).
   ExternalReference key_offset(SCTableReference::keyReference(table));
   Label miss;
 
   __ movq(kScratchRegister, key_offset);
-  SmiIndex index = masm->SmiToIndex(offset, offset, kPointerSizeLog2);
   // Check that the key in the entry matches the name.
-  __ cmpl(name, Operand(kScratchRegister, index.reg, index.scale, 0));
+  // Multiply entry offset by 16 to get the entry address. Since the
+  // offset register already holds the entry offset times four, multiply
+  // by a further four.
+  __ cmpl(name, Operand(kScratchRegister, offset, times_4, 0));
   __ j(not_equal, &miss);
   // Get the code entry from the cache.
   // Use key_offset + kPointerSize, rather than loading value_offset.
   __ movq(kScratchRegister,
-          Operand(kScratchRegister, index.reg, index.scale, kPointerSize));
+          Operand(kScratchRegister, offset, times_4, kPointerSize));
   // Check that the flags match what we're looking for.
   __ movl(offset, FieldOperand(kScratchRegister, Code::kFlagsOffset));
   __ and_(offset, Immediate(~Code::kFlagsNotUsedInLookup));
@@ -1751,6 +1756,7 @@ Object* ConstructStubCompiler::CompileConstructStub(
   // Load the initial map and verify that it is in fact a map.
   __ movq(rbx, FieldOperand(rdi, JSFunction::kPrototypeOrInitialMapOffset));
   // Will both indicate a NULL and a Smi.
+  ASSERT(kSmiTag == 0);
   __ JumpIfSmi(rbx, &generic_stub_call);
   __ CmpObjectType(rbx, MAP_TYPE, rcx);
   __ j(not_equal, &generic_stub_call);
@@ -1768,12 +1774,12 @@ Object* ConstructStubCompiler::CompileConstructStub(
   // rbx: initial map
   __ movzxbq(rcx, FieldOperand(rbx, Map::kInstanceSizeOffset));
   __ shl(rcx, Immediate(kPointerSizeLog2));
-  __ AllocateObjectInNewSpace(rcx,
-                              rdx,
-                              rcx,
-                              no_reg,
-                              &generic_stub_call,
-                              NO_ALLOCATION_FLAGS);
+  __ AllocateInNewSpace(rcx,
+                        rdx,
+                        rcx,
+                        no_reg,
+                        &generic_stub_call,
+                        NO_ALLOCATION_FLAGS);
 
   // Allocated the JSObject, now initialize the fields and add the heap tag.
   // rbx: initial map

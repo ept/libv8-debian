@@ -264,7 +264,6 @@ class Factory : public AllStatic {
 
   static Handle<JSFunction> NewFunctionBoilerplate(Handle<String> name,
                                                    int number_of_literals,
-                                                   bool contains_array_literal,
                                                    Handle<Code> code);
 
   static Handle<JSFunction> NewFunctionBoilerplate(Handle<String> name);
@@ -285,6 +284,8 @@ class Factory : public AllStatic {
       Handle<String> key,
       Handle<Object> value,
       PropertyAttributes attributes);
+
+  static Handle<String> NumberToString(Handle<Object> number);
 
   enum ApiInstanceType {
     JavaScriptObject,

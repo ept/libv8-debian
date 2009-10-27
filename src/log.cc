@@ -889,9 +889,61 @@ void Logger::HeapSampleJSConstructorEvent(const char* constructor,
 #ifdef ENABLE_LOGGING_AND_PROFILING
   if (!Log::IsEnabled() || !FLAG_log_gc) return;
   LogMessageBuilder msg;
-  msg.Append("heap-js-cons-item,%s,%d,%d\n",
-             constructor[0] != '\0' ? constructor : "(anonymous)",
-             number, bytes);
+  msg.Append("heap-js-cons-item,%s,%d,%d\n", constructor, number, bytes);
+  msg.WriteToLogFile();
+#endif
+}
+
+
+void Logger::HeapSampleJSRetainersEvent(
+    const char* constructor, const char* event) {
+#ifdef ENABLE_LOGGING_AND_PROFILING
+  if (!Log::IsEnabled() || !FLAG_log_gc) return;
+  // Event starts with comma, so we don't have it in the format string.
+  static const char* event_text = "heap-js-ret-item,%s";
+  // We take placeholder strings into account, but it's OK to be conservative.
+  static const int event_text_len = strlen(event_text);
+  const int cons_len = strlen(constructor), event_len = strlen(event);
+  int pos = 0;
+  // Retainer lists can be long. We may need to split them into multiple events.
+  do {
+    LogMessageBuilder msg;
+    msg.Append(event_text, constructor);
+    int to_write = event_len - pos;
+    if (to_write > Log::kMessageBufferSize - (cons_len + event_text_len)) {
+      int cut_pos = pos + Log::kMessageBufferSize - (cons_len + event_text_len);
+      ASSERT(cut_pos < event_len);
+      while (cut_pos > pos && event[cut_pos] != ',') --cut_pos;
+      if (event[cut_pos] != ',') {
+        // Crash in debug mode, skip in release mode.
+        ASSERT(false);
+        return;
+      }
+      // Append a piece of event that fits, without trailing comma.
+      msg.AppendStringPart(event + pos, cut_pos - pos);
+      // Start next piece with comma.
+      pos = cut_pos;
+    } else {
+      msg.Append("%s", event + pos);
+      pos += event_len;
+    }
+    msg.Append('\n');
+    msg.WriteToLogFile();
+  } while (pos < event_len);
+#endif
+}
+
+
+void Logger::HeapSampleJSProducerEvent(const char* constructor,
+                                       Address* stack) {
+#ifdef ENABLE_LOGGING_AND_PROFILING
+  if (!Log::IsEnabled() || !FLAG_log_gc) return;
+  LogMessageBuilder msg;
+  msg.Append("heap-js-prod-item,%s", constructor);
+  while (*stack != NULL) {
+    msg.Append(",0x%" V8PRIxPTR, *stack++);
+  }
+  msg.Append("\n");
   msg.WriteToLogFile();
 #endif
 }
@@ -1033,37 +1085,33 @@ int Logger::GetLogLines(int from_pos, char* dest_buf, int max_size) {
 }
 
 
-void Logger::LogCompiledFunctions() {
-  HandleScope scope;
-  Handle<SharedFunctionInfo>* sfis = NULL;
+static int EnumerateCompiledFunctions(Handle<SharedFunctionInfo>* sfis) {
+  AssertNoAllocation no_alloc;
   int compiled_funcs_count = 0;
-
-  {
-    AssertNoAllocation no_alloc;
-
-    HeapIterator iterator;
-    while (iterator.has_next()) {
-      HeapObject* obj = iterator.next();
-      ASSERT(obj != NULL);
-      if (obj->IsSharedFunctionInfo()
-          && SharedFunctionInfo::cast(obj)->is_compiled()) {
-        ++compiled_funcs_count;
-      }
-    }
-
-    sfis = NewArray< Handle<SharedFunctionInfo> >(compiled_funcs_count);
-    iterator.reset();
-
-    int i = 0;
-    while (iterator.has_next()) {
-      HeapObject* obj = iterator.next();
-      ASSERT(obj != NULL);
-      if (obj->IsSharedFunctionInfo()
-          && SharedFunctionInfo::cast(obj)->is_compiled()) {
-        sfis[i++] = Handle<SharedFunctionInfo>(SharedFunctionInfo::cast(obj));
-      }
+  HeapIterator iterator;
+  while (iterator.has_next()) {
+    HeapObject* obj = iterator.next();
+    ASSERT(obj != NULL);
+    if (!obj->IsSharedFunctionInfo()) continue;
+    SharedFunctionInfo* sfi = SharedFunctionInfo::cast(obj);
+    if (sfi->is_compiled()
+        && (!sfi->script()->IsScript()
+            || Script::cast(sfi->script())->HasValidSource())) {
+      if (sfis != NULL)
+        sfis[compiled_funcs_count] = Handle<SharedFunctionInfo>(sfi);
+      ++compiled_funcs_count;
     }
   }
+  return compiled_funcs_count;
+}
+
+
+void Logger::LogCompiledFunctions() {
+  HandleScope scope;
+  const int compiled_funcs_count = EnumerateCompiledFunctions(NULL);
+  Handle<SharedFunctionInfo>* sfis =
+      NewArray< Handle<SharedFunctionInfo> >(compiled_funcs_count);
+  EnumerateCompiledFunctions(sfis);
 
   // During iteration, there can be heap allocation due to
   // GetScriptLineNumber call.

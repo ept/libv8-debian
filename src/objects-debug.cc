@@ -29,7 +29,6 @@
 
 #include "disassembler.h"
 #include "disasm.h"
-#include "macro-assembler.h"
 #include "jsregexp.h"
 
 namespace v8 {
@@ -733,7 +732,6 @@ void Code::CodePrint() {
 
 
 void Code::CodeVerify() {
-  CHECK(ic_flag() == IC_TARGET_IS_ADDRESS);
   CHECK(IsAligned(reinterpret_cast<intptr_t>(instruction_start()),
                   static_cast<intptr_t>(kCodeAlignment)));
   Address last_gc_pc = NULL;

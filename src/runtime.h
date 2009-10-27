@@ -152,6 +152,7 @@ namespace internal {
   F(StringSlice, 3, 1) \
   F(StringReplaceRegExpWithString, 4, 1) \
   F(StringMatch, 3, 1) \
+  F(StringTrim, 3, 1) \
   \
   /* Numbers */ \
   F(NumberToRadixString, 2, 1) \
@@ -171,6 +172,7 @@ namespace internal {
   F(FunctionGetScriptSourcePosition, 1, 1) \
   F(FunctionGetPositionForOffset, 2, 1) \
   F(FunctionIsAPIFunction, 1, 1) \
+  F(FunctionIsBuiltin, 1, 1) \
   F(GetScript, 1, 1) \
   F(CollectStackTrace, 2, 1) \
   \
@@ -258,6 +260,8 @@ namespace internal {
   F(Abort, 2, 1) \
   /* Logging */ \
   F(Log, 2, 1) \
+  /* ES5 */ \
+  F(LocalKeys, 1, 1) \
   \
   /* Pseudo functions - handled as macros by parser */ \
   F(IS_VAR, 1, 1)

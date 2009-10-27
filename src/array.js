@@ -709,6 +709,8 @@ function ArraySort(comparefn) {
     QuickSort(a, high_start, to);
   }
 
+  var length;
+
   // Copies elements in the range 0..length from obj's prototype chain
   // to obj itself, if obj has holes. Returns one more than the maximal index
   // of a prototype property.
@@ -826,7 +828,7 @@ function ArraySort(comparefn) {
     return first_undefined;
   }
 
-  var length = ToUint32(this.length);
+  length = ToUint32(this.length);
   if (length < 2) return this;
 
   var is_array = IS_ARRAY(this);
@@ -1056,6 +1058,10 @@ function ArrayReduceRight(callback, current) {
   return current;
 }
 
+// ES5, 15.4.3.2
+function ArrayIsArray(obj) {
+  return IS_ARRAY(obj);
+}
 
 // -------------------------------------------------------------------
 
@@ -1072,6 +1078,11 @@ function SetupArray() {
   // Setup non-enumerable constructor property on the Array.prototype
   // object.
   %SetProperty($Array.prototype, "constructor", $Array, DONT_ENUM);
+
+  // Setup non-enumerable functions on the Array object.
+  InstallFunctions($Array, DONT_ENUM, $Array(
+    "isArray", ArrayIsArray
+  ));
 
   // Setup non-enumerable functions of the Array.prototype object and
   // set their names.
@@ -1096,8 +1107,9 @@ function SetupArray() {
     "indexOf", ArrayIndexOf,
     "lastIndexOf", ArrayLastIndexOf,
     "reduce", ArrayReduce,
-    "reduceRight", ArrayReduceRight));
-
+    "reduceRight", ArrayReduceRight
+  ));
+    
   // Manipulate the length of some of the functions to meet
   // expectations set by ECMA-262 or Mozilla.
   UpdateFunctionLengths({

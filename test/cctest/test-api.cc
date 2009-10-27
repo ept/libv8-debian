@@ -1,4 +1,4 @@
-// Copyright 2007-2008 the V8 project authors. All rights reserved.
+// Copyright 2007-2009 the V8 project authors. All rights reserved.
 // Redistribution and use in source and binary forms, with or without
 // modification, are permitted provided that the following conditions are
 // met:
@@ -25,12 +25,11 @@
 // (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
 // OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
-#include <stdlib.h>
-
 #include "v8.h"
 
 #include "api.h"
 #include "compilation-cache.h"
+#include "execution.h"
 #include "snapshot.h"
 #include "platform.h"
 #include "top.h"
@@ -573,6 +572,44 @@ THREADED_TEST(UsingExternalAsciiString) {
 }
 
 
+THREADED_TEST(StringConcat) {
+  {
+    v8::HandleScope scope;
+    LocalContext env;
+    const char* one_byte_string_1 = "function a_times_t";
+    const char* two_byte_string_1 = "wo_plus_b(a, b) {return ";
+    const char* one_byte_extern_1 = "a * 2 + b;} a_times_two_plus_b(4, 8) + ";
+    const char* two_byte_extern_1 = "a_times_two_plus_b(4, 8) + ";
+    const char* one_byte_string_2 = "a_times_two_plus_b(4, 8) + ";
+    const char* two_byte_string_2 = "a_times_two_plus_b(4, 8) + ";
+    const char* two_byte_extern_2 = "a_times_two_plus_b(1, 2);";
+    Local<String> left = v8_str(one_byte_string_1);
+    Local<String> right = String::New(AsciiToTwoByteString(two_byte_string_1));
+    Local<String> source = String::Concat(left, right);
+    right = String::NewExternal(
+        new TestAsciiResource(i::StrDup(one_byte_extern_1)));
+    source = String::Concat(source, right);
+    right = String::NewExternal(
+        new TestResource(AsciiToTwoByteString(two_byte_extern_1)));
+    source = String::Concat(source, right);
+    right = v8_str(one_byte_string_2);
+    source = String::Concat(source, right);
+    right = String::New(AsciiToTwoByteString(two_byte_string_2));
+    source = String::Concat(source, right);
+    right = String::NewExternal(
+        new TestResource(AsciiToTwoByteString(two_byte_extern_2)));
+    source = String::Concat(source, right);
+    Local<Script> script = Script::Compile(source);
+    Local<Value> value = script->Run();
+    CHECK(value->IsNumber());
+    CHECK_EQ(68, value->Int32Value());
+  }
+  v8::internal::CompilationCache::Clear();
+  i::Heap::CollectAllGarbage(false);
+  i::Heap::CollectAllGarbage(false);
+}
+
+
 THREADED_TEST(GlobalProperties) {
   v8::HandleScope scope;
   LocalContext env;
@@ -698,6 +735,88 @@ THREADED_TEST(PropertyHandler) {
   CHECK_EQ(900, getter->Run()->Int32Value());
   Local<Script> setter = v8_compile("obj.foo = 901;");
   CHECK_EQ(901, setter->Run()->Int32Value());
+}
+
+
+THREADED_TEST(TinyInteger) {
+  v8::HandleScope scope;
+  LocalContext env;
+  int32_t value = 239;
+  Local<v8::Integer> value_obj = v8::Integer::New(value);
+  CHECK_EQ(static_cast<int64_t>(value), value_obj->Value());
+}
+
+
+THREADED_TEST(BigSmiInteger) {
+  v8::HandleScope scope;
+  LocalContext env;
+  int32_t value = i::Smi::kMaxValue;
+  // We cannot add one to a Smi::kMaxValue without wrapping.
+  if (i::kSmiValueSize < 32) {
+    CHECK(i::Smi::IsValid(value));
+    CHECK(!i::Smi::IsValid(value + 1));
+    Local<v8::Integer> value_obj = v8::Integer::New(value);
+    CHECK_EQ(static_cast<int64_t>(value), value_obj->Value());
+  }
+}
+
+
+THREADED_TEST(BigInteger) {
+  v8::HandleScope scope;
+  LocalContext env;
+  // We cannot add one to a Smi::kMaxValue without wrapping.
+  if (i::kSmiValueSize < 32) {
+    // The casts allow this to compile, even if Smi::kMaxValue is 2^31-1.
+    // The code will not be run in that case, due to the "if" guard.
+    int32_t value =
+        static_cast<int32_t>(static_cast<uint32_t>(i::Smi::kMaxValue) + 1);
+    CHECK(value > i::Smi::kMaxValue);
+    CHECK(!i::Smi::IsValid(value));
+    Local<v8::Integer> value_obj = v8::Integer::New(value);
+    CHECK_EQ(static_cast<int64_t>(value), value_obj->Value());
+  }
+}
+
+
+THREADED_TEST(TinyUnsignedInteger) {
+  v8::HandleScope scope;
+  LocalContext env;
+  uint32_t value = 239;
+  Local<v8::Integer> value_obj = v8::Integer::NewFromUnsigned(value);
+  CHECK_EQ(static_cast<int64_t>(value), value_obj->Value());
+}
+
+
+THREADED_TEST(BigUnsignedSmiInteger) {
+  v8::HandleScope scope;
+  LocalContext env;
+  uint32_t value = static_cast<uint32_t>(i::Smi::kMaxValue);
+  CHECK(i::Smi::IsValid(value));
+  CHECK(!i::Smi::IsValid(value + 1));
+  Local<v8::Integer> value_obj = v8::Integer::NewFromUnsigned(value);
+  CHECK_EQ(static_cast<int64_t>(value), value_obj->Value());
+}
+
+
+THREADED_TEST(BigUnsignedInteger) {
+  v8::HandleScope scope;
+  LocalContext env;
+  uint32_t value = static_cast<uint32_t>(i::Smi::kMaxValue) + 1;
+  CHECK(value > static_cast<uint32_t>(i::Smi::kMaxValue));
+  CHECK(!i::Smi::IsValid(value));
+  Local<v8::Integer> value_obj = v8::Integer::NewFromUnsigned(value);
+  CHECK_EQ(static_cast<int64_t>(value), value_obj->Value());
+}
+
+
+THREADED_TEST(OutOfSignedRangeUnsignedInteger) {
+  v8::HandleScope scope;
+  LocalContext env;
+  uint32_t INT32_MAX_AS_UINT = (1U << 31) - 1;
+  uint32_t value = INT32_MAX_AS_UINT + 1;
+  CHECK(value > INT32_MAX_AS_UINT);  // No overflow.
+  Local<v8::Integer> value_obj = v8::Integer::NewFromUnsigned(value);
+  CHECK_EQ(static_cast<int64_t>(value), value_obj->Value());
 }
 
 
@@ -1345,6 +1464,44 @@ THREADED_TEST(InternalFieldsNativePointers) {
 }
 
 
+THREADED_TEST(InternalFieldsNativePointersAndExternal) {
+  v8::HandleScope scope;
+  LocalContext env;
+
+  Local<v8::FunctionTemplate> templ = v8::FunctionTemplate::New();
+  Local<v8::ObjectTemplate> instance_templ = templ->InstanceTemplate();
+  instance_templ->SetInternalFieldCount(1);
+  Local<v8::Object> obj = templ->GetFunction()->NewInstance();
+  CHECK_EQ(1, obj->InternalFieldCount());
+  CHECK(obj->GetPointerFromInternalField(0) == NULL);
+
+  char* data = new char[100];
+
+  void* aligned = data;
+  CHECK_EQ(0, reinterpret_cast<uintptr_t>(aligned) & 0x1);
+  void* unaligned = data + 1;
+  CHECK_EQ(1, reinterpret_cast<uintptr_t>(unaligned) & 0x1);
+
+  obj->SetPointerInInternalField(0, aligned);
+  i::Heap::CollectAllGarbage(false);
+  CHECK_EQ(aligned, v8::External::Unwrap(obj->GetInternalField(0)));
+
+  obj->SetPointerInInternalField(0, unaligned);
+  i::Heap::CollectAllGarbage(false);
+  CHECK_EQ(unaligned, v8::External::Unwrap(obj->GetInternalField(0)));
+
+  obj->SetInternalField(0, v8::External::Wrap(aligned));
+  i::Heap::CollectAllGarbage(false);
+  CHECK_EQ(aligned, obj->GetPointerFromInternalField(0));
+
+  obj->SetInternalField(0, v8::External::Wrap(unaligned));
+  i::Heap::CollectAllGarbage(false);
+  CHECK_EQ(unaligned, obj->GetPointerFromInternalField(0));
+
+  delete[] data;
+}
+
+
 THREADED_TEST(IdentityHash) {
   v8::HandleScope scope;
   LocalContext env;
@@ -1809,7 +1966,7 @@ TEST(HugeConsStringOutOfMemory) {
   // Build huge string. This should fail with out of memory exception.
   Local<Value> result = CompileRun(
     "var str = Array.prototype.join.call({length: 513}, \"A\").toUpperCase();"
-    "for (var i = 0; i < 21; i++) { str = str + str; }");
+    "for (var i = 0; i < 22; i++) { str = str + str; }");
 
   // Check for out of memory state.
   CHECK(result.IsEmpty());
@@ -7729,6 +7886,42 @@ THREADED_TEST(PixelArray) {
   CHECK_EQ(1503, result->Int32Value());
   result = CompileRun("pixels[1]");
   CHECK_EQ(1, result->Int32Value());
+
+  result = CompileRun("var sum = 0;"
+                      "for (var i = 0; i < 8; i++) {"
+                      "  sum += pixels[i] = pixels[i] = -i;"
+                      "}"
+                      "sum;");
+  CHECK_EQ(-28, result->Int32Value());
+
+  result = CompileRun("var sum = 0;"
+                      "for (var i = 0; i < 8; i++) {"
+                      "  sum += pixels[i] = pixels[i] = 0;"
+                      "}"
+                      "sum;");
+  CHECK_EQ(0, result->Int32Value());
+
+  result = CompileRun("var sum = 0;"
+                      "for (var i = 0; i < 8; i++) {"
+                      "  sum += pixels[i] = pixels[i] = 255;"
+                      "}"
+                      "sum;");
+  CHECK_EQ(8 * 255, result->Int32Value());
+
+  result = CompileRun("var sum = 0;"
+                      "for (var i = 0; i < 8; i++) {"
+                      "  sum += pixels[i] = pixels[i] = 256 + i;"
+                      "}"
+                      "sum;");
+  CHECK_EQ(2076, result->Int32Value());
+
+  result = CompileRun("var sum = 0;"
+                      "for (var i = 0; i < 8; i++) {"
+                      "  sum += pixels[i] = pixels[i] = i;"
+                      "}"
+                      "sum;");
+  CHECK_EQ(28, result->Int32Value());
+
   result = CompileRun("var sum = 0;"
                       "for (var i = 0; i < 8; i++) {"
                       "  sum += pixels[i];"
@@ -7839,6 +8032,9 @@ THREADED_TEST(PixelArray) {
   CHECK_EQ(77, v8::Object::Cast(*result)->Get(v8_str("0"))->Int32Value());
   CHECK_EQ(23, v8::Object::Cast(*result)->Get(v8_str("1"))->Int32Value());
 
+  result = CompileRun("pixels[1] = 23;");
+  CHECK_EQ(23, result->Int32Value());
+
   free(pixel_data);
 }
 
@@ -7873,9 +8069,87 @@ THREADED_TEST(StackTrace) {
 }
 
 
-// Test that idle notification can be handled when V8 has not yet been
-// set up.
+// Test that idle notification can be handled and eventually returns true.
 THREADED_TEST(IdleNotification) {
-  for (int i = 0; i < 100; i++) v8::V8::IdleNotification(true);
-  for (int i = 0; i < 100; i++) v8::V8::IdleNotification(false);
+  bool rv = false;
+  for (int i = 0; i < 100; i++) {
+    rv = v8::V8::IdleNotification();
+    if (rv)
+      break;
+  }
+  CHECK(rv == true);
+}
+
+
+static uint32_t* stack_limit;
+
+static v8::Handle<Value> GetStackLimitCallback(const v8::Arguments& args) {
+  stack_limit = reinterpret_cast<uint32_t*>(i::StackGuard::climit());
+  return v8::Undefined();
+}
+
+
+// Uses the address of a local variable to determine the stack top now.
+// Given a size, returns an address that is that far from the current
+// top of stack.
+static uint32_t* ComputeStackLimit(uint32_t size) {
+  uint32_t* answer = &size - (size / sizeof(size));
+  // If the size is very large and the stack is very near the bottom of
+  // memory then the calculation above may wrap around and give an address
+  // that is above the (downwards-growing) stack.  In that case we return
+  // a very low address.
+  if (answer > &size) return reinterpret_cast<uint32_t*>(sizeof(size));
+  return answer;
+}
+
+
+TEST(SetResourceConstraints) {
+  static const int K = 1024;
+  uint32_t* set_limit = ComputeStackLimit(128 * K);
+
+  // Set stack limit.
+  v8::ResourceConstraints constraints;
+  constraints.set_stack_limit(set_limit);
+  CHECK(v8::SetResourceConstraints(&constraints));
+
+  // Execute a script.
+  v8::HandleScope scope;
+  LocalContext env;
+  Local<v8::FunctionTemplate> fun_templ =
+      v8::FunctionTemplate::New(GetStackLimitCallback);
+  Local<Function> fun = fun_templ->GetFunction();
+  env->Global()->Set(v8_str("get_stack_limit"), fun);
+  CompileRun("get_stack_limit();");
+
+  CHECK(stack_limit == set_limit);
+}
+
+
+TEST(SetResourceConstraintsInThread) {
+  uint32_t* set_limit;
+  {
+    v8::Locker locker;
+    static const int K = 1024;
+    set_limit = ComputeStackLimit(128 * K);
+
+    // Set stack limit.
+    v8::ResourceConstraints constraints;
+    constraints.set_stack_limit(set_limit);
+    CHECK(v8::SetResourceConstraints(&constraints));
+
+    // Execute a script.
+    v8::HandleScope scope;
+    LocalContext env;
+    Local<v8::FunctionTemplate> fun_templ =
+        v8::FunctionTemplate::New(GetStackLimitCallback);
+    Local<Function> fun = fun_templ->GetFunction();
+    env->Global()->Set(v8_str("get_stack_limit"), fun);
+    CompileRun("get_stack_limit();");
+
+    CHECK(stack_limit == set_limit);
+  }
+  {
+    v8::Locker locker;
+    CHECK(stack_limit == set_limit);
+  }
 }

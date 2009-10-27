@@ -40,7 +40,6 @@ VariableProxySentinel VariableProxySentinel::identifier_proxy_(false);
 ValidLeftHandSideSentinel ValidLeftHandSideSentinel::instance_;
 Property Property::this_property_(VariableProxySentinel::this_proxy(), NULL, 0);
 Call Call::sentinel_(NULL, NULL, 0);
-CallEval CallEval::sentinel_(NULL, NULL, 0);
 
 
 // ----------------------------------------------------------------------------
@@ -90,20 +89,6 @@ void VariableProxy::BindTo(Variable* var) {
   var->var_uses()->RecordUses(&var_uses_);
   var->obj_uses()->RecordUses(&obj_uses_);
 }
-
-
-#ifdef DEBUG
-
-const char* LoopStatement::OperatorString() const {
-  switch (type()) {
-    case DO_LOOP: return "DO";
-    case FOR_LOOP: return "FOR";
-    case WHILE_LOOP: return "WHILE";
-  }
-  return NULL;
-}
-
-#endif  // DEBUG
 
 
 Token::Value Assignment::binary_op() const {
@@ -186,6 +171,13 @@ void TargetCollector::AddTarget(BreakTarget* target) {
 
 // ----------------------------------------------------------------------------
 // Implementation of AstVisitor
+
+
+void AstVisitor::VisitDeclarations(ZoneList<Declaration*>* declarations) {
+  for (int i = 0; i < declarations->length(); i++) {
+    Visit(declarations->at(i));
+  }
+}
 
 
 void AstVisitor::VisitStatements(ZoneList<Statement*>* statements) {

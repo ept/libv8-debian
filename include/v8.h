@@ -1,4 +1,4 @@
-// Copyright 2007-2008 the V8 project authors. All rights reserved.
+// Copyright 2007-2009 the V8 project authors. All rights reserved.
 // Redistribution and use in source and binary forms, with or without
 // modification, are permitted provided that the following conditions are
 // met:
@@ -130,6 +130,7 @@ class Data;
 namespace internal {
 
 class Object;
+class Arguments;
 
 }
 
@@ -755,7 +756,7 @@ class V8EXPORT Value : public Data {
   /** JS == */
   bool Equals(Handle<Value> that) const;
   bool StrictEquals(Handle<Value> that) const;
-  
+
  private:
   inline bool QuickIsString() const;
   bool FullIsString() const;
@@ -918,6 +919,12 @@ class V8EXPORT String : public Primitive {
   static Local<String> NewSymbol(const char* data, int length = -1);
 
   /**
+   * Creates a new string by concatenating the left and the right strings
+   * passed in as parameters.
+   */
+  static Local<String> Concat(Handle<String> left, Handle<String>right);
+
+  /**
    * Creates a new external string using the data defined in the given
    * resource. The resource is deleted when the external string is no
    * longer live on V8's heap. The caller of this function should not
@@ -1035,7 +1042,7 @@ class V8EXPORT String : public Primitive {
     Value(const Value&);
     void operator=(const Value&);
   };
-  
+
  private:
   void VerifyExternalStringResource(ExternalStringResource* val) const;
   static void CheckCast(v8::Value* obj);
@@ -1062,6 +1069,7 @@ class V8EXPORT Number : public Primitive {
 class V8EXPORT Integer : public Number {
  public:
   static Local<Integer> New(int32_t value);
+  static inline Local<Integer> NewFromUnsigned(uint32_t value);
   int64_t Value() const;
   static inline Integer* Cast(v8::Value* obj);
  private:
@@ -1192,7 +1200,7 @@ class V8EXPORT Object : public Value {
 
   /** Gets a native pointer from an internal field. */
   inline void* GetPointerFromInternalField(int index);
-  
+
   /** Sets a native pointer in an internal field. */
   void SetPointerInInternalField(int index, void* value);
 
@@ -1205,7 +1213,14 @@ class V8EXPORT Object : public Value {
    * If result.IsEmpty() no real property was located in the prototype chain.
    * This means interceptors in the prototype chain are not called.
    */
-  Handle<Value> GetRealNamedPropertyInPrototypeChain(Handle<String> key);
+  Local<Value> GetRealNamedPropertyInPrototypeChain(Handle<String> key);
+
+  /**
+   * If result.IsEmpty() no real property was located on the object or
+   * in the prototype chain.
+   * This means interceptors in the prototype chain are not called.
+   */
+  Local<Value> GetRealNamedProperty(Handle<String> key);
 
   /** Tests for a named lookup interceptor.*/
   bool HasNamedLookupInterceptor();
@@ -1240,6 +1255,15 @@ class V8EXPORT Object : public Value {
   bool DeleteHiddenValue(Handle<String> key);
 
   /**
+   * Returns true if this is an instance of an api function (one
+   * created from a function created from a function template) and has
+   * been modified since it was created.  Note that this method is
+   * conservative and may return true for objects that haven't actually
+   * been modified.
+   */
+  bool IsDirty();
+
+  /**
    * Clone this object with a fast but shallow copy.  Values will point
    * to the same values as the original object.
    */
@@ -1260,10 +1284,11 @@ class V8EXPORT Object : public Value {
   Object();
   static void CheckCast(Value* obj);
   Local<Value> CheckedGetInternalField(int index);
+  void* SlowGetPointerFromInternalField(int index);
 
   /**
    * If quick access to the internal field is possible this method
-   * returns the value.  Otherwise an empty handle is returned. 
+   * returns the value.  Otherwise an empty handle is returned.
    */
   inline Local<Value> UncheckedGetInternalField(int index);
 };
@@ -1392,17 +1417,13 @@ class V8EXPORT Arguments {
  */
 class V8EXPORT AccessorInfo {
  public:
-  inline AccessorInfo(Local<Object> self,
-                      Local<Value> data,
-                      Local<Object> holder)
-      : self_(self), data_(data), holder_(holder) { }
+  inline AccessorInfo(internal::Object** args)
+      : args_(args) { }
   inline Local<Value> Data() const;
   inline Local<Object> This() const;
   inline Local<Object> Holder() const;
  private:
-  Local<Object> self_;
-  Local<Value> data_;
-  Local<Object> holder_;
+  internal::Object** args_;
 };
 
 
@@ -1537,9 +1558,9 @@ enum AccessType {
 
 /**
  * Returns true if cross-context access should be allowed to the named
- * property with the given key on the global object.
+ * property with the given key on the host object.
  */
-typedef bool (*NamedSecurityCallback)(Local<Object> global,
+typedef bool (*NamedSecurityCallback)(Local<Object> host,
                                       Local<Value> key,
                                       AccessType type,
                                       Local<Value> data);
@@ -1547,9 +1568,9 @@ typedef bool (*NamedSecurityCallback)(Local<Object> global,
 
 /**
  * Returns true if cross-context access should be allowed to the indexed
- * property with the given index on the global object.
+ * property with the given index on the host object.
  */
-typedef bool (*IndexedSecurityCallback)(Local<Object> global,
+typedef bool (*IndexedSecurityCallback)(Local<Object> host,
                                         uint32_t index,
                                         AccessType type,
                                         Local<Value> data);
@@ -1558,7 +1579,10 @@ typedef bool (*IndexedSecurityCallback)(Local<Object> global,
 /**
  * A FunctionTemplate is used to create functions at runtime. There
  * can only be one function created from a FunctionTemplate in a
- * context.
+ * context.  The lifetime of the created function is equal to the
+ * lifetime of the context.  So in case the embedder needs to create
+ * temporary functions that can be collected using Scripts is
+ * preferred.
  *
  * A FunctionTemplate can have properties, these properties are added to the
  * function object when it is created.
@@ -1965,8 +1989,13 @@ Handle<Boolean> V8EXPORT False();
 
 
 /**
- * A set of constraints that specifies the limits of the runtime's
- * memory use.
+ * A set of constraints that specifies the limits of the runtime's memory use.
+ * You must set the heap size before initializing the VM - the size cannot be
+ * adjusted after the VM is initialized.
+ *
+ * If you are using threads then you should hold the V8::Locker lock while
+ * setting the stack limit and you must set a non-default stack limit separately
+ * for each thread.
  */
 class V8EXPORT ResourceConstraints {
  public:
@@ -1976,6 +2005,7 @@ class V8EXPORT ResourceConstraints {
   int max_old_space_size() const { return max_old_space_size_; }
   void set_max_old_space_size(int value) { max_old_space_size_ = value; }
   uint32_t* stack_limit() const { return stack_limit_; }
+  // Sets an address beyond which the VM's stack may not grow.
   void set_stack_limit(uint32_t* value) { stack_limit_ = value; }
  private:
   int max_young_space_size_;
@@ -2183,7 +2213,8 @@ class V8EXPORT V8 {
 
   /**
    * Initializes from snapshot if possible. Otherwise, attempts to
-   * initialize from scratch.
+   * initialize from scratch.  This function is called implicitly if
+   * you use the API without calling it first.
    */
   static bool Initialize();
 
@@ -2326,12 +2357,11 @@ class V8EXPORT V8 {
    * Optional notification that the embedder is idle.
    * V8 uses the notification to reduce memory footprint.
    * This call can be used repeatedly if the embedder remains idle.
-   * \param is_high_priority tells whether the embedder is high priority.
    * Returns true if the embedder should stop calling IdleNotification
    * until real work has been done.  This indicates that V8 has done
    * as much cleanup as it will be able to do.
    */
-  static bool IdleNotification(bool is_high_priority);
+  static bool IdleNotification();
 
   /**
    * Optional notification that the system is running low on memory.
@@ -2697,12 +2727,37 @@ const int kHeapObjectTag = 1;
 const int kHeapObjectTagSize = 2;
 const intptr_t kHeapObjectTagMask = (1 << kHeapObjectTagSize) - 1;
 
-
 // Tag information for Smi.
 const int kSmiTag = 0;
 const int kSmiTagSize = 1;
 const intptr_t kSmiTagMask = (1 << kSmiTagSize) - 1;
 
+template <size_t ptr_size> struct SmiConstants;
+
+// Smi constants for 32-bit systems.
+template <> struct SmiConstants<4> {
+  static const int kSmiShiftSize = 0;
+  static const int kSmiValueSize = 31;
+  static inline int SmiToInt(internal::Object* value) {
+    int shift_bits = kSmiTagSize + kSmiShiftSize;
+    // Throw away top 32 bits and shift down (requires >> to be sign extending).
+    return static_cast<int>(reinterpret_cast<intptr_t>(value)) >> shift_bits;
+  }
+};
+
+// Smi constants for 64-bit systems.
+template <> struct SmiConstants<8> {
+  static const int kSmiShiftSize = 31;
+  static const int kSmiValueSize = 32;
+  static inline int SmiToInt(internal::Object* value) {
+    int shift_bits = kSmiTagSize + kSmiShiftSize;
+    // Shift down and throw away top 32 bits.
+    return static_cast<int>(reinterpret_cast<intptr_t>(value) >> shift_bits);
+  }
+};
+
+const int kSmiShiftSize = SmiConstants<sizeof(void*)>::kSmiShiftSize;
+const int kSmiValueSize = SmiConstants<sizeof(void*)>::kSmiValueSize;
 
 /**
  * This class exports constants and functionality from within v8 that
@@ -2721,7 +2776,6 @@ class Internals {
   static const int kJSObjectHeaderSize = 3 * sizeof(void*);
   static const int kFullStringRepresentationMask = 0x07;
   static const int kExternalTwoByteRepresentationTag = 0x03;
-  static const int kAlignedPointerShift = 2;
 
   // These constants are compiler dependent so their values must be
   // defined within the implementation.
@@ -2733,15 +2787,31 @@ class Internals {
     return ((reinterpret_cast<intptr_t>(value) & kHeapObjectTagMask) ==
             kHeapObjectTag);
   }
-  
+
   static inline bool HasSmiTag(internal::Object* value) {
     return ((reinterpret_cast<intptr_t>(value) & kSmiTagMask) == kSmiTag);
   }
-  
+
   static inline int SmiValue(internal::Object* value) {
-    return static_cast<int>(reinterpret_cast<intptr_t>(value)) >> kSmiTagSize;
+    return SmiConstants<sizeof(void*)>::SmiToInt(value);
   }
-  
+
+  static inline int GetInstanceType(internal::Object* obj) {
+    typedef internal::Object O;
+    O* map = ReadField<O*>(obj, kHeapObjectMapOffset);
+    return ReadField<uint8_t>(map, kMapInstanceTypeOffset);
+  }
+
+  static inline void* GetExternalPointer(internal::Object* obj) {
+    if (HasSmiTag(obj)) {
+      return obj;
+    } else if (GetInstanceType(obj) == kProxyType) {
+      return ReadField<void*>(obj, kProxyProxyOffset);
+    } else {
+      return NULL;
+    }
+  }
+
   static inline bool IsExternalTwoByteString(int instance_type) {
     int representation = (instance_type & kFullStringRepresentationMask);
     return representation == kExternalTwoByteRepresentationTag;
@@ -2854,21 +2924,6 @@ int Arguments::Length() const {
 }
 
 
-Local<Value> AccessorInfo::Data() const {
-  return data_;
-}
-
-
-Local<Object> AccessorInfo::This() const {
-  return self_;
-}
-
-
-Local<Object> AccessorInfo::Holder() const {
-  return holder_;
-}
-
-
 template <class T>
 Local<T> HandleScope::Close(Handle<T> value) {
   internal::Object** before = reinterpret_cast<internal::Object**>(*value);
@@ -2914,9 +2969,7 @@ Local<Value> Object::UncheckedGetInternalField(int index) {
   typedef internal::Object O;
   typedef internal::Internals I;
   O* obj = *reinterpret_cast<O**>(this);
-  O* map = I::ReadField<O*>(obj, I::kHeapObjectMapOffset);
-  int instance_type = I::ReadField<uint8_t>(map, I::kMapInstanceTypeOffset);
-  if (instance_type == I::kJSObjectType) {
+  if (I::GetInstanceType(obj) == I::kJSObjectType) {
     // If the object is a plain JSObject, which is the common case,
     // we know where to find the internal fields and can return the
     // value directly.
@@ -2941,25 +2994,27 @@ void* External::Unwrap(Handle<v8::Value> obj) {
 
 void* External::QuickUnwrap(Handle<v8::Value> wrapper) {
   typedef internal::Object O;
-  typedef internal::Internals I;
   O* obj = *reinterpret_cast<O**>(const_cast<v8::Value*>(*wrapper));
-  if (I::HasSmiTag(obj)) {
-    int value = I::SmiValue(obj) << I::kAlignedPointerShift;
-    return reinterpret_cast<void*>(value);
-  } else {
-    O* map = I::ReadField<O*>(obj, I::kHeapObjectMapOffset);
-    int instance_type = I::ReadField<uint8_t>(map, I::kMapInstanceTypeOffset);
-    if (instance_type == I::kProxyType) {
-      return I::ReadField<void*>(obj, I::kProxyProxyOffset);
-    } else {
-      return NULL;
-    }
-  }
+  return internal::Internals::GetExternalPointer(obj);
 }
 
 
 void* Object::GetPointerFromInternalField(int index) {
-  return External::Unwrap(GetInternalField(index));
+  typedef internal::Object O;
+  typedef internal::Internals I;
+
+  O* obj = *reinterpret_cast<O**>(this);
+
+  if (I::GetInstanceType(obj) == I::kJSObjectType) {
+    // If the object is a plain JSObject, which is the common case,
+    // we know where to find the internal fields and can return the
+    // value directly.
+    int offset = I::kJSObjectHeaderSize + (sizeof(void*) * index);
+    O* value = I::ReadField<O*>(obj, offset);
+    return I::GetExternalPointer(value);
+  }
+
+  return SlowGetPointerFromInternalField(index);
 }
 
 
@@ -2975,10 +3030,8 @@ String::ExternalStringResource* String::GetExternalStringResource() const {
   typedef internal::Object O;
   typedef internal::Internals I;
   O* obj = *reinterpret_cast<O**>(const_cast<String*>(this));
-  O* map = I::ReadField<O*>(obj, I::kHeapObjectMapOffset);
-  int instance_type = I::ReadField<uint8_t>(map, I::kMapInstanceTypeOffset);
   String::ExternalStringResource* result;
-  if (I::IsExternalTwoByteString(instance_type)) {
+  if (I::IsExternalTwoByteString(I::GetInstanceType(obj))) {
     void* value = I::ReadField<void*>(obj, I::kStringResourceOffset);
     result = reinterpret_cast<String::ExternalStringResource*>(value);
   } else {
@@ -3004,9 +3057,7 @@ bool Value::QuickIsString() const {
   typedef internal::Internals I;
   O* obj = *reinterpret_cast<O**>(const_cast<Value*>(this));
   if (!I::HasHeapObjectTag(obj)) return false;
-  O* map = I::ReadField<O*>(obj, I::kHeapObjectMapOffset);
-  int instance_type = I::ReadField<uint8_t>(map, I::kMapInstanceTypeOffset);
-  return (instance_type < I::kFirstNonstringType);
+  return (I::GetInstanceType(obj) < I::kFirstNonstringType);
 }
 
 
@@ -3015,6 +3066,15 @@ Number* Number::Cast(v8::Value* value) {
   CheckCast(value);
 #endif
   return static_cast<Number*>(value);
+}
+
+
+Local<Integer> Integer::NewFromUnsigned(uint32_t value) {
+  bool fits_into_int32_t = (value & (1 << 31)) == 0;
+  if (fits_into_int32_t) {
+    return Integer::New(static_cast<int32_t>(value));
+  }
+  return Local<Integer>::Cast(Number::New(value));
 }
 
 
@@ -3063,6 +3123,21 @@ External* External::Cast(v8::Value* value) {
   CheckCast(value);
 #endif
   return static_cast<External*>(value);
+}
+
+
+Local<Value> AccessorInfo::Data() const {
+  return Local<Value>(reinterpret_cast<Value*>(&args_[-3]));
+}
+
+
+Local<Object> AccessorInfo::This() const {
+  return Local<Object>(reinterpret_cast<Object*>(&args_[0]));
+}
+
+
+Local<Object> AccessorInfo::Holder() const {
+  return Local<Object>(reinterpret_cast<Object*>(&args_[-1]));
 }
 
 

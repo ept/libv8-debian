@@ -298,7 +298,6 @@ void KeyedLoadIC::GenerateGeneric(MacroAssembler* masm) {
   __ shl(eax, kSmiTagSize);
   __ ret(0);
 
-
   // Slow case: Load name and receiver from stack and jump to runtime.
   __ bind(&slow);
   __ IncrementCounter(&Counters::keyed_load_generic_slow, 1);
@@ -421,21 +420,19 @@ void KeyedStoreIC::GenerateGeneric(MacroAssembler* masm) {
   __ sar(ebx, kSmiTagSize);  // Untag the index.
   __ cmp(ebx, FieldOperand(ecx, PixelArray::kLengthOffset));
   __ j(above_equal, &slow);
+  __ mov(edx, eax);  // Save the value.
   __ sar(eax, kSmiTagSize);  // Untag the value.
   {  // Clamp the value to [0..255].
-    Label done, check_255;
-    __ cmp(eax, 0);
-    __ j(greater_equal, &check_255);
-    __ mov(eax, Immediate(0));
-    __ jmp(&done);
-    __ bind(&check_255);
-    __ cmp(eax, 255);
-    __ j(less_equal, &done);
-    __ mov(eax, Immediate(255));
+    Label done;
+    __ test(eax, Immediate(0xFFFFFF00));
+    __ j(zero, &done);
+    __ setcc(negative, eax);  // 1 if negative, 0 if positive.
+    __ dec_b(eax);  // 0 if negative, 255 if positive.
     __ bind(&done);
   }
   __ mov(ecx, FieldOperand(ecx, PixelArray::kExternalPointerOffset));
   __ mov_b(Operand(ecx, ebx, times_1, 0), eax);
+  __ mov(eax, edx);  // Return the original value.
   __ ret(0);
 
   // Extra capacity case: Check if there is extra capacity to
@@ -456,7 +453,6 @@ void KeyedStoreIC::GenerateGeneric(MacroAssembler* masm) {
   __ mov(FieldOperand(edx, JSArray::kLengthOffset), ebx);
   __ sub(Operand(ebx), Immediate(1 << kSmiTagSize));  // decrement ebx again
   __ jmp(&fast);
-
 
   // Array case: Get the length and the elements array from the JS
   // array. Check that the array is in fast mode; if it is the

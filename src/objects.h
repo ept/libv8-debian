@@ -32,6 +32,9 @@
 #include "code-stubs.h"
 #include "smart-pointer.h"
 #include "unicode-inl.h"
+#if V8_TARGET_ARCH_ARM
+#include "arm/constants-arm.h"
+#endif
 
 //
 // All object types in the V8 JavaScript are described in this file.
@@ -211,7 +214,7 @@ enum PropertyNormalizationMode {
 // NOTE: Everything following JS_VALUE_TYPE is considered a
 // JSObject for GC purposes. The first four entries here have typeof
 // 'object', whereas JS_FUNCTION_TYPE has typeof 'function'.
-#define INSTANCE_TYPE_LIST(V)                   \
+#define INSTANCE_TYPE_LIST_ALL(V)               \
   V(SHORT_SYMBOL_TYPE)                          \
   V(MEDIUM_SYMBOL_TYPE)                         \
   V(LONG_SYMBOL_TYPE)                           \
@@ -282,8 +285,6 @@ enum PropertyNormalizationMode {
   V(OBJECT_TEMPLATE_INFO_TYPE)                  \
   V(SIGNATURE_INFO_TYPE)                        \
   V(TYPE_SWITCH_INFO_TYPE)                      \
-  V(DEBUG_INFO_TYPE)                            \
-  V(BREAK_POINT_INFO_TYPE)                      \
   V(SCRIPT_TYPE)                                \
                                                 \
   V(JS_VALUE_TYPE)                              \
@@ -297,6 +298,17 @@ enum PropertyNormalizationMode {
                                                 \
   V(JS_FUNCTION_TYPE)                           \
 
+#ifdef ENABLE_DEBUGGER_SUPPORT
+#define INSTANCE_TYPE_LIST_DEBUGGER(V)          \
+  V(DEBUG_INFO_TYPE)                            \
+  V(BREAK_POINT_INFO_TYPE)
+#else
+#define INSTANCE_TYPE_LIST_DEBUGGER(V)
+#endif
+
+#define INSTANCE_TYPE_LIST(V)                   \
+  INSTANCE_TYPE_LIST_ALL(V)                     \
+  INSTANCE_TYPE_LIST_DEBUGGER(V)
 
 
 // Since string types are not consecutive, this macro is used to
@@ -673,8 +685,10 @@ enum InstanceType {
   OBJECT_TEMPLATE_INFO_TYPE,
   SIGNATURE_INFO_TYPE,
   TYPE_SWITCH_INFO_TYPE,
+#ifdef ENABLE_DEBUGGER_SUPPORT
   DEBUG_INFO_TYPE,
   BREAK_POINT_INFO_TYPE,
+#endif
   SCRIPT_TYPE,
 
   JS_VALUE_TYPE,
@@ -751,14 +765,17 @@ class Object BASE_EMBEDDED {
   inline bool IsHeapNumber();
   inline bool IsString();
   inline bool IsSymbol();
+#ifdef DEBUG
+  // See objects-inl.h for more details
   inline bool IsSeqString();
   inline bool IsSlicedString();
   inline bool IsExternalString();
-  inline bool IsConsString();
   inline bool IsExternalTwoByteString();
   inline bool IsExternalAsciiString();
   inline bool IsSeqTwoByteString();
   inline bool IsSeqAsciiString();
+#endif  // DEBUG
+  inline bool IsConsString();
 
   inline bool IsNumber();
   inline bool IsByteArray();
@@ -890,10 +907,10 @@ class Object BASE_EMBEDDED {
 
 // Smi represents integer Numbers that can be stored in 31 bits.
 // Smis are immediate which means they are NOT allocated in the heap.
-// Smi stands for small integer.
 // The this pointer has the following format: [31 bit signed int] 0
-// On 64-bit, the top 32 bits of the pointer is allowed to have any
-// value.
+// For long smis it has the following format:
+//     [32 bit signed int] [31 bits zero padding] 0
+// Smi stands for small integer.
 class Smi: public Object {
  public:
   // Returns the integer value.
@@ -907,8 +924,6 @@ class Smi: public Object {
   // Returns whether value can be represented in a Smi.
   static inline bool IsValid(intptr_t value);
 
-  static inline bool IsIntptrValid(intptr_t);
-
   // Casting.
   static inline Smi* cast(Object* object);
 
@@ -919,10 +934,8 @@ class Smi: public Object {
   void SmiVerify();
 #endif
 
-  static const int kSmiNumBits = 31;
-  // Min and max limits for Smi values.
-  static const int kMinValue = -(1 << (kSmiNumBits - 1));
-  static const int kMaxValue = (1 << (kSmiNumBits - 1)) - 1;
+  static const int kMinValue = (-1 << (kSmiValueSize - 1));
+  static const int kMaxValue = -(kMinValue + 1);
 
  private:
   DISALLOW_IMPLICIT_CONSTRUCTORS(Smi);
@@ -935,10 +948,10 @@ class Smi: public Object {
 //
 // Failures are a single word, encoded as follows:
 // +-------------------------+---+--+--+
-// |rrrrrrrrrrrrrrrrrrrrrrrrr|sss|tt|11|
+// |...rrrrrrrrrrrrrrrrrrrrrr|sss|tt|11|
 // +-------------------------+---+--+--+
-//  3                       7 6 4 32 10
-//  1
+//                          7 6 4 32 10
+//
 //
 // The low two bits, 0-1, are the failure tag, 11.  The next two bits,
 // 2-3, are a failure type tag 'tt' with possible values:
@@ -1000,8 +1013,8 @@ class Failure: public Object {
 #endif
 
  private:
-  inline int value() const;
-  static inline Failure* Construct(Type type, int value = 0);
+  inline intptr_t value() const;
+  static inline Failure* Construct(Type type, intptr_t value = 0);
 
   DISALLOW_IMPLICIT_CONSTRUCTORS(Failure);
 };
@@ -1277,7 +1290,7 @@ class HeapNumber: public HeapObject {
   // is a mixture of sign, exponent and mantissa.  Our current platforms are all
   // little endian apart from non-EABI arm which is little endian with big
   // endian floating point word ordering!
-#if !defined(V8_HOST_ARCH_ARM) || __ARM_EABI__
+#if !defined(V8_HOST_ARCH_ARM) || defined(USE_ARM_EABI)
   static const int kMantissaOffset = kValueOffset;
   static const int kExponentOffset = kValueOffset + 4;
 #else
@@ -1427,6 +1440,10 @@ class JSObject: public HeapObject {
 
   // Tells whether this object needs to be loaded.
   inline bool IsLoaded();
+
+  // Returns true if this is an instance of an api function and has
+  // been modified since it was created.  May give false positives.
+  bool IsDirty();
 
   bool HasProperty(String* name) {
     return GetPropertyAttribute(name) != ABSENT;
@@ -2018,33 +2035,33 @@ class DescriptorArray: public FixedArray {
 //     // The Element size indicates number of elements per entry.
 //     static const int kEntrySize = ..;
 //   };
-// table.  The prefix size indicates an amount of memory in the
+// The prefix size indicates an amount of memory in the
 // beginning of the backing storage that can be used for non-element
 // information by subclasses.
 
 template<typename Shape, typename Key>
 class HashTable: public FixedArray {
  public:
-  // Returns the number of elements in the dictionary.
+  // Returns the number of elements in the hash table.
   int NumberOfElements() {
     return Smi::cast(get(kNumberOfElementsIndex))->value();
   }
 
-  // Returns the capacity of the dictionary.
+  // Returns the capacity of the hash table.
   int Capacity() {
     return Smi::cast(get(kCapacityIndex))->value();
   }
 
   // ElementAdded should be called whenever an element is added to a
-  // dictionary.
+  // hash table.
   void ElementAdded() { SetNumberOfElements(NumberOfElements() + 1); }
 
   // ElementRemoved should be called whenever an element is removed from
-  // a dictionary.
+  // a hash table.
   void ElementRemoved() { SetNumberOfElements(NumberOfElements() - 1); }
   void ElementsRemoved(int n) { SetNumberOfElements(NumberOfElements() - n); }
 
-  // Returns a new array for dictionary usage. Might return Failure.
+  // Returns a new HashTable object. Might return Failure.
   static Object* Allocate(int at_least_space_for);
 
   // Returns the key at entry.
@@ -2094,7 +2111,7 @@ class HashTable: public FixedArray {
     return (entry * kEntrySize) + kElementsStartIndex;
   }
 
-  // Update the number of elements in the dictionary.
+  // Update the number of elements in the hash table.
   void SetNumberOfElements(int nof) {
     fast_set(this, kNumberOfElementsIndex, Smi::FromInt(nof));
   }
@@ -2130,7 +2147,7 @@ class HashTableKey {
   virtual uint32_t Hash() = 0;
   // Returns the hash value for object.
   virtual uint32_t HashForObject(Object* key) = 0;
-  // Returns the key object for storing into the dictionary.
+  // Returns the key object for storing into the hash table.
   // If allocations fails a failure object is returned.
   virtual Object* AsObject() = 0;
   // Required.
@@ -2477,6 +2494,9 @@ class PixelArray: public Array {
   void PixelArrayVerify();
 #endif  // DEBUG
 
+  // Maximal acceptable length for a pixel array.
+  static const int kMaxLength = 0x3fffffff;
+
   // PixelArray headers are not quadword aligned.
   static const int kExternalPointerOffset = Array::kAlignedSize;
   static const int kHeaderSize = kExternalPointerOffset + kPointerSize;
@@ -2514,13 +2534,6 @@ class Code: public HeapObject {
 
   enum {
     NUMBER_OF_KINDS = KEYED_STORE_IC + 1
-  };
-
-  // A state indicates that inline cache in this Code object contains
-  // objects or relative instruction addresses.
-  enum ICTargetState {
-    IC_TARGET_IS_ADDRESS,
-    IC_TARGET_IS_OBJECT
   };
 
 #ifdef ENABLE_DISASSEMBLER
@@ -2561,12 +2574,6 @@ class Code: public HeapObject {
   inline bool is_store_stub() { return kind() == STORE_IC; }
   inline bool is_keyed_store_stub() { return kind() == KEYED_STORE_IC; }
   inline bool is_call_stub() { return kind() == CALL_IC; }
-
-  // [ic_flag]: State of inline cache targets. The flag is set to the
-  // object variant in ConvertICTargetsFromAddressToObject, and set to
-  // the address variant in ConvertICTargetsFromObjectToAddress.
-  inline ICTargetState ic_flag();
-  inline void set_ic_flag(ICTargetState value);
 
   // [major_key]: For kind STUB, the major key.
   inline CodeStub::Major major_key();
@@ -2612,12 +2619,6 @@ class Code: public HeapObject {
 
   // Returns the address of the scope information.
   inline byte* sinfo_start();
-
-  // Convert inline cache target from address to code object before GC.
-  void ConvertICTargetsFromAddressToObject();
-
-  // Convert inline cache target from code object to address after GC
-  void ConvertICTargetsFromObjectToAddress();
 
   // Relocate the code by delta bytes. Called to signal that this code
   // object has been moved by delta bytes.
@@ -2674,7 +2675,6 @@ class Code: public HeapObject {
           ~kCodeAlignmentMask;
 
   // Byte offsets within kKindSpecificFlagsOffset.
-  static const int kICFlagOffset = kKindSpecificFlagsOffset + 0;
   static const int kStubMajorKeyOffset = kKindSpecificFlagsOffset + 1;
 
   // Flags layout.
@@ -2999,6 +2999,10 @@ class Script: public Struct {
   DECL_ACCESSORS(eval_from_instructions_offset, Smi)
 
   static inline Script* cast(Object* obj);
+
+  // If script source is an external string, check that the underlying
+  // resource is accessible. Otherwise, always return true.
+  inline bool HasValidSource();
 
 #ifdef DEBUG
   void ScriptPrint();
@@ -3574,6 +3578,7 @@ class CompilationCacheShape {
   static const int kEntrySize = 2;
 };
 
+
 class CompilationCacheTable: public HashTable<CompilationCacheShape,
                                               HashTableKey*> {
  public:
@@ -3847,6 +3852,8 @@ class String: public HeapObject {
   static const int kShortLengthShift = kHashShift + kShortStringTag;
   static const int kMediumLengthShift = kHashShift + kMediumStringTag;
   static const int kLongLengthShift = kHashShift + kLongStringTag;
+  // Maximal string length that can be stored in the hash/length field.
+  static const int kMaxLength = (1 << (32 - kLongLengthShift)) - 1;
 
   // Limit for truncation in short printing.
   static const int kMaxShortPrintLength = 1024;
@@ -4221,25 +4228,47 @@ class ExternalTwoByteString: public ExternalString {
 };
 
 
+// Utility superclass for stack-allocated objects that must be updated
+// on gc.  It provides two ways for the gc to update instances, either
+// iterating or updating after gc.
+class Relocatable BASE_EMBEDDED {
+ public:
+  inline Relocatable() : prev_(top_) { top_ = this; }
+  virtual ~Relocatable() {
+    ASSERT_EQ(top_, this);
+    top_ = prev_;
+  }
+  virtual void IterateInstance(ObjectVisitor* v) { }
+  virtual void PostGarbageCollection() { }
+
+  static void PostGarbageCollectionProcessing();
+  static int ArchiveSpacePerThread();
+  static char* ArchiveState(char* to);
+  static char* RestoreState(char* from);
+  static void Iterate(ObjectVisitor* v);
+  static void Iterate(ObjectVisitor* v, Relocatable* top);
+  static char* Iterate(ObjectVisitor* v, char* t);
+ private:
+  static Relocatable* top_;
+  Relocatable* prev_;
+};
+
+
 // A flat string reader provides random access to the contents of a
 // string independent of the character width of the string.  The handle
 // must be valid as long as the reader is being used.
-class FlatStringReader BASE_EMBEDDED {
+class FlatStringReader : public Relocatable {
  public:
   explicit FlatStringReader(Handle<String> str);
   explicit FlatStringReader(Vector<const char> input);
-  ~FlatStringReader();
-  void RefreshState();
+  void PostGarbageCollection();
   inline uc32 Get(int index);
   int length() { return length_; }
-  static void PostGarbageCollectionProcessing();
  private:
   String** str_;
   bool is_ascii_;
   int length_;
   const void* start_;
-  FlatStringReader* prev_;
-  static FlatStringReader* top_;
 };
 
 
@@ -4404,6 +4433,9 @@ class JSArray: public JSObject {
   void JSArrayPrint();
   void JSArrayVerify();
 #endif
+
+  // Number of element slots to pre-allocate for an empty array.
+  static const int kPreallocatedArrayElements = 4;
 
   // Layout description.
   static const int kLengthOffset = JSObject::kHeaderSize;
@@ -4806,9 +4838,6 @@ class ObjectVisitor BASE_EMBEDDED {
   // To allow lazy clearing of inline caches the visitor has
   // a rich interface for iterating over Code objects..
 
-  // Called prior to visiting the body of a Code object.
-  virtual void BeginCodeIteration(Code* code);
-
   // Visits a code target in the instruction stream.
   virtual void VisitCodeTarget(RelocInfo* rinfo);
 
@@ -4817,9 +4846,6 @@ class ObjectVisitor BASE_EMBEDDED {
 
   // Visits a debug call target in the instruction stream.
   virtual void VisitDebugTarget(RelocInfo* rinfo);
-
-  // Called after completing  visiting the body of a Code object.
-  virtual void EndCodeIteration(Code* code) {}
 
   // Handy shorthand for visiting a single pointer.
   virtual void VisitPointer(Object** p) { VisitPointers(p, p + 1); }

@@ -222,13 +222,18 @@ enum Condition {
   less_equal    = 14,
   greater       = 15,
 
+  // Fake conditions that are handled by the
+  // opcodes using them.
+  always        = 16,
+  never         = 17,
   // aliases
   carry         = below,
   not_carry     = above_equal,
   zero          = equal,
   not_zero      = not_equal,
   sign          = negative,
-  not_sign      = positive
+  not_sign      = positive,
+  last_condition = greater
 };
 
 
@@ -284,7 +289,6 @@ inline Hint NegateHint(Hint hint) {
 class Immediate BASE_EMBEDDED {
  public:
   explicit Immediate(int32_t value) : value_(value) {}
-  inline explicit Immediate(Smi* value);
 
  private:
   int32_t value_;
@@ -372,6 +376,11 @@ class CpuFeatures : public AllStatic {
   static void Probe();
   // Check whether a feature is supported by the target CPU.
   static bool IsSupported(Feature f) {
+    if (f == SSE2 && !FLAG_enable_sse2) return false;
+    if (f == SSE3 && !FLAG_enable_sse3) return false;
+    if (f == CMOV && !FLAG_enable_cmov) return false;
+    if (f == RDTSC && !FLAG_enable_rdtsc) return false;
+    if (f == SAHF && !FLAG_enable_sahf) return false;
     return (supported_ & (V8_UINT64_C(1) << f)) != 0;
   }
   // Check whether a feature is currently enabled.
@@ -440,18 +449,26 @@ class Assembler : public Malloced {
   // Assembler functions are invoked in between GetCode() calls.
   void GetCode(CodeDesc* desc);
 
-  // Read/Modify the code target in the branch/call instruction at pc.
-  // On the x64 architecture, the address is absolute, not relative.
+  // Read/Modify the code target in the relative branch/call instruction at pc.
+  // On the x64 architecture, we use relative jumps with a 32-bit displacement
+  // to jump to other Code objects in the Code space in the heap.
+  // Jumps to C functions are done indirectly through a 64-bit register holding
+  // the absolute address of the target.
+  // These functions convert between absolute Addresses of Code objects and
+  // the relative displacements stored in the code.
   static inline Address target_address_at(Address pc);
   static inline void set_target_address_at(Address pc, Address target);
-
+  inline Handle<Object> code_target_object_handle_at(Address pc);
   // Distance between the address of the code target in the call instruction
-  // and the return address.  Checked in the debug build.
-  static const int kCallTargetAddressOffset = 3 + kPointerSize;
-  // Distance between start of patched return sequence and the emitted address
-  // to jump to (movq = REX.W 0xB8+r.).
-  static const int kPatchReturnSequenceAddressOffset = 2;
-
+  // and the return address pushed on the stack.
+  static const int kCallTargetAddressOffset = 4;  // Use 32-bit displacement.
+  // Distance between the start of the JS return sequence and where the
+  // 32-bit displacement of a near call would be, relative to the pushed
+  // return address.  TODO: Use return sequence length instead.
+  // Should equal Debug::kX64JSReturnSequenceLength - kCallTargetAddressOffset;
+  static const int kPatchReturnSequenceAddressOffset = 13 - 4;
+  // TODO(X64): Rename this, removing the "Real", after changing the above.
+  static const int kRealPatchReturnSequenceAddressOffset = 2;
   // ---------------------------------------------------------------------------
   // Code generation
   //
@@ -687,10 +704,21 @@ class Assembler : public Malloced {
     immediate_arithmetic_op(0x4, dst, src);
   }
 
+  void andl(Register dst, Immediate src) {
+    immediate_arithmetic_op_32(0x4, dst, src);
+  }
+
+  void andl(Register dst, Register src) {
+    arithmetic_op_32(0x23, dst, src);
+  }
+
+
   void decq(Register dst);
   void decq(const Operand& dst);
   void decl(Register dst);
   void decl(const Operand& dst);
+  void decb(Register dst);
+  void decb(const Operand& dst);
 
   // Sign-extends rax into rdx:rax.
   void cqo();
@@ -746,12 +774,34 @@ class Assembler : public Malloced {
     immediate_arithmetic_op(0x1, dst, src);
   }
 
+  void orl(Register dst, Immediate src) {
+    immediate_arithmetic_op_32(0x1, dst, src);
+  }
+
   void or_(const Operand& dst, Immediate src) {
     immediate_arithmetic_op(0x1, dst, src);
   }
 
+  void orl(const Operand& dst, Immediate src) {
+    immediate_arithmetic_op_32(0x1, dst, src);
+  }
 
-  void rcl(Register dst, uint8_t imm8);
+
+  void rcl(Register dst, Immediate imm8) {
+    shift(dst, imm8, 0x2);
+  }
+
+  void rol(Register dst, Immediate imm8) {
+    shift(dst, imm8, 0x0);
+  }
+
+  void rcr(Register dst, Immediate imm8) {
+    shift(dst, imm8, 0x3);
+  }
+
+  void ror(Register dst, Immediate imm8) {
+    shift(dst, imm8, 0x1);
+  }
 
   // Shifts dst:src left by cl bits, affecting only dst.
   void shld(Register dst, Register src);
@@ -852,6 +902,7 @@ class Assembler : public Malloced {
     immediate_arithmetic_op_8(0x5, dst, src);
   }
 
+  void testb(Register dst, Register src);
   void testb(Register reg, Immediate mask);
   void testb(const Operand& op, Immediate mask);
   void testl(Register dst, Register src);
@@ -890,6 +941,7 @@ class Assembler : public Malloced {
   void bts(const Operand& dst, Register src);
 
   // Miscellaneous
+  void clc();
   void cpuid();
   void hlt();
   void int3();
@@ -919,6 +971,7 @@ class Assembler : public Malloced {
   // Calls
   // Call near relative 32-bit displacement, relative to next instruction.
   void call(Label* L);
+  void call(Handle<Code> target, RelocInfo::Mode rmode);
 
   // Call near absolute indirect, address in register
   void call(Register adr);
@@ -928,7 +981,9 @@ class Assembler : public Malloced {
 
   // Jumps
   // Jump short or near relative.
+  // Use a 32-bit signed displacement.
   void jmp(Label* L);  // unconditional jump to L
+  void jmp(Handle<Code> target, RelocInfo::Mode rmode);
 
   // Jump near absolute indirect (r64)
   void jmp(Register adr);
@@ -938,6 +993,7 @@ class Assembler : public Malloced {
 
   // Conditional jumps
   void j(Condition cc, Label* L);
+  void j(Condition cc, Handle<Code> target, RelocInfo::Mode rmode);
 
   // Floating-point operations
   void fld(int i);
@@ -1043,14 +1099,6 @@ class Assembler : public Malloced {
   void RecordStatementPosition(int pos);
   void WriteRecordedPositions();
 
-  // Writes a doubleword of data in the code stream.
-  // Used for inline tables, e.g., jump-tables.
-  // void dd(uint32_t data);
-
-  // Writes a quadword of data in the code stream.
-  // Used for inline tables, e.g., jump-tables.
-  // void dd(uint64_t data, RelocInfo::Mode reloc_info);
-
   int pc_offset() const  { return pc_ - buffer_; }
   int current_statement_position() const { return current_statement_position_; }
   int current_position() const  { return current_position_; }
@@ -1092,9 +1140,9 @@ class Assembler : public Malloced {
 
   void emit(byte x) { *pc_++ = x; }
   inline void emitl(uint32_t x);
-  inline void emit(Handle<Object> handle);
   inline void emitq(uint64_t x, RelocInfo::Mode rmode);
   inline void emitw(uint16_t x);
+  inline void emit_code_target(Handle<Code> target, RelocInfo::Mode rmode);
   void emit(Immediate x) { emitl(x.value_); }
 
   // Emits a REX prefix that encodes a 64-bit operand size and
@@ -1272,6 +1320,7 @@ class Assembler : public Malloced {
   byte* pc_;  // the program counter; moves forward
   RelocInfoWriter reloc_info_writer;
 
+  List< Handle<Code> > code_targets_;
   // push-pop elimination
   byte* last_pc_;
 

@@ -34,18 +34,17 @@
 #include "arguments.h"
 #include "compiler.h"
 #include "cpu.h"
-#include "dateparser.h"
 #include "dateparser-inl.h"
 #include "debug.h"
 #include "execution.h"
 #include "jsregexp.h"
+#include "parser.h"
 #include "platform.h"
 #include "runtime.h"
 #include "scopeinfo.h"
-#include "v8threads.h"
 #include "smart-pointer.h"
-#include "parser.h"
 #include "stub-cache.h"
+#include "v8threads.h"
 
 namespace v8 {
 namespace internal {
@@ -522,7 +521,7 @@ static Object* Runtime_GetTemplateField(Arguments args) {
   RUNTIME_ASSERT(type ==  FUNCTION_TEMPLATE_INFO_TYPE ||
                  type ==  OBJECT_TEMPLATE_INFO_TYPE);
   RUNTIME_ASSERT(offset > 0);
-  if (type ==  FUNCTION_TEMPLATE_INFO_TYPE) {
+  if (type == FUNCTION_TEMPLATE_INFO_TYPE) {
     RUNTIME_ASSERT(offset < FunctionTemplateInfo::kSize);
   } else {
     RUNTIME_ASSERT(offset < ObjectTemplateInfo::kSize);
@@ -1206,6 +1205,14 @@ static Object* Runtime_FunctionIsAPIFunction(Arguments args) {
   // the API.
   return !f->shared()->function_data()->IsUndefined() ? Heap::true_value()
                                                       : Heap::false_value();
+}
+
+static Object* Runtime_FunctionIsBuiltin(Arguments args) {
+  NoHandleAllocation ha;
+  ASSERT(args.length() == 1);
+
+  CONVERT_CHECKED(JSFunction, f, args[0]);
+  return f->IsBuiltin() ? Heap::true_value() : Heap::false_value();
 }
 
 
@@ -2992,12 +2999,41 @@ static Object* Runtime_GetPropertyNamesFast(Arguments args) {
 
   HandleScope scope;
   Handle<JSObject> object(raw_object);
-  Handle<FixedArray> content = GetKeysInFixedArrayFor(object);
+  Handle<FixedArray> content = GetKeysInFixedArrayFor(object,
+                                                      INCLUDE_PROTOS);
 
   // Test again, since cache may have been built by preceding call.
   if (object->IsSimpleEnum()) return object->map();
 
   return *content;
+}
+
+
+static Object* Runtime_LocalKeys(Arguments args) {
+  ASSERT_EQ(args.length(), 1);
+  CONVERT_CHECKED(JSObject, raw_object, args[0]);
+  HandleScope scope;
+  Handle<JSObject> object(raw_object);
+  Handle<FixedArray> contents = GetKeysInFixedArrayFor(object,
+                                                       LOCAL_ONLY);
+  // Some fast paths through GetKeysInFixedArrayFor reuse a cached
+  // property array and since the result is mutable we have to create
+  // a fresh clone on each invocation.
+  int length = contents->length();
+  Handle<FixedArray> copy = Factory::NewFixedArray(length);
+  for (int i = 0; i < length; i++) {
+    Object* entry = contents->get(i);
+    if (entry->IsString()) {
+      copy->set(i, entry);
+    } else {
+      ASSERT(entry->IsNumber());
+      HandleScope scope;
+      Handle<Object> entry_handle(entry);
+      Handle<Object> entry_str = Factory::NumberToString(entry_handle);
+      copy->set(i, *entry_str);
+    }
+  }
+  return *Factory::NewJSArrayWithElements(copy);
 }
 
 
@@ -3215,8 +3251,8 @@ static Object* Runtime_URIEscape(Arguments args) {
       } else {
         escaped_length += 3;
       }
-      // We don't allow strings that are longer than Smi range.
-      if (!Smi::IsValid(escaped_length)) {
+      // We don't allow strings that are longer than a maximal length.
+      if (escaped_length > String::kMaxLength) {
         Top::context()->mark_out_of_memory();
         return Failure::OutOfMemoryException();
       }
@@ -3547,6 +3583,36 @@ static Object* Runtime_StringToUpperCase(Arguments args) {
   return ConvertCase<unibrow::ToUppercase>(args, &to_upper_mapping);
 }
 
+static inline bool IsTrimWhiteSpace(unibrow::uchar c) {
+  return unibrow::WhiteSpace::Is(c) || c == 0x200b;
+}
+
+static Object* Runtime_StringTrim(Arguments args) {
+  NoHandleAllocation ha;
+  ASSERT(args.length() == 3);
+
+  CONVERT_CHECKED(String, s, args[0]);
+  CONVERT_BOOLEAN_CHECKED(trimLeft, args[1]);
+  CONVERT_BOOLEAN_CHECKED(trimRight, args[2]);
+
+  s->TryFlattenIfNotFlat();
+  int length = s->length();
+
+  int left = 0;
+  if (trimLeft) {
+    while (left < length && IsTrimWhiteSpace(s->Get(left))) {
+      left++;
+    }
+  }
+
+  int right = length;
+  if (trimRight) {
+    while (right > left && IsTrimWhiteSpace(s->Get(right - 1))) {
+      right--;
+    }
+  }
+  return s->Slice(left, right);
+}
 
 bool Runtime::IsUpperCaseChar(uint16_t ch) {
   unibrow::uchar chars[unibrow::ToUppercase::kMaxWidth];
@@ -3562,27 +3628,7 @@ static Object* Runtime_NumberToString(Arguments args) {
   Object* number = args[0];
   RUNTIME_ASSERT(number->IsNumber());
 
-  Object* cached = Heap::GetNumberStringCache(number);
-  if (cached != Heap::undefined_value()) {
-    return cached;
-  }
-
-  char arr[100];
-  Vector<char> buffer(arr, ARRAY_SIZE(arr));
-  const char* str;
-  if (number->IsSmi()) {
-    int num = Smi::cast(number)->value();
-    str = IntToCString(num, buffer);
-  } else {
-    double num = HeapNumber::cast(number)->value();
-    str = DoubleToCString(num, buffer);
-  }
-  Object* result = Heap::AllocateStringFromAscii(CStrVector(str));
-
-  if (!result->IsFailure()) {
-    Heap::SetNumberStringCache(number, String::cast(result));
-  }
-  return result;
+  return Heap::NumberToString(number);
 }
 
 
@@ -3787,16 +3833,16 @@ static Object* Runtime_StringBuilderConcat(Arguments args) {
     } else if (elt->IsString()) {
       String* element = String::cast(elt);
       int element_length = element->length();
-      if (!Smi::IsValid(element_length + position)) {
-        Top::context()->mark_out_of_memory();
-        return Failure::OutOfMemoryException();
-      }
       position += element_length;
       if (ascii && !element->IsAsciiRepresentation()) {
         ascii = false;
       }
     } else {
       return Top::Throw(Heap::illegal_argument_symbol());
+    }
+    if (position > String::kMaxLength) {
+      Top::context()->mark_out_of_memory();
+      return Failure::OutOfMemoryException();
     }
   }
 
@@ -5516,7 +5562,7 @@ static Object* Runtime_GetArrayKeys(Arguments args) {
   if (array->elements()->IsDictionary()) {
     // Create an array and get all the keys into it, then remove all the
     // keys that are not integers in the range 0 to length-1.
-    Handle<FixedArray> keys = GetKeysInFixedArrayFor(array);
+    Handle<FixedArray> keys = GetKeysInFixedArrayFor(array, INCLUDE_PROTOS);
     int keys_length = keys->length();
     for (int i = 0; i < keys_length; i++) {
       Object* key = keys->get(i);
@@ -5738,55 +5784,51 @@ static Object* Runtime_DebugGetPropertyDetails(Arguments args) {
   int length = LocalPrototypeChainLength(*obj);
 
   // Try local lookup on each of the objects.
-  LookupResult result;
   Handle<JSObject> jsproto = obj;
   for (int i = 0; i < length; i++) {
+    LookupResult result;
     jsproto->LocalLookup(*name, &result);
     if (result.IsProperty()) {
-      break;
+      // LookupResult is not GC safe as it holds raw object pointers.
+      // GC can happen later in this code so put the required fields into
+      // local variables using handles when required for later use.
+      PropertyType result_type = result.type();
+      Handle<Object> result_callback_obj;
+      if (result_type == CALLBACKS) {
+        result_callback_obj = Handle<Object>(result.GetCallbackObject());
+      }
+      Smi* property_details = result.GetPropertyDetails().AsSmi();
+      // DebugLookupResultValue can cause GC so details from LookupResult needs
+      // to be copied to handles before this.
+      bool caught_exception = false;
+      Object* raw_value = DebugLookupResultValue(*obj, *name, &result,
+                                                 &caught_exception);
+      if (raw_value->IsFailure()) return raw_value;
+      Handle<Object> value(raw_value);
+
+      // If the callback object is a fixed array then it contains JavaScript
+      // getter and/or setter.
+      bool hasJavaScriptAccessors = result_type == CALLBACKS &&
+                                    result_callback_obj->IsFixedArray();
+      Handle<FixedArray> details =
+          Factory::NewFixedArray(hasJavaScriptAccessors ? 5 : 2);
+      details->set(0, *value);
+      details->set(1, property_details);
+      if (hasJavaScriptAccessors) {
+        details->set(2,
+                     caught_exception ? Heap::true_value()
+                                      : Heap::false_value());
+        details->set(3, FixedArray::cast(*result_callback_obj)->get(0));
+        details->set(4, FixedArray::cast(*result_callback_obj)->get(1));
+      }
+
+      return *Factory::NewJSArrayWithElements(details);
     }
     if (i < length - 1) {
       jsproto = Handle<JSObject>(JSObject::cast(jsproto->GetPrototype()));
     }
   }
 
-  if (result.IsProperty()) {
-    // LookupResult is not GC safe as all its members are raw object pointers.
-    // When calling DebugLookupResultValue GC can happen as this might invoke
-    // callbacks. After the call to DebugLookupResultValue the callback object
-    // in the LookupResult might still be needed. Put it into a handle for later
-    // use.
-    PropertyType result_type = result.type();
-    Handle<Object> result_callback_obj;
-    if (result_type == CALLBACKS) {
-      result_callback_obj = Handle<Object>(result.GetCallbackObject());
-    }
-
-    // Find the actual value. Don't use result after this call as it's content
-    // can be invalid.
-    bool caught_exception = false;
-    Object* value = DebugLookupResultValue(*obj, *name, &result,
-                                           &caught_exception);
-    if (value->IsFailure()) return value;
-    Handle<Object> value_handle(value);
-
-    // If the callback object is a fixed array then it contains JavaScript
-    // getter and/or setter.
-    bool hasJavaScriptAccessors = result_type == CALLBACKS &&
-                                  result_callback_obj->IsFixedArray();
-    Handle<FixedArray> details =
-        Factory::NewFixedArray(hasJavaScriptAccessors ? 5 : 2);
-    details->set(0, *value_handle);
-    details->set(1, result.GetPropertyDetails().AsSmi());
-    if (hasJavaScriptAccessors) {
-      details->set(2,
-                   caught_exception ? Heap::true_value() : Heap::false_value());
-      details->set(3, FixedArray::cast(result.GetCallbackObject())->get(0));
-      details->set(4, FixedArray::cast(result.GetCallbackObject())->get(1));
-    }
-
-    return *Factory::NewJSArrayWithElements(details);
-  }
   return Heap::undefined_value();
 }
 
@@ -6271,7 +6313,7 @@ static Handle<JSObject> MaterializeLocalScope(JavaScriptFrame* frame) {
     if (function_context->has_extension() &&
         !function_context->IsGlobalContext()) {
       Handle<JSObject> ext(JSObject::cast(function_context->extension()));
-      Handle<FixedArray> keys = GetKeysInFixedArrayFor(ext);
+      Handle<FixedArray> keys = GetKeysInFixedArrayFor(ext, INCLUDE_PROTOS);
       for (int i = 0; i < keys->length(); i++) {
         // Names of variables introduced by eval are strings.
         ASSERT(keys->get(i)->IsString());
@@ -6320,7 +6362,7 @@ static Handle<JSObject> MaterializeClosure(Handle<Context> context) {
   // be variables introduced by eval.
   if (context->has_extension()) {
     Handle<JSObject> ext(JSObject::cast(context->extension()));
-    Handle<FixedArray> keys = GetKeysInFixedArrayFor(ext);
+    Handle<FixedArray> keys = GetKeysInFixedArrayFor(ext, INCLUDE_PROTOS);
     for (int i = 0; i < keys->length(); i++) {
       // Names of variables introduced by eval are strings.
       ASSERT(keys->get(i)->IsString());
@@ -7127,7 +7169,7 @@ static Object* Runtime_DebugEvaluate(Arguments args) {
   // the function being debugged.
   // function(arguments,__source__) {return eval(__source__);}
   static const char* source_str =
-      "function(arguments,__source__){return eval(__source__);}";
+      "(function(arguments,__source__){return eval(__source__);})";
   static const int source_str_length = strlen(source_str);
   Handle<String> function_source =
       Factory::NewStringFromAscii(Vector<const char>(source_str,
