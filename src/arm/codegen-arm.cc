@@ -1122,22 +1122,20 @@ void CodeGenerator::Branch(bool if_true, JumpTarget* target) {
 
 void CodeGenerator::CheckStack() {
   VirtualFrame::SpilledScope spilled_scope;
-  if (FLAG_check_stack) {
-    Comment cmnt(masm_, "[ check stack");
-    __ LoadRoot(ip, Heap::kStackLimitRootIndex);
-    // Put the lr setup instruction in the delay slot.  kInstrSize is added to
-    // the implicit 8 byte offset that always applies to operations with pc and
-    // gives a return address 12 bytes down.
-    masm_->add(lr, pc, Operand(Assembler::kInstrSize));
-    masm_->cmp(sp, Operand(ip));
-    StackCheckStub stub;
-    // Call the stub if lower.
-    masm_->mov(pc,
-               Operand(reinterpret_cast<intptr_t>(stub.GetCode().location()),
-                       RelocInfo::CODE_TARGET),
-               LeaveCC,
-               lo);
-  }
+  Comment cmnt(masm_, "[ check stack");
+  __ LoadRoot(ip, Heap::kStackLimitRootIndex);
+  // Put the lr setup instruction in the delay slot.  kInstrSize is added to
+  // the implicit 8 byte offset that always applies to operations with pc and
+  // gives a return address 12 bytes down.
+  masm_->add(lr, pc, Operand(Assembler::kInstrSize));
+  masm_->cmp(sp, Operand(ip));
+  StackCheckStub stub;
+  // Call the stub if lower.
+  masm_->mov(pc,
+             Operand(reinterpret_cast<intptr_t>(stub.GetCode().location()),
+                     RelocInfo::CODE_TARGET),
+             LeaveCC,
+             lo);
 }
 
 
@@ -1172,9 +1170,9 @@ void CodeGenerator::VisitBlock(Block* node) {
 
 void CodeGenerator::DeclareGlobals(Handle<FixedArray> pairs) {
   VirtualFrame::SpilledScope spilled_scope;
+  frame_->EmitPush(cp);
   __ mov(r0, Operand(pairs));
   frame_->EmitPush(r0);
-  frame_->EmitPush(cp);
   __ mov(r0, Operand(Smi::FromInt(is_eval() ? 1 : 0)));
   frame_->EmitPush(r0);
   frame_->CallRuntime(Runtime::kDeclareGlobals, 3);
@@ -2255,12 +2253,10 @@ void CodeGenerator::InstantiateBoilerplate(Handle<JSFunction> boilerplate) {
   VirtualFrame::SpilledScope spilled_scope;
   ASSERT(boilerplate->IsBoilerplate());
 
-  // Push the boilerplate on the stack.
-  __ mov(r0, Operand(boilerplate));
-  frame_->EmitPush(r0);
-
   // Create a new closure.
   frame_->EmitPush(cp);
+  __ mov(r0, Operand(boilerplate));
+  frame_->EmitPush(r0);
   frame_->CallRuntime(Runtime::kNewClosure, 2);
   frame_->EmitPush(r0);
 }

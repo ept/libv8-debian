@@ -156,7 +156,7 @@ static Object* DeepCopyBoilerplate(JSObject* boilerplate) {
 
   // Deep copy local elements.
   // Pixel elements cannot be created using an object literal.
-  ASSERT(!copy->HasPixelElements());
+  ASSERT(!copy->HasPixelElements() && !copy->HasExternalArrayElements());
   switch (copy->GetElementsKind()) {
     case JSObject::FAST_ELEMENTS: {
       FixedArray* elements = FixedArray::cast(copy->elements());
@@ -577,8 +577,8 @@ static Object* Runtime_DeclareGlobals(Arguments args) {
   HandleScope scope;
   Handle<GlobalObject> global = Handle<GlobalObject>(Top::context()->global());
 
-  CONVERT_ARG_CHECKED(FixedArray, pairs, 0);
-  Handle<Context> context = args.at<Context>(1);
+  Handle<Context> context = args.at<Context>(0);
+  CONVERT_ARG_CHECKED(FixedArray, pairs, 1);
   bool is_eval = Smi::cast(args[2])->value() == 1;
 
   // Compute the property attributes. According to ECMA-262, section
@@ -3742,14 +3742,7 @@ static Object* Runtime_NumberMod(Arguments args) {
   CONVERT_DOUBLE_CHECKED(x, args[0]);
   CONVERT_DOUBLE_CHECKED(y, args[1]);
 
-#if defined WIN32 || defined _WIN64
-  // Workaround MS fmod bugs. ECMA-262 says:
-  // dividend is finite and divisor is an infinity => result equals dividend
-  // dividend is a zero and divisor is nonzero finite => result equals dividend
-  if (!(isfinite(x) && (!isfinite(y) && !isnan(y))) &&
-      !(x == 0 && (y != 0 && isfinite(y))))
-#endif
-  x = fmod(x, y);
+  x = modulo(x, y);
   // NewNumberFromDouble may return a Smi instead of a Number object
   return Heap::NewNumberFromDouble(x);
 }
@@ -4367,8 +4360,8 @@ static Object* Runtime_NewArgumentsFast(Arguments args) {
 static Object* Runtime_NewClosure(Arguments args) {
   HandleScope scope;
   ASSERT(args.length() == 2);
-  CONVERT_ARG_CHECKED(JSFunction, boilerplate, 0);
-  CONVERT_ARG_CHECKED(Context, context, 1);
+  CONVERT_ARG_CHECKED(Context, context, 0);
+  CONVERT_ARG_CHECKED(JSFunction, boilerplate, 1);
 
   Handle<JSFunction> result =
       Factory::NewFunctionFromBoilerplate(boilerplate, context);
@@ -5273,6 +5266,47 @@ class ArrayConcatVisitor {
 };
 
 
+template<class ExternalArrayClass, class ElementType>
+static uint32_t IterateExternalArrayElements(Handle<JSObject> receiver,
+                                             bool elements_are_ints,
+                                             bool elements_are_guaranteed_smis,
+                                             uint32_t range,
+                                             ArrayConcatVisitor* visitor) {
+  Handle<ExternalArrayClass> array(
+      ExternalArrayClass::cast(receiver->elements()));
+  uint32_t len = Min(static_cast<uint32_t>(array->length()), range);
+
+  if (visitor != NULL) {
+    if (elements_are_ints) {
+      if (elements_are_guaranteed_smis) {
+        for (uint32_t j = 0; j < len; j++) {
+          Handle<Smi> e(Smi::FromInt(static_cast<int>(array->get(j))));
+          visitor->visit(j, e);
+        }
+      } else {
+        for (uint32_t j = 0; j < len; j++) {
+          int64_t val = static_cast<int64_t>(array->get(j));
+          if (Smi::IsValid(static_cast<intptr_t>(val))) {
+            Handle<Smi> e(Smi::FromInt(static_cast<int>(val)));
+            visitor->visit(j, e);
+          } else {
+            Handle<Object> e(
+                Heap::AllocateHeapNumber(static_cast<ElementType>(val)));
+            visitor->visit(j, e);
+          }
+        }
+      }
+    } else {
+      for (uint32_t j = 0; j < len; j++) {
+        Handle<Object> e(Heap::AllocateHeapNumber(array->get(j)));
+        visitor->visit(j, e);
+      }
+    }
+  }
+
+  return len;
+}
+
 /**
  * A helper function that visits elements of a JSObject. Only elements
  * whose index between 0 and range (exclusive) are visited.
@@ -5320,6 +5354,48 @@ static uint32_t IterateElements(Handle<JSObject> receiver,
           visitor->visit(j, e);
         }
       }
+      break;
+    }
+    case JSObject::EXTERNAL_BYTE_ELEMENTS: {
+      num_of_elements =
+          IterateExternalArrayElements<ExternalByteArray, int8_t>(
+              receiver, true, true, range, visitor);
+      break;
+    }
+    case JSObject::EXTERNAL_UNSIGNED_BYTE_ELEMENTS: {
+      num_of_elements =
+          IterateExternalArrayElements<ExternalUnsignedByteArray, uint8_t>(
+              receiver, true, true, range, visitor);
+      break;
+    }
+    case JSObject::EXTERNAL_SHORT_ELEMENTS: {
+      num_of_elements =
+          IterateExternalArrayElements<ExternalShortArray, int16_t>(
+              receiver, true, true, range, visitor);
+      break;
+    }
+    case JSObject::EXTERNAL_UNSIGNED_SHORT_ELEMENTS: {
+      num_of_elements =
+          IterateExternalArrayElements<ExternalUnsignedShortArray, uint16_t>(
+              receiver, true, true, range, visitor);
+      break;
+    }
+    case JSObject::EXTERNAL_INT_ELEMENTS: {
+      num_of_elements =
+          IterateExternalArrayElements<ExternalIntArray, int32_t>(
+              receiver, true, false, range, visitor);
+      break;
+    }
+    case JSObject::EXTERNAL_UNSIGNED_INT_ELEMENTS: {
+      num_of_elements =
+          IterateExternalArrayElements<ExternalUnsignedIntArray, uint32_t>(
+              receiver, true, false, range, visitor);
+      break;
+    }
+    case JSObject::EXTERNAL_FLOAT_ELEMENTS: {
+      num_of_elements =
+          IterateExternalArrayElements<ExternalFloatArray, float>(
+              receiver, false, false, range, visitor);
       break;
     }
     case JSObject::DICTIONARY_ELEMENTS: {
@@ -7656,6 +7732,18 @@ static Object* Runtime_CollectStackTrace(Arguments args) {
   result->set_length(Smi::FromInt(cursor), SKIP_WRITE_BARRIER);
 
   return *result;
+}
+
+
+// Returns V8 version as a string.
+static Object* Runtime_GetV8Version(Arguments args) {
+  ASSERT_EQ(args.length(), 0);
+
+  NoHandleAllocation ha;
+
+  const char* version_string = v8::V8::GetVersion();
+
+  return Heap::AllocateStringFromAscii(CStrVector(version_string), NOT_TENURED);
 }
 
 

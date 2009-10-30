@@ -319,11 +319,17 @@ void MacroAssembler::CmpInstanceType(Register map, InstanceType type) {
 
 
 void MacroAssembler::FCmp() {
-  fucompp();
-  push(eax);
-  fnstsw_ax();
-  sahf();
-  pop(eax);
+  if (CpuFeatures::IsSupported(CpuFeatures::CMOV)) {
+    fucomip();
+    ffree(0);
+    fincstp();
+  } else {
+    fucompp();
+    push(eax);
+    fnstsw_ax();
+    sahf();
+    pop(eax);
+  }
 }
 
 
@@ -764,6 +770,24 @@ void MacroAssembler::UndoAllocationInNewSpace(Register object) {
   Check(below, "Undo allocation of non allocated memory");
 #endif
   mov(Operand::StaticVariable(new_space_allocation_top), object);
+}
+
+
+void MacroAssembler::AllocateHeapNumber(Register result,
+                                        Register scratch1,
+                                        Register scratch2,
+                                        Label* gc_required) {
+  // Allocate heap number in new space.
+  AllocateInNewSpace(HeapNumber::kSize,
+                     result,
+                     scratch1,
+                     scratch2,
+                     gc_required,
+                     TAG_OBJECT);
+
+  // Set the map.
+  mov(FieldOperand(result, HeapObject::kMapOffset),
+      Immediate(Factory::heap_number_map()));
 }
 
 

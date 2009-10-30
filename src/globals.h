@@ -170,6 +170,15 @@ const Address kFromSpaceZapValue = reinterpret_cast<Address>(0xbeefdad);
 #endif
 
 
+// Constants relevant to double precision floating point numbers.
+
+// Quiet NaNs have bits 51 to 62 set, possibly the sign bit, and no
+// other bits set.
+const uint64_t kQuietNaNMask = static_cast<uint64_t>(0xfff) << 51;
+// If looking only at the top 32 bits, the QNaN mask is bits 19 to 30.
+const uint32_t kQuietNaNHighBitsMask = 0xfff << (51 - 32);
+
+
 // -----------------------------------------------------------------------------
 // Forward declarations for frequently used classes
 // (sorted alphabetically)
@@ -239,6 +248,7 @@ class Variable;
 class VariableProxy;
 class RelocInfo;
 class Deserializer;
+class GenericDeserializer;  // TODO(erikcorry): Get rid of this.
 class MessageLocation;
 class ObjectGroup;
 class TickSample;
@@ -263,7 +273,9 @@ enum AllocationSpace {
   LO_SPACE,             // Promoted large objects.
 
   FIRST_SPACE = NEW_SPACE,
-  LAST_SPACE = LO_SPACE
+  LAST_SPACE = LO_SPACE,
+  FIRST_PAGED_SPACE = OLD_POINTER_SPACE,
+  LAST_PAGED_SPACE = CELL_SPACE
 };
 const int kSpaceTagSize = 3;
 const int kSpaceTagMask = (1 << kSpaceTagSize) - 1;

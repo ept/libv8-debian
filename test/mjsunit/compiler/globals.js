@@ -25,38 +25,31 @@
 // (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
 // OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
-#ifndef V8_LOCATION_H_
-#define V8_LOCATION_H_
+// Test references and assignments to global variables.
+var g = 0;
 
-#include "utils.h"
+// Test compilation of a global variable store.
+assertEquals(1, eval('g = 1'));
+// Test that the store worked.
+assertEquals(1, g);
 
-namespace v8 {
-namespace internal {
+// Test that patching the IC in the compiled code works.
+assertEquals(1, eval('g = 1'));
+assertEquals(1, g);
+assertEquals(1, eval('g = 1'));
+assertEquals(1, g);
 
-class Location BASE_EMBEDDED {
- public:
-  enum Type {
-    kUninitialized,
-    kEffect,
-    kValue
-  };
+// Test a second store.
+assertEquals("2", eval('g = "2"'));
+assertEquals("2", g);
 
-  static Location Uninitialized() { return Location(kUninitialized); }
-  static Location Effect() { return Location(kEffect); }
-  static Location Value() { return Location(kValue); }
+// Test a load.
+assertEquals("2", eval('g'));
 
-  bool is_effect() { return type_ == kEffect; }
-  bool is_value() { return type_ == kValue; }
+// Test that patching the IC in the compiled code works.
+assertEquals("2", eval('g'));
+assertEquals("2", eval('g'));
 
-  Type type() { return type_; }
-
- private:
-  explicit Location(Type type) : type_(type) {}
-
-  Type type_;
-};
-
-
-} }  // namespace v8::internal
-
-#endif  // V8_LOCATION_H_
+// Test a second load.
+g = 3;
+assertEquals(3, eval('g'));

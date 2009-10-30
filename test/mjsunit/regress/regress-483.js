@@ -25,38 +25,11 @@
 // (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
 // OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
-#ifndef V8_LOCATION_H_
-#define V8_LOCATION_H_
+function X() {
+  this.x = this.x.x;
+}
 
-#include "utils.h"
+X.prototype.x = {x:1}
 
-namespace v8 {
-namespace internal {
+new X()
 
-class Location BASE_EMBEDDED {
- public:
-  enum Type {
-    kUninitialized,
-    kEffect,
-    kValue
-  };
-
-  static Location Uninitialized() { return Location(kUninitialized); }
-  static Location Effect() { return Location(kEffect); }
-  static Location Value() { return Location(kValue); }
-
-  bool is_effect() { return type_ == kEffect; }
-  bool is_value() { return type_ == kValue; }
-
-  Type type() { return type_; }
-
- private:
-  explicit Location(Type type) : type_(type) {}
-
-  Type type_;
-};
-
-
-} }  // namespace v8::internal
-
-#endif  // V8_LOCATION_H_

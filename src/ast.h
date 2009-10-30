@@ -162,7 +162,7 @@ class Statement: public AstNode {
 
 class Expression: public AstNode {
  public:
-  Expression() : location_(Location::Temporary()) {}
+  Expression() : location_(Location::Uninitialized()) {}
 
   virtual Expression* AsExpression()  { return this; }
 
@@ -746,6 +746,8 @@ class ObjectLiteral: public MaterializedLiteral {
     Literal* key() { return key_; }
     Expression* value() { return value_; }
     Kind kind() { return kind_; }
+
+    bool IsCompileTimeValue();
 
    private:
     Literal* key_;
