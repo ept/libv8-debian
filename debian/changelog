@@ -1,3 +1,12 @@
+libv8 (2.0.3-1) unstable; urgency=low
+
+  * New upstream release
+  * restored jsmin.py, now it is DFSG compliant
+    + debian/copyright modified accordingly
+    + debian/repack.sh not needed anymore
+
+ -- Antonio Radici <antonio@dyne.org>  Mon, 07 Dec 2009 19:07:51 +0000
+
 libv8 (1.3.11+dfsg-2) unstable; urgency=low
 
   * debian/patches:
