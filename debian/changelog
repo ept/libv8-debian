@@ -11,6 +11,7 @@ libv8 (2.0.3-1) unstable; urgency=low
     + debian/rules: adapted to support the upstream SONAME
     + debian/libv8-0.symbols: removed, we will not maintain the symbols file
   * debian/patches: all patches refreshed against the latest upstream
+  * debian/patches/x86_64_code.patch: support for ia64
 
  -- Antonio Radici <antonio@dyne.org>  Mon, 07 Dec 2009 19:07:51 +0000
 
