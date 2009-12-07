@@ -3,7 +3,7 @@ http://code.google.com/p/v8/issues/detail?id=429
 
 --- a/tools/utils.py
 +++ b/tools/utils.py
-@@ -63,8 +63,10 @@
+@@ -65,8 +65,10 @@
    id = platform.machine()
    if id.startswith('arm'):
      return 'arm'
