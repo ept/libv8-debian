@@ -95,8 +95,8 @@ function GlobalParseInt(string, radix) {
     // they make parseInt on a string 1.4% slower (274ns vs 270ns).
     if (%_IsSmi(string)) return string;
     if (IS_NUMBER(string) &&
-        ((string < -0.01 && -1e9 < string) ||
-            (0.01 < string && string < 1e9))) {
+        ((0.01 < string && string < 1e9) ||
+            (-1e9 < string && string < -0.01))) {
       // Truncate number.
       return string | 0;
     }
@@ -196,10 +196,7 @@ $Object.prototype.constructor = $Object;
 
 // ECMA-262 - 15.2.4.2
 function ObjectToString() {
-  var c = %_ClassOf(this);
-  // Hide Arguments from the outside.
-  if (c === 'Arguments') c  = 'Object';
-  return "[object " + c + "]";
+  return "[object " + %_ClassOf(this) + "]";
 }
 
 
@@ -276,6 +273,13 @@ function ObjectLookupSetter(name) {
 }
 
 
+function ObjectKeys(obj) {
+  if ((!IS_OBJECT(obj) || IS_NULL_OR_UNDEFINED(obj)) && !IS_FUNCTION(obj))
+    throw MakeTypeError('object_keys_non_object', [obj]);
+  return %LocalKeys(obj);
+}
+
+
 %SetCode($Object, function(x) {
   if (%_IsConstructCall()) {
     if (x == null) return this;
@@ -303,6 +307,9 @@ function SetupObject() {
     "__lookupGetter__", ObjectLookupGetter,
     "__defineSetter__", ObjectDefineSetter,
     "__lookupSetter__", ObjectLookupSetter
+  ));
+  InstallFunctions($Object, DONT_ENUM, $Array(
+    "keys", ObjectKeys
   ));
 }
 
@@ -514,7 +521,7 @@ function FunctionSourceString(func) {
   }
 
   var source = %FunctionGetSourceCode(func);
-  if (!IS_STRING(source)) {
+  if (!IS_STRING(source) || %FunctionIsBuiltin(func)) {
     var name = %FunctionGetName(func);
     if (name) {
       // Mimic what KJS does.
@@ -524,12 +531,6 @@ function FunctionSourceString(func) {
     }
   }
 
-  // Censor occurrences of internal calls.  We do that for all
-  // functions and don't cache under the assumption that people rarly
-  // convert functions to strings.  Note that we (apparently) can't
-  // use regular expression literals in natives files.
-  var regexp = ORIGINAL_REGEXP("%(\\w+\\()", "gm");
-  if (source.match(regexp)) source = source.replace(regexp, "$1");
   var name = %FunctionGetName(func);
   return 'function ' + name + source;
 }

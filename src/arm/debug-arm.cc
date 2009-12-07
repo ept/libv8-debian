@@ -61,14 +61,14 @@ void BreakLocationIterator::SetDebugBreakAtReturn() {
 // Restore the JS frame exit code.
 void BreakLocationIterator::ClearDebugBreakAtReturn() {
   rinfo()->PatchCode(original_rinfo()->pc(),
-                     CodeGenerator::kJSReturnSequenceLength);
+                     Assembler::kJSReturnSequenceLength);
 }
 
 
 // A debug break in the exit code is identified by a call.
 bool Debug::IsDebugBreakAtReturn(RelocInfo* rinfo) {
   ASSERT(RelocInfo::IsJSReturn(rinfo->rmode()));
-  return rinfo->IsCallInstruction();
+  return rinfo->IsPatchedReturnSequence();
 }
 
 

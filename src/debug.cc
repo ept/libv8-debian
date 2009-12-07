@@ -108,12 +108,13 @@ void BreakLocationIterator::Next() {
     // current value of these.
     if (RelocInfo::IsPosition(rmode())) {
       if (RelocInfo::IsStatementPosition(rmode())) {
-        statement_position_ =
-            rinfo()->data() - debug_info_->shared()->start_position();
+        statement_position_ = static_cast<int>(
+            rinfo()->data() - debug_info_->shared()->start_position());
       }
       // Always update the position as we don't want that to be before the
       // statement position.
-      position_ = rinfo()->data() - debug_info_->shared()->start_position();
+      position_ = static_cast<int>(
+          rinfo()->data() - debug_info_->shared()->start_position());
       ASSERT(position_ >= 0);
       ASSERT(statement_position_ >= 0);
     }
@@ -182,7 +183,7 @@ void BreakLocationIterator::FindBreakLocationFromAddress(Address pc) {
     // Check if this break point is closer that what was previously found.
     if (this->pc() < pc && pc - this->pc() < distance) {
       closest_break_point = break_point();
-      distance = pc - this->pc();
+      distance = static_cast<int>(pc - this->pc());
       // Check whether we can't get any closer.
       if (distance == 0) break;
     }
@@ -1614,7 +1615,7 @@ void Debug::SetAfterBreakTarget(JavaScriptFrame* frame) {
     if (RelocInfo::IsJSReturn(it.rinfo()->rmode())) {
       at_js_return = (it.rinfo()->pc() ==
           addr - Assembler::kPatchReturnSequenceAddressOffset);
-      break_at_js_return_active = it.rinfo()->IsCallInstruction();
+      break_at_js_return_active = it.rinfo()->IsPatchedReturnSequence();
     }
     it.next();
   }
@@ -1677,22 +1678,6 @@ void Debug::ClearMirrorCache() {
 }
 
 
-// If an object given is an external string, check that the underlying
-// resource is accessible. For other kinds of objects, always return true.
-static bool IsExternalStringValid(Object* str) {
-  if (!str->IsString() || !StringShape(String::cast(str)).IsExternal()) {
-    return true;
-  }
-  if (String::cast(str)->IsAsciiRepresentation()) {
-    return ExternalAsciiString::cast(str)->resource() != NULL;
-  } else if (String::cast(str)->IsTwoByteRepresentation()) {
-    return ExternalTwoByteString::cast(str)->resource() != NULL;
-  } else {
-    return true;
-  }
-}
-
-
 void Debug::CreateScriptCache() {
   HandleScope scope;
 
@@ -1711,7 +1696,7 @@ void Debug::CreateScriptCache() {
   while (iterator.has_next()) {
     HeapObject* obj = iterator.next();
     ASSERT(obj != NULL);
-    if (obj->IsScript() && IsExternalStringValid(Script::cast(obj)->source())) {
+    if (obj->IsScript() && Script::cast(obj)->HasValidSource()) {
       script_cache_->Add(Handle<Script>(Script::cast(obj)));
       count++;
     }
@@ -1774,6 +1759,8 @@ bool Debugger::never_unload_debugger_ = false;
 v8::Debug::MessageHandler2 Debugger::message_handler_ = NULL;
 bool Debugger::debugger_unload_pending_ = false;
 v8::Debug::HostDispatchHandler Debugger::host_dispatch_handler_ = NULL;
+v8::Debug::DebugMessageDispatchHandler
+    Debugger::debug_message_dispatch_handler_ = NULL;
 int Debugger::host_dispatch_micros_ = 100 * 1000;
 DebuggerAgent* Debugger::agent_ = NULL;
 LockingCommandMessageQueue Debugger::command_queue_(kQueueInitialSize);
@@ -2228,20 +2215,30 @@ void Debugger::NotifyMessageHandler(v8::DebugEvent event,
     return;
   }
 
-  // Get the DebugCommandProcessor.
-  v8::Local<v8::Object> api_exec_state =
-      v8::Utils::ToLocal(Handle<JSObject>::cast(exec_state));
-  v8::Local<v8::String> fun_name =
-      v8::String::New("debugCommandProcessor");
-  v8::Local<v8::Function> fun =
-      v8::Function::Cast(*api_exec_state->Get(fun_name));
   v8::TryCatch try_catch;
-  v8::Local<v8::Object> cmd_processor =
-      v8::Object::Cast(*fun->Call(api_exec_state, 0, NULL));
-  if (try_catch.HasCaught()) {
-    PrintLn(try_catch.Exception());
-    return;
+
+  // DebugCommandProcessor goes here.
+  v8::Local<v8::Object> cmd_processor;
+  {
+    v8::Local<v8::Object> api_exec_state =
+        v8::Utils::ToLocal(Handle<JSObject>::cast(exec_state));
+    v8::Local<v8::String> fun_name =
+        v8::String::New("debugCommandProcessor");
+    v8::Local<v8::Function> fun =
+        v8::Function::Cast(*api_exec_state->Get(fun_name));
+
+    v8::Handle<v8::Boolean> running =
+        auto_continue ? v8::True() : v8::False();
+    static const int kArgc = 1;
+    v8::Handle<Value> argv[kArgc] = { running };
+    cmd_processor = v8::Object::Cast(*fun->Call(api_exec_state, kArgc, argv));
+    if (try_catch.HasCaught()) {
+      PrintLn(try_catch.Exception());
+      return;
+    }
   }
+
+  bool running = auto_continue;
 
   // Process requests from the debugger.
   while (true) {
@@ -2283,7 +2280,6 @@ void Debugger::NotifyMessageHandler(v8::DebugEvent event,
 
     // Get the response.
     v8::Local<v8::String> response;
-    bool running = false;
     if (!try_catch.HasCaught()) {
       // Get response string.
       if (!response_val->IsUndefined()) {
@@ -2326,7 +2322,7 @@ void Debugger::NotifyMessageHandler(v8::DebugEvent event,
     // Return from debug event processing if either the VM is put into the
     // runnning state (through a continue command) or auto continue is active
     // and there are no more commands queued.
-    if (running || (auto_continue && !HasCommands())) {
+    if (running && !HasCommands()) {
       return;
     }
   }
@@ -2405,6 +2401,12 @@ void Debugger::SetHostDispatchHandler(v8::Debug::HostDispatchHandler handler,
 }
 
 
+void Debugger::SetDebugMessageDispatchHandler(
+    v8::Debug::DebugMessageDispatchHandler handler) {
+  debug_message_dispatch_handler_ = handler;
+}
+
+
 // Calls the registered debug message handler. This callback is part of the
 // public API.
 void Debugger::InvokeMessageHandler(MessageImpl message) {
@@ -2434,6 +2436,10 @@ void Debugger::ProcessCommand(Vector<const uint16_t> command,
   // Set the debug command break flag to have the command processed.
   if (!Debug::InDebugger()) {
     StackGuard::DebugCommand();
+  }
+
+  if (Debugger::debug_message_dispatch_handler_ != NULL) {
+    Debugger::debug_message_dispatch_handler_();
   }
 }
 
@@ -2497,6 +2503,11 @@ void Debugger::StopAgent() {
   }
 }
 
+
+void Debugger::WaitForAgent() {
+  if (agent_ != NULL)
+    agent_->WaitUntilListening();
+}
 
 MessageImpl MessageImpl::NewEvent(DebugEvent event,
                                   bool running,

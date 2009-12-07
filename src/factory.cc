@@ -106,10 +106,10 @@ Handle<String> Factory::NewConsString(Handle<String> first,
 }
 
 
-Handle<String> Factory::NewStringSlice(Handle<String> str,
-                                       int begin,
-                                       int end) {
-  CALL_HEAP_FUNCTION(str->Slice(begin, end), String);
+Handle<String> Factory::NewSubString(Handle<String> str,
+                                     int begin,
+                                     int end) {
+  CALL_HEAP_FUNCTION(str->SubString(begin, end), String);
 }
 
 
@@ -189,7 +189,7 @@ Handle<Script> Factory::NewScript(Handle<String> source) {
   script->set_compilation_type(Smi::FromInt(Script::COMPILATION_TYPE_HOST));
   script->set_wrapper(*wrapper);
   script->set_line_ends(Heap::undefined_value());
-  script->set_eval_from_function(Heap::undefined_value());
+  script->set_eval_from_shared(Heap::undefined_value());
   script->set_eval_from_instructions_offset(Smi::FromInt(0));
 
   return script;
@@ -219,6 +219,18 @@ Handle<PixelArray> Factory::NewPixelArray(int length,
   CALL_HEAP_FUNCTION(Heap::AllocatePixelArray(length,
                                               external_pointer,
                                               pretenure), PixelArray);
+}
+
+
+Handle<ExternalArray> Factory::NewExternalArray(int length,
+                                                ExternalArrayType array_type,
+                                                void* external_pointer,
+                                                PretenureFlag pretenure) {
+  ASSERT(0 <= length);
+  CALL_HEAP_FUNCTION(Heap::AllocateExternalArray(length,
+                                                 array_type,
+                                                 external_pointer,
+                                                 pretenure), ExternalArray);
 }
 
 
@@ -477,7 +489,6 @@ Handle<JSFunction> Factory::NewFunction(Handle<String> name,
 
 Handle<JSFunction> Factory::NewFunctionBoilerplate(Handle<String> name,
                                                    int number_of_literals,
-                                                   bool contains_array_literal,
                                                    Handle<Code> code) {
   Handle<JSFunction> function = NewFunctionBoilerplate(name);
   function->set_code(*code);
@@ -485,7 +496,7 @@ Handle<JSFunction> Factory::NewFunctionBoilerplate(Handle<String> name,
   // If the function contains object, regexp or array literals,
   // allocate extra space for a literals array prefix containing the
   // object, regexp and array constructor functions.
-  if (number_of_literals > 0 || contains_array_literal) {
+  if (number_of_literals > 0) {
     literals_array_size += JSFunction::kLiteralsPrefixSize;
   }
   Handle<FixedArray> literals =
@@ -670,6 +681,11 @@ Handle<JSArray> Factory::NewJSArrayWithElements(Handle<FixedArray> elements,
 Handle<SharedFunctionInfo> Factory::NewSharedFunctionInfo(Handle<String> name) {
   CALL_HEAP_FUNCTION(Heap::AllocateSharedFunctionInfo(*name),
                      SharedFunctionInfo);
+}
+
+
+Handle<String> Factory::NumberToString(Handle<Object> number) {
+  CALL_HEAP_FUNCTION(Heap::NumberToString(*number), String);
 }
 
 

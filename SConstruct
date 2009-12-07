@@ -149,6 +149,11 @@ LIBRARY_FLAGS = {
       'LIBPATH' : ['/usr/local/lib'],
       'CCFLAGS':      ['-ansi'],
     },
+    'os:openbsd': {
+      'CPPPATH' : ['/usr/local/include'],
+      'LIBPATH' : ['/usr/local/lib'],
+      'CCFLAGS':      ['-ansi'],
+    },
     'os:win32': {
       'CCFLAGS':      ['-DWIN32'],
       'CXXFLAGS':     ['-DWIN32'],
@@ -273,7 +278,7 @@ V8_EXTRA_FLAGS = {
       'WARNINGFLAGS': ['/W3']
     },
     'arch:x64': {
-      'WARNINGFLAGS': ['/W2']
+      'WARNINGFLAGS': ['/W3']
     },
     'arch:arm': {
       'CPPDEFINES':   ['V8_TARGET_ARCH_ARM'],
@@ -297,6 +302,9 @@ MKSNAPSHOT_EXTRA_FLAGS = {
       'LIBS': ['pthread'],
     },
     'os:freebsd': {
+      'LIBS': ['execinfo', 'pthread']
+    },
+    'os:openbsd': {
       'LIBS': ['execinfo', 'pthread']
     },
     'os:win32': {
@@ -345,6 +353,9 @@ CCTEST_EXTRA_FLAGS = {
     'os:freebsd': {
       'LIBS':         ['execinfo', 'pthread']
     },
+    'os:openbsd': {
+      'LIBS':         ['execinfo', 'pthread']
+    },
     'os:win32': {
       'LIBS': ['winmm', 'ws2_32']
     },
@@ -373,7 +384,8 @@ CCTEST_EXTRA_FLAGS = {
       'CPPDEFINES': ['V8_TARGET_ARCH_IA32']
     },
     'arch:x64': {
-      'CPPDEFINES':   ['V8_TARGET_ARCH_X64']
+      'CPPDEFINES':   ['V8_TARGET_ARCH_X64'],
+      'LINKFLAGS': ['/STACK:2091752']
     },
   }
 }
@@ -397,7 +409,11 @@ SAMPLE_FLAGS = {
     },
     'os:freebsd': {
       'LIBPATH' : ['/usr/local/lib'],
-      'LIBS':         ['execinfo', 'pthread']
+      'LIBS':     ['execinfo', 'pthread']
+    },
+    'os:openbsd': {
+      'LIBPATH' : ['/usr/local/lib'],
+      'LIBS':     ['execinfo', 'pthread']
     },
     'os:win32': {
       'LIBS':         ['winmm', 'ws2_32']
@@ -474,7 +490,7 @@ SAMPLE_FLAGS = {
     },
     'arch:x64': {
       'CPPDEFINES': ['V8_TARGET_ARCH_X64'],
-      'LINKFLAGS': ['/MACHINE:X64']
+      'LINKFLAGS': ['/MACHINE:X64', '/STACK:2091752']
     },
     'mode:debug': {
       'CCFLAGS':   ['/Od'],
@@ -502,6 +518,9 @@ D8_FLAGS = {
       'LIBS': ['pthread'],
     },
     'os:freebsd': {
+      'LIBS': ['pthread'],
+    },
+    'os:openbsd': {
       'LIBS': ['pthread'],
     },
     'os:android': {
@@ -554,7 +573,7 @@ SIMPLE_OPTIONS = {
     'help': 'the toolchain to use (' + TOOLCHAIN_GUESS + ')'
   },
   'os': {
-    'values': ['freebsd', 'linux', 'macos', 'win32', 'android'],
+    'values': ['freebsd', 'linux', 'macos', 'win32', 'android', 'openbsd'],
     'default': OS_GUESS,
     'help': 'the os to build for (' + OS_GUESS + ')'
   },

@@ -39,10 +39,7 @@ namespace internal {
 
 bool Debug::IsDebugBreakAtReturn(v8::internal::RelocInfo* rinfo) {
   ASSERT(RelocInfo::IsJSReturn(rinfo->rmode()));
-  // 11th byte of patch is 0x49 (REX.WB byte of computed jump/call to r10),
-  // 11th byte of JS return is 0xCC (int3).
-  ASSERT(*(rinfo->pc() + 10) == 0x49 || *(rinfo->pc() + 10) == 0xCC);
-  return (*(rinfo->pc() + 10) != 0xCC);
+  return rinfo->IsPatchedReturnSequence();
 }
 
 #define __ ACCESS_MASM(masm)
@@ -184,7 +181,7 @@ void Debug::GenerateStubNoRegistersDebugBreak(MacroAssembler* masm) {
 
 void BreakLocationIterator::ClearDebugBreakAtReturn() {
   rinfo()->PatchCode(original_rinfo()->pc(),
-                     Debug::kX64JSReturnSequenceLength);
+                     Assembler::kJSReturnSequenceLength);
 }
 
 
@@ -194,9 +191,10 @@ bool BreakLocationIterator::IsDebugBreakAtReturn()  {
 
 
 void BreakLocationIterator::SetDebugBreakAtReturn()  {
-  ASSERT(Debug::kX64JSReturnSequenceLength >= Debug::kX64CallInstructionLength);
+  ASSERT(Assembler::kJSReturnSequenceLength >=
+         Assembler::kCallInstructionLength);
   rinfo()->PatchCodeWithCall(Debug::debug_break_return()->entry(),
-      Debug::kX64JSReturnSequenceLength - Debug::kX64CallInstructionLength);
+      Assembler::kJSReturnSequenceLength - Assembler::kCallInstructionLength);
 }
 
 #endif  // ENABLE_DEBUGGER_SUPPORT

@@ -77,7 +77,8 @@ function SparseJoin(array, len, convert) {
     var key = keys[i];
     if (key != last_key) {
       var e = array[key];
-      builder.add(convert(e));
+      if (typeof(e) !== 'string') e = convert(e);
+      builder.add(e);
       last_key = key;
     }
   }
@@ -114,17 +115,36 @@ function Join(array, length, separator, convert) {
     if (length == 1) {
       var e = array[0];
       if (!IS_UNDEFINED(e) || (0 in array)) {
+        if (typeof(e) === 'string') return e;
         return convert(e);
       }
     }
 
     var builder = new StringBuilder();
 
-    for (var i = 0; i < length; i++) {
-      var e = array[i];
-      if (i != 0) builder.add(separator);
-      if (!IS_UNDEFINED(e) || (i in array)) {
-        builder.add(convert(e));
+    // We pull the empty separator check outside the loop for speed!
+    if (separator.length == 0) {
+      for (var i = 0; i < length; i++) {
+        var e = array[i];
+        if (!IS_UNDEFINED(e) || (i in array)) {
+          if (typeof(e) !== 'string') e = convert(e);
+          if (e.length > 0) {
+            var elements = builder.elements;
+            elements[elements.length] = e;
+          }
+        }
+      }
+    } else {
+      for (var i = 0; i < length; i++) {
+        var e = array[i];
+        if (i != 0) builder.add(separator);
+        if (!IS_UNDEFINED(e) || (i in array)) {
+          if (typeof(e) !== 'string') e = convert(e);
+          if (e.length > 0) {
+            var elements = builder.elements;
+            elements[elements.length] = e;
+          }
+        }
       }
     }
     return builder.generate();
@@ -136,12 +156,14 @@ function Join(array, length, separator, convert) {
 
 
 function ConvertToString(e) {
+  if (typeof(e) === 'string') return e;
   if (e == null) return '';
   else return ToString(e);
 }
 
 
 function ConvertToLocaleString(e) {
+  if (typeof(e) === 'string') return e;
   if (e == null) return '';
   else {
     // e_obj's toLocaleString might be overwritten, check if it is a function.
@@ -149,7 +171,7 @@ function ConvertToLocaleString(e) {
     // See issue 877615.
     var e_obj = ToObject(e);
     if (IS_FUNCTION(e_obj.toLocaleString))
-      return e_obj.toLocaleString();
+      return ToString(e_obj.toLocaleString());
     else
       return ToString(e);
   }
@@ -709,6 +731,8 @@ function ArraySort(comparefn) {
     QuickSort(a, high_start, to);
   }
 
+  var length;
+
   // Copies elements in the range 0..length from obj's prototype chain
   // to obj itself, if obj has holes. Returns one more than the maximal index
   // of a prototype property.
@@ -826,7 +850,7 @@ function ArraySort(comparefn) {
     return first_undefined;
   }
 
-  var length = ToUint32(this.length);
+  length = ToUint32(this.length);
   if (length < 2) return this;
 
   var is_array = IS_ARRAY(this);
@@ -1056,6 +1080,10 @@ function ArrayReduceRight(callback, current) {
   return current;
 }
 
+// ES5, 15.4.3.2
+function ArrayIsArray(obj) {
+  return IS_ARRAY(obj);
+}
 
 // -------------------------------------------------------------------
 
@@ -1072,6 +1100,11 @@ function SetupArray() {
   // Setup non-enumerable constructor property on the Array.prototype
   // object.
   %SetProperty($Array.prototype, "constructor", $Array, DONT_ENUM);
+
+  // Setup non-enumerable functions on the Array object.
+  InstallFunctions($Array, DONT_ENUM, $Array(
+    "isArray", ArrayIsArray
+  ));
 
   // Setup non-enumerable functions of the Array.prototype object and
   // set their names.
@@ -1096,8 +1129,9 @@ function SetupArray() {
     "indexOf", ArrayIndexOf,
     "lastIndexOf", ArrayLastIndexOf,
     "reduce", ArrayReduce,
-    "reduceRight", ArrayReduceRight));
-
+    "reduceRight", ArrayReduceRight
+  ));
+    
   // Manipulate the length of some of the functions to meet
   // expectations set by ECMA-262 or Mozilla.
   UpdateFunctionLengths({

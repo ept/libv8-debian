@@ -28,6 +28,7 @@
 #include "v8.h"
 
 #include "api.h"
+#include "arguments.h"
 #include "bootstrapper.h"
 #include "debug.h"
 #include "execution.h"
@@ -36,6 +37,7 @@
 #include "scanner.h"
 #include "scopeinfo.h"
 #include "string-stream.h"
+#include "utils.h"
 
 #ifdef ENABLE_DISASSEMBLER
 #include "disassembler.h"
@@ -158,14 +160,12 @@ Object* Object::GetPropertyWithCallback(Object* receiver,
     Object* fun_obj = data->getter();
     v8::AccessorGetter call_fun = v8::ToCData<v8::AccessorGetter>(fun_obj);
     HandleScope scope;
-    Handle<JSObject> self(JSObject::cast(receiver));
-    Handle<JSObject> holder_handle(JSObject::cast(holder));
+    JSObject* self = JSObject::cast(receiver);
+    JSObject* holder_handle = JSObject::cast(holder);
     Handle<String> key(name);
-    Handle<Object> fun_data(data->data());
-    LOG(ApiNamedPropertyAccess("load", *self, name));
-    v8::AccessorInfo info(v8::Utils::ToLocal(self),
-                          v8::Utils::ToLocal(fun_data),
-                          v8::Utils::ToLocal(holder_handle));
+    LOG(ApiNamedPropertyAccess("load", self, name));
+    CustomArguments args(data->data(), self, holder_handle);
+    v8::AccessorInfo info(args.end());
     v8::Handle<v8::Value> result;
     {
       // Leaving JavaScript.
@@ -476,6 +476,21 @@ Object* JSObject::DeleteNormalizedProperty(String* name, DeleteMode mode) {
 }
 
 
+bool JSObject::IsDirty() {
+  Object* cons_obj = map()->constructor();
+  if (!cons_obj->IsJSFunction())
+    return true;
+  JSFunction* fun = JSFunction::cast(cons_obj);
+  if (!fun->shared()->function_data()->IsFunctionTemplateInfo())
+    return true;
+  // If the object is fully fast case and has the same map it was
+  // created with then no changes can have been made to it.
+  return map() != fun->initial_map()
+      || !HasFastElements()
+      || !HasFastProperties();
+}
+
+
 Object* Object::GetProperty(Object* receiver,
                             LookupResult* result,
                             String* name,
@@ -604,12 +619,12 @@ void Smi::SmiPrint(StringStream* accumulator) {
 
 
 void Failure::FailurePrint(StringStream* accumulator) {
-  accumulator->Add("Failure(%d)", value());
+  accumulator->Add("Failure(%p)", reinterpret_cast<void*>(value()));
 }
 
 
 void Failure::FailurePrint() {
-  PrintF("Failure(%d)", value());
+  PrintF("Failure(%p)", reinterpret_cast<void*>(value()));
 }
 
 
@@ -669,23 +684,6 @@ Object* String::TryFlatten() {
 #endif
 
   switch (StringShape(this).representation_tag()) {
-    case kSlicedStringTag: {
-      SlicedString* ss = SlicedString::cast(this);
-      // The SlicedString constructor should ensure that there are no
-      // SlicedStrings that are constructed directly on top of other
-      // SlicedStrings.
-      String* buf = ss->buffer();
-      ASSERT(!buf->IsSlicedString());
-      Object* ok = buf->TryFlatten();
-      if (ok->IsFailure()) return ok;
-      // Under certain circumstances (TryFlattenIfNotFlat fails in
-      // String::Slice) we can have a cons string under a slice.
-      // In this case we need to get the flat string out of the cons!
-      if (StringShape(String::cast(ok)).IsCons()) {
-        ss->set_buffer(ConsString::cast(ok)->first());
-      }
-      return this;
-    }
     case kConsStringTag: {
       ConsString* cs = ConsString::cast(this);
       if (cs->second()->length() == 0) {
@@ -737,10 +735,11 @@ Object* String::TryFlatten() {
 
 bool String::MakeExternal(v8::String::ExternalStringResource* resource) {
 #ifdef DEBUG
-  {  // NOLINT (presubmit.py gets confused about if and braces)
+  if (FLAG_enable_slow_asserts) {
     // Assert that the resource and the string are equivalent.
     ASSERT(static_cast<size_t>(this->length()) == resource->length());
-    SmartPointer<uc16> smart_chars = this->ToWideCString();
+    SmartPointer<uc16> smart_chars(NewArray<uc16>(this->length()));
+    String::WriteToFlat(this, *smart_chars, 0, this->length());
     ASSERT(memcmp(*smart_chars,
                   resource->data(),
                   resource->length() * sizeof(**smart_chars)) == 0);
@@ -756,19 +755,21 @@ bool String::MakeExternal(v8::String::ExternalStringResource* resource) {
   ASSERT(size >= ExternalString::kSize);
   bool is_symbol = this->IsSymbol();
   int length = this->length();
+  int hash_field = this->hash_field();
 
   // Morph the object to an external string by adjusting the map and
   // reinitializing the fields.
-  this->set_map(ExternalTwoByteString::StringMap(length));
+  this->set_map(Heap::external_string_map());
   ExternalTwoByteString* self = ExternalTwoByteString::cast(this);
   self->set_length(length);
+  self->set_hash_field(hash_field);
   self->set_resource(resource);
   // Additionally make the object into an external symbol if the original string
   // was a symbol to start with.
   if (is_symbol) {
     self->Hash();  // Force regeneration of the hash value.
     // Now morph this external string into a external symbol.
-    self->set_map(ExternalTwoByteString::SymbolMap(length));
+    this->set_map(Heap::external_symbol_map());
   }
 
   // Fill the remainder of the string with dead wood.
@@ -780,10 +781,11 @@ bool String::MakeExternal(v8::String::ExternalStringResource* resource) {
 
 bool String::MakeExternal(v8::String::ExternalAsciiStringResource* resource) {
 #ifdef DEBUG
-  {  // NOLINT (presubmit.py gets confused about if and braces)
+  if (FLAG_enable_slow_asserts) {
     // Assert that the resource and the string are equivalent.
     ASSERT(static_cast<size_t>(this->length()) == resource->length());
-    SmartPointer<char> smart_chars = this->ToCString();
+    SmartPointer<char> smart_chars(NewArray<char>(this->length()));
+    String::WriteToFlat(this, *smart_chars, 0, this->length());
     ASSERT(memcmp(*smart_chars,
                   resource->data(),
                   resource->length()*sizeof(**smart_chars)) == 0);
@@ -799,19 +801,21 @@ bool String::MakeExternal(v8::String::ExternalAsciiStringResource* resource) {
   ASSERT(size >= ExternalString::kSize);
   bool is_symbol = this->IsSymbol();
   int length = this->length();
+  int hash_field = this->hash_field();
 
   // Morph the object to an external string by adjusting the map and
   // reinitializing the fields.
-  this->set_map(ExternalAsciiString::StringMap(length));
+  this->set_map(Heap::external_ascii_string_map());
   ExternalAsciiString* self = ExternalAsciiString::cast(this);
   self->set_length(length);
+  self->set_hash_field(hash_field);
   self->set_resource(resource);
   // Additionally make the object into an external symbol if the original string
   // was a symbol to start with.
   if (is_symbol) {
     self->Hash();  // Force regeneration of the hash value.
     // Now morph this external string into a external symbol.
-    self->set_map(ExternalAsciiString::SymbolMap(length));
+    this->set_map(Heap::external_ascii_symbol_map());
   }
 
   // Fill the remainder of the string with dead wood.
@@ -823,7 +827,7 @@ bool String::MakeExternal(v8::String::ExternalAsciiStringResource* resource) {
 
 void String::StringShortPrint(StringStream* accumulator) {
   int len = length();
-  if (len > kMaxMediumStringSize) {
+  if (len > kMaxShortPrintLength) {
     accumulator->Add("<Very long string[%u]>", len);
     return;
   }
@@ -991,6 +995,34 @@ void HeapObject::HeapObjectShortPrint(StringStream* accumulator) {
     case PIXEL_ARRAY_TYPE:
       accumulator->Add("<PixelArray[%u]>", PixelArray::cast(this)->length());
       break;
+    case EXTERNAL_BYTE_ARRAY_TYPE:
+      accumulator->Add("<ExternalByteArray[%u]>",
+                       ExternalByteArray::cast(this)->length());
+      break;
+    case EXTERNAL_UNSIGNED_BYTE_ARRAY_TYPE:
+      accumulator->Add("<ExternalUnsignedByteArray[%u]>",
+                       ExternalUnsignedByteArray::cast(this)->length());
+      break;
+    case EXTERNAL_SHORT_ARRAY_TYPE:
+      accumulator->Add("<ExternalShortArray[%u]>",
+                       ExternalShortArray::cast(this)->length());
+      break;
+    case EXTERNAL_UNSIGNED_SHORT_ARRAY_TYPE:
+      accumulator->Add("<ExternalUnsignedShortArray[%u]>",
+                       ExternalUnsignedShortArray::cast(this)->length());
+      break;
+    case EXTERNAL_INT_ARRAY_TYPE:
+      accumulator->Add("<ExternalIntArray[%u]>",
+                       ExternalIntArray::cast(this)->length());
+      break;
+    case EXTERNAL_UNSIGNED_INT_ARRAY_TYPE:
+      accumulator->Add("<ExternalUnsignedIntArray[%u]>",
+                       ExternalUnsignedIntArray::cast(this)->length());
+      break;
+    case EXTERNAL_FLOAT_ARRAY_TYPE:
+      accumulator->Add("<ExternalFloatArray[%u]>",
+                       ExternalFloatArray::cast(this)->length());
+      break;
     case SHARED_FUNCTION_INFO_TYPE:
       accumulator->Add("<SharedFunctionInfo>");
       break;
@@ -1091,8 +1123,14 @@ void HeapObject::IterateBody(InstanceType type, int object_size,
       case kConsStringTag:
         reinterpret_cast<ConsString*>(this)->ConsStringIterateBody(v);
         break;
-      case kSlicedStringTag:
-        reinterpret_cast<SlicedString*>(this)->SlicedStringIterateBody(v);
+      case kExternalStringTag:
+        if ((type & kStringEncodingMask) == kAsciiStringTag) {
+          reinterpret_cast<ExternalAsciiString*>(this)->
+              ExternalAsciiStringIterateBody(v);
+        } else {
+          reinterpret_cast<ExternalTwoByteString*>(this)->
+              ExternalTwoByteStringIterateBody(v);
+        }
         break;
     }
     return;
@@ -1133,6 +1171,13 @@ void HeapObject::IterateBody(InstanceType type, int object_size,
     case FILLER_TYPE:
     case BYTE_ARRAY_TYPE:
     case PIXEL_ARRAY_TYPE:
+    case EXTERNAL_BYTE_ARRAY_TYPE:
+    case EXTERNAL_UNSIGNED_BYTE_ARRAY_TYPE:
+    case EXTERNAL_SHORT_ARRAY_TYPE:
+    case EXTERNAL_UNSIGNED_SHORT_ARRAY_TYPE:
+    case EXTERNAL_INT_ARRAY_TYPE:
+    case EXTERNAL_UNSIGNED_INT_ARRAY_TYPE:
+    case EXTERNAL_FLOAT_ARRAY_TYPE:
       break;
     case SHARED_FUNCTION_INFO_TYPE: {
       SharedFunctionInfo* shared = reinterpret_cast<SharedFunctionInfo*>(this);
@@ -1200,7 +1245,8 @@ String* JSObject::class_name() {
 
 String* JSObject::constructor_name() {
   if (IsJSFunction()) {
-    return Heap::function_class_symbol();
+    return JSFunction::cast(this)->IsBoilerplate() ?
+      Heap::function_class_symbol() : Heap::closure_symbol();
   }
   if (map()->constructor()->IsJSFunction()) {
     JSFunction* constructor = JSFunction::cast(map()->constructor());
@@ -1422,8 +1468,8 @@ Object* JSObject::SetPropertyPostInterceptor(String* name,
 
 
 Object* JSObject::ReplaceSlowProperty(String* name,
-                                       Object* value,
-                                       PropertyAttributes attributes) {
+                                      Object* value,
+                                      PropertyAttributes attributes) {
   StringDictionary* dictionary = property_dictionary();
   int old_index = dictionary->FindEntry(name);
   int new_enumeration_index = 0;  // 0 means "Use the next available index."
@@ -1436,6 +1482,7 @@ Object* JSObject::ReplaceSlowProperty(String* name,
   PropertyDetails new_details(attributes, NORMAL, new_enumeration_index);
   return SetNormalizedProperty(name, value, new_details);
 }
+
 
 Object* JSObject::ConvertDescriptorToFieldAndMapTransition(
     String* name,
@@ -1523,11 +1570,9 @@ Object* JSObject::SetPropertyWithInterceptor(String* name,
   Handle<Object> value_handle(value);
   Handle<InterceptorInfo> interceptor(GetNamedInterceptor());
   if (!interceptor->setter()->IsUndefined()) {
-    Handle<Object> data_handle(interceptor->data());
     LOG(ApiNamedPropertyAccess("interceptor-named-set", this, name));
-    v8::AccessorInfo info(v8::Utils::ToLocal(this_handle),
-                          v8::Utils::ToLocal(data_handle),
-                          v8::Utils::ToLocal(this_handle));
+    CustomArguments args(interceptor->data(), this, this);
+    v8::AccessorInfo info(args.end());
     v8::NamedPropertySetter setter =
         v8::ToCData<v8::NamedPropertySetter>(interceptor->setter());
     v8::Handle<v8::Value> result;
@@ -1590,14 +1635,10 @@ Object* JSObject::SetPropertyWithCallback(Object* structure,
     Object* call_obj = data->setter();
     v8::AccessorSetter call_fun = v8::ToCData<v8::AccessorSetter>(call_obj);
     if (call_fun == NULL) return value;
-    Handle<JSObject> self(this);
-    Handle<JSObject> holder_handle(JSObject::cast(holder));
     Handle<String> key(name);
-    Handle<Object> fun_data(data->data());
     LOG(ApiNamedPropertyAccess("store", this, name));
-    v8::AccessorInfo info(v8::Utils::ToLocal(self),
-                          v8::Utils::ToLocal(fun_data),
-                          v8::Utils::ToLocal(holder_handle));
+    CustomArguments args(data->data(), this, JSObject::cast(holder));
+    v8::AccessorInfo info(args.end());
     {
       // Leaving JavaScript.
       VMState state(EXTERNAL);
@@ -1834,6 +1875,14 @@ Object* JSObject::SetProperty(LookupResult* result,
   // interceptor calls.
   AssertNoContextChange ncc;
 
+  // Optimization for 2-byte strings often used as keys in a decompression
+  // dictionary.  We make these short keys into symbols to avoid constantly
+  // reallocating them.
+  if (!name->IsSymbol() && name->length() <= 2) {
+    Object* symbol_version = Heap::LookupSymbol(name);
+    if (!symbol_version->IsFailure()) name = String::cast(symbol_version);
+  }
+
   // Check access rights if needed.
   if (IsAccessCheckNeeded()
       && !Top::MayNamedAccess(this, name, v8::ACCESS_SET)) {
@@ -2021,10 +2070,8 @@ PropertyAttributes JSObject::GetPropertyAttributeWithInterceptor(
   Handle<JSObject> receiver_handle(receiver);
   Handle<JSObject> holder_handle(this);
   Handle<String> name_handle(name);
-  Handle<Object> data_handle(interceptor->data());
-  v8::AccessorInfo info(v8::Utils::ToLocal(receiver_handle),
-                        v8::Utils::ToLocal(data_handle),
-                        v8::Utils::ToLocal(holder_handle));
+  CustomArguments args(interceptor->data(), receiver, this);
+  v8::AccessorInfo info(args.end());
   if (!interceptor->query()->IsUndefined()) {
     v8::NamedPropertyQuery query =
         v8::ToCData<v8::NamedPropertyQuery>(interceptor->query());
@@ -2231,7 +2278,7 @@ Object* JSObject::TransformToFastProperties(int unused_property_fields) {
 
 
 Object* JSObject::NormalizeElements() {
-  ASSERT(!HasPixelElements());
+  ASSERT(!HasPixelElements() && !HasExternalArrayElements());
   if (HasDictionaryElements()) return this;
 
   // Get number of entries.
@@ -2292,11 +2339,9 @@ Object* JSObject::DeletePropertyWithInterceptor(String* name) {
   if (!interceptor->deleter()->IsUndefined()) {
     v8::NamedPropertyDeleter deleter =
         v8::ToCData<v8::NamedPropertyDeleter>(interceptor->deleter());
-    Handle<Object> data_handle(interceptor->data());
     LOG(ApiNamedPropertyAccess("interceptor-named-delete", *this_handle, name));
-    v8::AccessorInfo info(v8::Utils::ToLocal(this_handle),
-                          v8::Utils::ToLocal(data_handle),
-                          v8::Utils::ToLocal(this_handle));
+    CustomArguments args(interceptor->data(), this, this);
+    v8::AccessorInfo info(args.end());
     v8::Handle<v8::Boolean> result;
     {
       // Leaving JavaScript.
@@ -2318,7 +2363,7 @@ Object* JSObject::DeletePropertyWithInterceptor(String* name) {
 
 Object* JSObject::DeleteElementPostInterceptor(uint32_t index,
                                                DeleteMode mode) {
-  ASSERT(!HasPixelElements());
+  ASSERT(!HasPixelElements() && !HasExternalArrayElements());
   switch (GetElementsKind()) {
     case FAST_ELEMENTS: {
       uint32_t length = IsJSArray() ?
@@ -2355,11 +2400,9 @@ Object* JSObject::DeleteElementWithInterceptor(uint32_t index) {
   v8::IndexedPropertyDeleter deleter =
       v8::ToCData<v8::IndexedPropertyDeleter>(interceptor->deleter());
   Handle<JSObject> this_handle(this);
-  Handle<Object> data_handle(interceptor->data());
   LOG(ApiIndexedPropertyAccess("interceptor-indexed-delete", this, index));
-  v8::AccessorInfo info(v8::Utils::ToLocal(this_handle),
-                        v8::Utils::ToLocal(data_handle),
-                        v8::Utils::ToLocal(this_handle));
+  CustomArguments args(interceptor->data(), this, this);
+  v8::AccessorInfo info(args.end());
   v8::Handle<v8::Boolean> result;
   {
     // Leaving JavaScript.
@@ -2411,10 +2454,17 @@ Object* JSObject::DeleteElement(uint32_t index, DeleteMode mode) {
       }
       break;
     }
-    case PIXEL_ELEMENTS: {
-      // Pixel elements cannot be deleted. Just silently ignore here.
+    case PIXEL_ELEMENTS:
+    case EXTERNAL_BYTE_ELEMENTS:
+    case EXTERNAL_UNSIGNED_BYTE_ELEMENTS:
+    case EXTERNAL_SHORT_ELEMENTS:
+    case EXTERNAL_UNSIGNED_SHORT_ELEMENTS:
+    case EXTERNAL_INT_ELEMENTS:
+    case EXTERNAL_UNSIGNED_INT_ELEMENTS:
+    case EXTERNAL_FLOAT_ELEMENTS:
+      // Pixel and external array elements cannot be deleted. Just
+      // silently ignore here.
       break;
-    }
     case DICTIONARY_ELEMENTS: {
       NumberDictionary* dictionary = element_dictionary();
       int entry = dictionary->FindEntry(index);
@@ -2505,7 +2555,15 @@ bool JSObject::ReferencesObject(Object* obj) {
   // Check if the object is among the indexed properties.
   switch (GetElementsKind()) {
     case PIXEL_ELEMENTS:
-      // Raw pixels do not reference other objects.
+    case EXTERNAL_BYTE_ELEMENTS:
+    case EXTERNAL_UNSIGNED_BYTE_ELEMENTS:
+    case EXTERNAL_SHORT_ELEMENTS:
+    case EXTERNAL_UNSIGNED_SHORT_ELEMENTS:
+    case EXTERNAL_INT_ELEMENTS:
+    case EXTERNAL_UNSIGNED_INT_ELEMENTS:
+    case EXTERNAL_FLOAT_ELEMENTS:
+      // Raw pixels and external arrays do not reference other
+      // objects.
       break;
     case FAST_ELEMENTS: {
       int length = IsJSArray() ?
@@ -2575,33 +2633,24 @@ bool JSObject::ReferencesObject(Object* obj) {
 
 
 // Tests for the fast common case for property enumeration:
-// - this object has an enum cache
-// - this object has no elements
-// - no prototype has enumerable properties/elements
-// - neither this object nor any prototype has interceptors
+// - This object and all prototypes has an enum cache (which means that it has
+//   no interceptors and needs no access checks).
+// - This object has no elements.
+// - No prototype has enumerable properties/elements.
 bool JSObject::IsSimpleEnum() {
-  JSObject* arguments_boilerplate =
-      Top::context()->global_context()->arguments_boilerplate();
-  JSFunction* arguments_function =
-      JSFunction::cast(arguments_boilerplate->map()->constructor());
-  if (IsAccessCheckNeeded()) return false;
-  if (map()->constructor() == arguments_function) return false;
-
   for (Object* o = this;
        o != Heap::null_value();
        o = JSObject::cast(o)->GetPrototype()) {
     JSObject* curr = JSObject::cast(o);
-    if (!curr->HasFastProperties()) return false;
     if (!curr->map()->instance_descriptors()->HasEnumCache()) return false;
+    ASSERT(!curr->HasNamedInterceptor());
+    ASSERT(!curr->HasIndexedInterceptor());
+    ASSERT(!curr->IsAccessCheckNeeded());
     if (curr->NumberOfEnumElements() > 0) return false;
-    if (curr->HasNamedInterceptor()) return false;
-    if (curr->HasIndexedInterceptor()) return false;
     if (curr != this) {
       FixedArray* curr_fixed_array =
           FixedArray::cast(curr->map()->instance_descriptors()->GetEnumCache());
-      if (curr_fixed_array->length() > 0) {
-        return false;
-      }
+      if (curr_fixed_array->length() > 0) return false;
     }
   }
   return true;
@@ -2750,7 +2799,15 @@ Object* JSObject::DefineGetterSetter(String* name,
       case FAST_ELEMENTS:
         break;
       case PIXEL_ELEMENTS:
-        // Ignore getters and setters on pixel elements.
+      case EXTERNAL_BYTE_ELEMENTS:
+      case EXTERNAL_UNSIGNED_BYTE_ELEMENTS:
+      case EXTERNAL_SHORT_ELEMENTS:
+      case EXTERNAL_UNSIGNED_SHORT_ELEMENTS:
+      case EXTERNAL_INT_ELEMENTS:
+      case EXTERNAL_UNSIGNED_INT_ELEMENTS:
+      case EXTERNAL_FLOAT_ELEMENTS:
+        // Ignore getters and setters on pixel and external array
+        // elements.
         return Heap::undefined_value();
       case DICTIONARY_ELEMENTS: {
         // Lookup the index.
@@ -3085,7 +3142,7 @@ static bool HasKey(FixedArray* array, Object* key) {
 
 
 Object* FixedArray::AddKeysFromJSArray(JSArray* array) {
-  ASSERT(!array->HasPixelElements());
+  ASSERT(!array->HasPixelElements() && !array->HasExternalArrayElements());
   switch (array->GetElementsKind()) {
     case JSObject::FAST_ELEMENTS:
       return UnionOfKeys(FixedArray::cast(array->elements()));
@@ -3499,12 +3556,7 @@ Vector<const char> String::ToAsciiVector() {
   int length = this->length();
   StringRepresentationTag string_tag = StringShape(this).representation_tag();
   String* string = this;
-  if (string_tag == kSlicedStringTag) {
-    SlicedString* sliced = SlicedString::cast(string);
-    offset += sliced->start();
-    string = sliced->buffer();
-    string_tag = StringShape(string).representation_tag();
-  } else if (string_tag == kConsStringTag) {
+  if (string_tag == kConsStringTag) {
     ConsString* cons = ConsString::cast(string);
     ASSERT(cons->second()->length() == 0);
     string = cons->first();
@@ -3530,12 +3582,7 @@ Vector<const uc16> String::ToUC16Vector() {
   int length = this->length();
   StringRepresentationTag string_tag = StringShape(this).representation_tag();
   String* string = this;
-  if (string_tag == kSlicedStringTag) {
-    SlicedString* sliced = SlicedString::cast(string);
-    offset += sliced->start();
-    string = String::cast(sliced->buffer());
-    string_tag = StringShape(string).representation_tag();
-  } else if (string_tag == kConsStringTag) {
+  if (string_tag == kConsStringTag) {
     ConsString* cons = ConsString::cast(string);
     ASSERT(cons->second()->length() == 0);
     string = cons->first();
@@ -3626,17 +3673,6 @@ const uc16* String::GetTwoByteData(unsigned start) {
     case kExternalStringTag:
       return ExternalTwoByteString::cast(this)->
         ExternalTwoByteStringGetData(start);
-    case kSlicedStringTag: {
-      SlicedString* sliced_string = SlicedString::cast(this);
-      String* buffer = sliced_string->buffer();
-      if (StringShape(buffer).IsCons()) {
-        ConsString* cs = ConsString::cast(buffer);
-        // Flattened string.
-        ASSERT(cs->second()->length() == 0);
-        buffer = cs->first();
-      }
-      return buffer->GetTwoByteData(start + sliced_string->start());
-    }
     case kConsStringTag:
       UNREACHABLE();
       return NULL;
@@ -3791,22 +3827,6 @@ const unibrow::byte* ConsString::ConsStringReadBlock(ReadBlockBuffer* rbb,
 }
 
 
-const unibrow::byte* SlicedString::SlicedStringReadBlock(ReadBlockBuffer* rbb,
-                                                         unsigned* offset_ptr,
-                                                         unsigned max_chars) {
-  String* backing = buffer();
-  unsigned offset = start() + *offset_ptr;
-  unsigned length = backing->length();
-  if (max_chars > length - offset) {
-    max_chars = length - offset;
-  }
-  const unibrow::byte* answer =
-      String::ReadBlock(backing, rbb, &offset, max_chars);
-  *offset_ptr = offset - start();
-  return answer;
-}
-
-
 uint16_t ExternalAsciiString::ExternalAsciiStringGet(int index) {
   ASSERT(index >= 0 && index < length());
   return resource()->data()[index];
@@ -3930,10 +3950,6 @@ const unibrow::byte* String::ReadBlock(String* input,
       return ConsString::cast(input)->ConsStringReadBlock(rbb,
                                                           offset_ptr,
                                                           max_chars);
-    case kSlicedStringTag:
-      return SlicedString::cast(input)->SlicedStringReadBlock(rbb,
-                                                              offset_ptr,
-                                                              max_chars);
     case kExternalStringTag:
       if (input->IsAsciiRepresentation()) {
         return ExternalAsciiString::cast(input)->ExternalAsciiStringReadBlock(
@@ -3956,35 +3972,75 @@ const unibrow::byte* String::ReadBlock(String* input,
 }
 
 
-FlatStringReader* FlatStringReader::top_ = NULL;
+Relocatable* Relocatable::top_ = NULL;
+
+
+void Relocatable::PostGarbageCollectionProcessing() {
+  Relocatable* current = top_;
+  while (current != NULL) {
+    current->PostGarbageCollection();
+    current = current->prev_;
+  }
+}
+
+
+// Reserve space for statics needing saving and restoring.
+int Relocatable::ArchiveSpacePerThread() {
+  return sizeof(top_);
+}
+
+
+// Archive statics that are thread local.
+char* Relocatable::ArchiveState(char* to) {
+  *reinterpret_cast<Relocatable**>(to) = top_;
+  top_ = NULL;
+  return to + ArchiveSpacePerThread();
+}
+
+
+// Restore statics that are thread local.
+char* Relocatable::RestoreState(char* from) {
+  top_ = *reinterpret_cast<Relocatable**>(from);
+  return from + ArchiveSpacePerThread();
+}
+
+
+char* Relocatable::Iterate(ObjectVisitor* v, char* thread_storage) {
+  Relocatable* top = *reinterpret_cast<Relocatable**>(thread_storage);
+  Iterate(v, top);
+  return thread_storage + ArchiveSpacePerThread();
+}
+
+
+void Relocatable::Iterate(ObjectVisitor* v) {
+  Iterate(v, top_);
+}
+
+
+void Relocatable::Iterate(ObjectVisitor* v, Relocatable* top) {
+  Relocatable* current = top;
+  while (current != NULL) {
+    current->IterateInstance(v);
+    current = current->prev_;
+  }
+}
 
 
 FlatStringReader::FlatStringReader(Handle<String> str)
     : str_(str.location()),
-      length_(str->length()),
-      prev_(top_) {
-  top_ = this;
-  RefreshState();
+      length_(str->length()) {
+  PostGarbageCollection();
 }
 
 
 FlatStringReader::FlatStringReader(Vector<const char> input)
-    : str_(NULL),
+    : str_(0),
       is_ascii_(true),
       length_(input.length()),
-      start_(input.start()),
-      prev_(top_) {
-  top_ = this;
-}
+      start_(input.start()) { }
 
 
-FlatStringReader::~FlatStringReader() {
-  ASSERT_EQ(top_, this);
-  top_ = prev_;
-}
-
-
-void FlatStringReader::RefreshState() {
+void FlatStringReader::PostGarbageCollection() {
   if (str_ == NULL) return;
   Handle<String> str(str_);
   ASSERT(str->IsFlat());
@@ -3993,15 +4049,6 @@ void FlatStringReader::RefreshState() {
     start_ = str->ToAsciiVector().start();
   } else {
     start_ = str->ToUC16Vector().start();
-  }
-}
-
-
-void FlatStringReader::PostGarbageCollectionProcessing() {
-  FlatStringReader* current = top_;
-  while (current != NULL) {
-    current->RefreshState();
-    current = current->prev_;
   }
 }
 
@@ -4045,20 +4092,15 @@ void String::ReadBlockIntoBuffer(String* input,
                                                              offset_ptr,
                                                              max_chars);
       return;
-    case kSlicedStringTag:
-      SlicedString::cast(input)->SlicedStringReadBlockIntoBuffer(rbb,
-                                                                 offset_ptr,
-                                                                 max_chars);
-      return;
     case kExternalStringTag:
       if (input->IsAsciiRepresentation()) {
-         ExternalAsciiString::cast(input)->
-             ExternalAsciiStringReadBlockIntoBuffer(rbb, offset_ptr, max_chars);
-       } else {
-         ExternalTwoByteString::cast(input)->
-             ExternalTwoByteStringReadBlockIntoBuffer(rbb,
-                                                      offset_ptr,
-                                                      max_chars);
+        ExternalAsciiString::cast(input)->
+            ExternalAsciiStringReadBlockIntoBuffer(rbb, offset_ptr, max_chars);
+      } else {
+        ExternalTwoByteString::cast(input)->
+            ExternalTwoByteStringReadBlockIntoBuffer(rbb,
+                                                     offset_ptr,
+                                                     max_chars);
        }
        return;
     default:
@@ -4164,20 +4206,6 @@ void ConsString::ConsStringReadBlockIntoBuffer(ReadBlockBuffer* rbb,
 }
 
 
-void SlicedString::SlicedStringReadBlockIntoBuffer(ReadBlockBuffer* rbb,
-                                                   unsigned* offset_ptr,
-                                                   unsigned max_chars) {
-  String* backing = buffer();
-  unsigned offset = start() + *offset_ptr;
-  unsigned length = backing->length();
-  if (max_chars > length - offset) {
-    max_chars = length - offset;
-  }
-  String::ReadBlockIntoBuffer(backing, rbb, &offset, max_chars);
-  *offset_ptr = offset - start();
-}
-
-
 void ConsString::ConsStringIterateBody(ObjectVisitor* v) {
   IteratePointers(v, kFirstOffset, kSecondOffset + kPointerSize);
 }
@@ -4256,15 +4284,6 @@ void String::WriteToFlat(String* src,
                   to - from);
         return;
       }
-      case kAsciiStringTag | kSlicedStringTag:
-      case kTwoByteStringTag | kSlicedStringTag: {
-        SlicedString* sliced_string = SlicedString::cast(source);
-        int start = sliced_string->start();
-        from += start;
-        to += start;
-        source = String::cast(sliced_string->buffer());
-        break;
-      }
       case kAsciiStringTag | kConsStringTag:
       case kTwoByteStringTag | kConsStringTag: {
         ConsString* cons_string = ConsString::cast(source);
@@ -4300,18 +4319,23 @@ void String::WriteToFlat(String* src,
 }
 
 
-void SlicedString::SlicedStringIterateBody(ObjectVisitor* v) {
-  IteratePointer(v, kBufferOffset);
+#define FIELD_ADDR(p, offset) \
+  (reinterpret_cast<byte*>(p) + offset - kHeapObjectTag)
+
+void ExternalAsciiString::ExternalAsciiStringIterateBody(ObjectVisitor* v) {
+  typedef v8::String::ExternalAsciiStringResource Resource;
+  v->VisitExternalAsciiString(
+      reinterpret_cast<Resource**>(FIELD_ADDR(this, kResourceOffset)));
 }
 
 
-uint16_t SlicedString::SlicedStringGet(int index) {
-  ASSERT(index >= 0 && index < this->length());
-  // Delegate to the buffer string.
-  String* underlying = buffer();
-  return underlying->Get(start() + index);
+void ExternalTwoByteString::ExternalTwoByteStringIterateBody(ObjectVisitor* v) {
+  typedef v8::String::ExternalStringResource Resource;
+  v->VisitExternalTwoByteString(
+      reinterpret_cast<Resource**>(FIELD_ADDR(this, kResourceOffset)));
 }
 
+#undef FIELD_ADDR
 
 template <typename IteratorA, typename IteratorB>
 static inline bool CompareStringContents(IteratorA* ia, IteratorB* ib) {
@@ -4456,23 +4480,11 @@ bool String::MarkAsUndetectable() {
   if (StringShape(this).IsSymbol()) return false;
 
   Map* map = this->map();
-  if (map == Heap::short_string_map()) {
-    this->set_map(Heap::undetectable_short_string_map());
+  if (map == Heap::string_map()) {
+    this->set_map(Heap::undetectable_string_map());
     return true;
-  } else if (map == Heap::medium_string_map()) {
-    this->set_map(Heap::undetectable_medium_string_map());
-    return true;
-  } else if (map == Heap::long_string_map()) {
-    this->set_map(Heap::undetectable_long_string_map());
-    return true;
-  } else if (map == Heap::short_ascii_string_map()) {
-    this->set_map(Heap::undetectable_short_ascii_string_map());
-    return true;
-  } else if (map == Heap::medium_ascii_string_map()) {
-    this->set_map(Heap::undetectable_medium_ascii_string_map());
-    return true;
-  } else if (map == Heap::long_ascii_string_map()) {
-    this->set_map(Heap::undetectable_long_ascii_string_map());
+  } else if (map == Heap::ascii_string_map()) {
+    this->set_map(Heap::undetectable_ascii_string_map());
     return true;
   }
   // Rest cannot be marked as undetectable
@@ -4495,17 +4507,17 @@ bool String::IsEqualTo(Vector<const char> str) {
 
 uint32_t String::ComputeAndSetHash() {
   // Should only be called if hash code has not yet been computed.
-  ASSERT(!(length_field() & kHashComputedMask));
+  ASSERT(!(hash_field() & kHashComputedMask));
 
   // Compute the hash code.
   StringInputBuffer buffer(this);
-  uint32_t field = ComputeLengthAndHashField(&buffer, length());
+  uint32_t field = ComputeHashField(&buffer, length());
 
   // Store the hash code in the object.
-  set_length_field(field);
+  set_hash_field(field);
 
   // Check the hash code is there.
-  ASSERT(length_field() & kHashComputedMask);
+  ASSERT(hash_field() & kHashComputedMask);
   uint32_t result = field >> kHashShift;
   ASSERT(result != 0);  // Ensure that the hash value of 0 is never computed.
   return result;
@@ -4545,9 +4557,10 @@ bool String::ComputeArrayIndex(unibrow::CharacterStream* buffer,
 bool String::SlowAsArrayIndex(uint32_t* index) {
   if (length() <= kMaxCachedArrayIndexLength) {
     Hash();  // force computation of hash code
-    uint32_t field = length_field();
+    uint32_t field = hash_field();
     if ((field & kIsArrayIndexMask) == 0) return false;
-    *index = (field & ((1 << kShortLengthShift) - 1)) >> kLongLengthShift;
+    // Isolate the array index form the full hash field.
+    *index = (kArrayIndexHashMask & field) >> kHashShift;
     return true;
   } else {
     StringInputBuffer buffer(this);
@@ -4556,37 +4569,42 @@ bool String::SlowAsArrayIndex(uint32_t* index) {
 }
 
 
-static inline uint32_t HashField(uint32_t hash, bool is_array_index) {
+static inline uint32_t HashField(uint32_t hash,
+                                 bool is_array_index,
+                                 int length = -1) {
   uint32_t result =
-      (hash << String::kLongLengthShift) | String::kHashComputedMask;
-  if (is_array_index) result |= String::kIsArrayIndexMask;
+      (hash << String::kHashShift) | String::kHashComputedMask;
+  if (is_array_index) {
+    // For array indexes mix the length into the hash as an array index could
+    // be zero.
+    ASSERT(length > 0);
+    ASSERT(TenToThe(String::kMaxCachedArrayIndexLength) <
+           (1 << String::kArrayIndexValueBits));
+    result |= String::kIsArrayIndexMask;
+    result |= length << String::kArrayIndexHashLengthShift;
+  }
   return result;
 }
 
 
 uint32_t StringHasher::GetHashField() {
   ASSERT(is_valid());
-  if (length_ <= String::kMaxShortStringSize) {
-    uint32_t payload;
+  if (length_ <= String::kMaxHashCalcLength) {
     if (is_array_index()) {
-      payload = v8::internal::HashField(array_index(), true);
+      return v8::internal::HashField(array_index(), true, length_);
     } else {
-      payload = v8::internal::HashField(GetHash(), false);
+      return v8::internal::HashField(GetHash(), false);
     }
-    return (payload & ((1 << String::kShortLengthShift) - 1)) |
-           (length_ << String::kShortLengthShift);
-  } else if (length_ <= String::kMaxMediumStringSize) {
     uint32_t payload = v8::internal::HashField(GetHash(), false);
-    return (payload & ((1 << String::kMediumLengthShift) - 1)) |
-           (length_ << String::kMediumLengthShift);
+    return payload;
   } else {
     return v8::internal::HashField(length_, false);
   }
 }
 
 
-uint32_t String::ComputeLengthAndHashField(unibrow::CharacterStream* buffer,
-                                           int length) {
+uint32_t String::ComputeHashField(unibrow::CharacterStream* buffer,
+                                  int length) {
   StringHasher hasher(length);
 
   // Very long strings have a trivial hash that doesn't inspect the
@@ -4611,43 +4629,10 @@ uint32_t String::ComputeLengthAndHashField(unibrow::CharacterStream* buffer,
 }
 
 
-Object* String::Slice(int start, int end) {
+Object* String::SubString(int start, int end) {
   if (start == 0 && end == length()) return this;
-  if (StringShape(this).representation_tag() == kSlicedStringTag) {
-    // Translate slices of a SlicedString into slices of the
-    // underlying string buffer.
-    SlicedString* str = SlicedString::cast(this);
-    String* buf = str->buffer();
-    return Heap::AllocateSlicedString(buf,
-                                      str->start() + start,
-                                      str->start() + end);
-  }
-  Object* result = Heap::AllocateSlicedString(this, start, end);
-  if (result->IsFailure()) {
-    return result;
-  }
-  // Due to the way we retry after GC on allocation failure we are not allowed
-  // to fail on allocation after this point.  This is the one-allocation rule.
-
-  // Try to flatten a cons string that is under the sliced string.
-  // This is to avoid memory leaks and possible stack overflows caused by
-  // building 'towers' of sliced strings on cons strings.
-  // This may fail due to an allocation failure (when a GC is needed), but it
-  // will succeed often enough to avoid the problem.  We only have to do this
-  // if Heap::AllocateSlicedString actually returned a SlicedString.  It will
-  // return flat strings for small slices for efficiency reasons.
-  String* answer = String::cast(result);
-  if (StringShape(answer).IsSliced() &&
-      StringShape(this).representation_tag() == kConsStringTag) {
-    TryFlatten();
-    // If the flatten succeeded we might as well make the sliced string point
-    // to the flat string rather than the cons string.
-    String* second = ConsString::cast(this)->second();
-    if (second->length() == 0) {
-      SlicedString::cast(answer)->set_buffer(ConsString::cast(this)->first());
-    }
-  }
-  return answer;
+  Object* result = Heap::AllocateSubString(this, start, end);
+  return result;
 }
 
 
@@ -4827,12 +4812,8 @@ int SharedFunctionInfo::CalculateInObjectProperties() {
 
 
 void SharedFunctionInfo::SetThisPropertyAssignmentsInfo(
-    bool only_this_property_assignments,
     bool only_simple_this_property_assignments,
     FixedArray* assignments) {
-  set_compiler_hints(BooleanBit::set(compiler_hints(),
-                                     kHasOnlyThisPropertyAssignments,
-                                     only_this_property_assignments));
   set_compiler_hints(BooleanBit::set(compiler_hints(),
                                      kHasOnlySimpleThisPropertyAssignments,
                                      only_simple_this_property_assignments));
@@ -4842,9 +4823,6 @@ void SharedFunctionInfo::SetThisPropertyAssignmentsInfo(
 
 
 void SharedFunctionInfo::ClearThisPropertyAssignmentsInfo() {
-  set_compiler_hints(BooleanBit::set(compiler_hints(),
-                                     kHasOnlyThisPropertyAssignments,
-                                     false));
   set_compiler_hints(BooleanBit::set(compiler_hints(),
                                      kHasOnlySimpleThisPropertyAssignments,
                                      false));
@@ -4900,7 +4878,7 @@ void SharedFunctionInfo::SourceCodePrint(StringStream* accumulator,
     return;
   }
 
-  // Get the slice of the source for this function.
+  // Get the source for the script which this function came from.
   // Don't use String::cast because we don't want more assertion errors while
   // we are already creating a stack dump.
   String* script_source =
@@ -4940,60 +4918,26 @@ void SharedFunctionInfo::SharedFunctionInfoIterateBody(ObjectVisitor* v) {
 }
 
 
-void ObjectVisitor::BeginCodeIteration(Code* code) {
-  ASSERT(code->ic_flag() == Code::IC_TARGET_IS_OBJECT);
-}
-
-
 void ObjectVisitor::VisitCodeTarget(RelocInfo* rinfo) {
   ASSERT(RelocInfo::IsCodeTarget(rinfo->rmode()));
-  VisitPointer(rinfo->target_object_address());
+  Object* target = Code::GetCodeFromTargetAddress(rinfo->target_address());
+  Object* old_target = target;
+  VisitPointer(&target);
+  CHECK_EQ(target, old_target);  // VisitPointer doesn't change Code* *target.
 }
 
 
 void ObjectVisitor::VisitDebugTarget(RelocInfo* rinfo) {
-  ASSERT(RelocInfo::IsJSReturn(rinfo->rmode()) && rinfo->IsCallInstruction());
-  VisitPointer(rinfo->call_object_address());
-}
-
-
-// Convert relocatable targets from address to code object address. This is
-// mainly IC call targets but for debugging straight-line code can be replaced
-// with a call instruction which also has to be relocated.
-void Code::ConvertICTargetsFromAddressToObject() {
-  ASSERT(ic_flag() == IC_TARGET_IS_ADDRESS);
-
-  for (RelocIterator it(this, RelocInfo::kCodeTargetMask);
-       !it.done(); it.next()) {
-    Address ic_addr = it.rinfo()->target_address();
-    ASSERT(ic_addr != NULL);
-    HeapObject* code = Code::GetCodeFromTargetAddress(ic_addr);
-    ASSERT(code->IsHeapObject());
-    it.rinfo()->set_target_object(code);
-  }
-
-#ifdef ENABLE_DEBUGGER_SUPPORT
-  if (Debug::has_break_points()) {
-    for (RelocIterator it(this, RelocInfo::ModeMask(RelocInfo::JS_RETURN));
-         !it.done();
-         it.next()) {
-      if (it.rinfo()->IsCallInstruction()) {
-        Address addr = it.rinfo()->call_address();
-        ASSERT(addr != NULL);
-        HeapObject* code = Code::GetCodeFromTargetAddress(addr);
-        ASSERT(code->IsHeapObject());
-        it.rinfo()->set_call_object(code);
-      }
-    }
-  }
-#endif
-  set_ic_flag(IC_TARGET_IS_OBJECT);
+  ASSERT(RelocInfo::IsJSReturn(rinfo->rmode()) &&
+         rinfo->IsPatchedReturnSequence());
+  Object* target = Code::GetCodeFromTargetAddress(rinfo->call_address());
+  Object* old_target = target;
+  VisitPointer(&target);
+  CHECK_EQ(target, old_target);  // VisitPointer doesn't change Code* *target.
 }
 
 
 void Code::CodeIterateBody(ObjectVisitor* v) {
-  v->BeginCodeIteration(this);
-
   int mode_mask = RelocInfo::kCodeTargetMask |
                   RelocInfo::ModeMask(RelocInfo::EMBEDDED_OBJECT) |
                   RelocInfo::ModeMask(RelocInfo::EXTERNAL_REFERENCE) |
@@ -5011,7 +4955,7 @@ void Code::CodeIterateBody(ObjectVisitor* v) {
 #ifdef ENABLE_DEBUGGER_SUPPORT
     } else if (Debug::has_break_points() &&
                RelocInfo::IsJSReturn(rmode) &&
-               it.rinfo()->IsCallInstruction()) {
+               it.rinfo()->IsPatchedReturnSequence()) {
       v->VisitDebugTarget(it.rinfo());
 #endif
     } else if (rmode == RelocInfo::RUNTIME_ENTRY) {
@@ -5020,42 +4964,10 @@ void Code::CodeIterateBody(ObjectVisitor* v) {
   }
 
   ScopeInfo<>::IterateScopeInfo(this, v);
-
-  v->EndCodeIteration(this);
 }
 
 
-void Code::ConvertICTargetsFromObjectToAddress() {
-  ASSERT(ic_flag() == IC_TARGET_IS_OBJECT);
-
-  for (RelocIterator it(this, RelocInfo::kCodeTargetMask);
-       !it.done(); it.next()) {
-    // We cannot use the safe cast (Code::cast) here, because we may be in
-    // the middle of relocating old objects during GC and the map pointer in
-    // the code object may be mangled
-    Code* code = reinterpret_cast<Code*>(it.rinfo()->target_object());
-    ASSERT((code != NULL) && code->IsHeapObject());
-    it.rinfo()->set_target_address(code->instruction_start());
-  }
-
-#ifdef ENABLE_DEBUGGER_SUPPORT
-  if (Debug::has_break_points()) {
-    for (RelocIterator it(this, RelocInfo::ModeMask(RelocInfo::JS_RETURN));
-         !it.done();
-         it.next()) {
-      if (it.rinfo()->IsCallInstruction()) {
-        Code* code = reinterpret_cast<Code*>(it.rinfo()->call_object());
-        ASSERT((code != NULL) && code->IsHeapObject());
-        it.rinfo()->set_call_address(code->instruction_start());
-      }
-    }
-  }
-#endif
-  set_ic_flag(IC_TARGET_IS_ADDRESS);
-}
-
-
-void Code::Relocate(int delta) {
+void Code::Relocate(intptr_t delta) {
   for (RelocIterator it(this, RelocInfo::kApplyMask); !it.done(); it.next()) {
     it.rinfo()->apply(delta);
   }
@@ -5081,19 +4993,20 @@ void Code::CopyFrom(const CodeDesc& desc) {
           desc.reloc_size);
 
   // unbox handles and relocate
-  int delta = instruction_start() - desc.buffer;
+  intptr_t delta = instruction_start() - desc.buffer;
   int mode_mask = RelocInfo::kCodeTargetMask |
                   RelocInfo::ModeMask(RelocInfo::EMBEDDED_OBJECT) |
                   RelocInfo::kApplyMask;
+  Assembler* origin = desc.origin;  // Needed to find target_object on X64.
   for (RelocIterator it(this, mode_mask); !it.done(); it.next()) {
     RelocInfo::Mode mode = it.rinfo()->rmode();
     if (mode == RelocInfo::EMBEDDED_OBJECT) {
-      Object** p = reinterpret_cast<Object**>(it.rinfo()->target_object());
+      Handle<Object> p = it.rinfo()->target_object_handle(origin);
       it.rinfo()->set_target_object(*p);
     } else if (RelocInfo::IsCodeTarget(mode)) {
       // rewrite code handles in inline cache targets to direct
       // pointers to the first instruction in the code object
-      Object** p = reinterpret_cast<Object**>(it.rinfo()->target_object());
+      Handle<Object> p = it.rinfo()->target_object_handle(origin);
       Code* code = Code::cast(*p);
       it.rinfo()->set_target_address(code->instruction_start());
     } else {
@@ -5120,8 +5033,9 @@ int Code::SourcePosition(Address pc) {
     // Only look at positions after the current pc.
     if (it.rinfo()->pc() < pc) {
       // Get position and distance.
-      int dist = pc - it.rinfo()->pc();
-      int pos = it.rinfo()->data();
+
+      int dist = static_cast<int>(pc - it.rinfo()->pc());
+      int pos = static_cast<int>(it.rinfo()->data());
       // If this position is closer than the current candidate or if it has the
       // same distance as the current candidate and the position is higher then
       // this position is the new candidate.
@@ -5148,7 +5062,7 @@ int Code::SourceStatementPosition(Address pc) {
   RelocIterator it(this, RelocInfo::kPositionMask);
   while (!it.done()) {
     if (RelocInfo::IsStatementPosition(it.rinfo()->rmode())) {
-      int p = it.rinfo()->data();
+      int p = static_cast<int>(it.rinfo()->data());
       if (statement_position < p && p <= position) {
         statement_position = p;
       }
@@ -5233,8 +5147,8 @@ void Code::Disassemble(const char* name) {
 
 
 void JSObject::SetFastElements(FixedArray* elems) {
-  // We should never end in here with a pixel array.
-  ASSERT(!HasPixelElements());
+  // We should never end in here with a pixel or external array.
+  ASSERT(!HasPixelElements() && !HasExternalArrayElements());
 #ifdef DEBUG
   // Check the provided array is filled with the_hole.
   uint32_t len = static_cast<uint32_t>(elems->length());
@@ -5271,8 +5185,8 @@ void JSObject::SetFastElements(FixedArray* elems) {
 
 
 Object* JSObject::SetSlowElements(Object* len) {
-  // We should never end in here with a pixel array.
-  ASSERT(!HasPixelElements());
+  // We should never end in here with a pixel or external array.
+  ASSERT(!HasPixelElements() && !HasExternalArrayElements());
 
   uint32_t new_length = static_cast<uint32_t>(len->Number());
 
@@ -5325,9 +5239,7 @@ void JSArray::Expand(int required_size) {
   Handle<JSArray> self(this);
   Handle<FixedArray> old_backing(FixedArray::cast(elements()));
   int old_size = old_backing->length();
-  // Doubling in size would be overkill, but leave some slack to avoid
-  // constantly growing.
-  int new_size = required_size + (required_size >> 3);
+  int new_size = required_size > old_size ? required_size : old_size;
   Handle<FixedArray> new_backing = Factory::NewFixedArray(new_size);
   // Can't use this any more now because we may have had a GC!
   for (int i = 0; i < old_size; i++) new_backing->set(i, old_backing->get(i));
@@ -5350,8 +5262,8 @@ static Object* ArrayLengthRangeError() {
 
 
 Object* JSObject::SetElementsLength(Object* len) {
-  // We should never end in here with a pixel array.
-  ASSERT(!HasPixelElements());
+  // We should never end in here with a pixel or external array.
+  ASSERT(!HasPixelElements() && !HasExternalArrayElements());
 
   Object* smi_length = len->ToSmi();
   if (smi_length->IsSmi()) {
@@ -5452,6 +5364,20 @@ bool JSObject::HasElementPostInterceptor(JSObject* receiver, uint32_t index) {
       }
       break;
     }
+    case EXTERNAL_BYTE_ELEMENTS:
+    case EXTERNAL_UNSIGNED_BYTE_ELEMENTS:
+    case EXTERNAL_SHORT_ELEMENTS:
+    case EXTERNAL_UNSIGNED_SHORT_ELEMENTS:
+    case EXTERNAL_INT_ELEMENTS:
+    case EXTERNAL_UNSIGNED_INT_ELEMENTS:
+    case EXTERNAL_FLOAT_ELEMENTS: {
+      // TODO(kbr): Add testcase.
+      ExternalArray* array = ExternalArray::cast(elements());
+      if (index < static_cast<uint32_t>(array->length())) {
+        return true;
+      }
+      break;
+    }
     case DICTIONARY_ELEMENTS: {
       if (element_dictionary()->FindEntry(index)
           != NumberDictionary::kNotFound) {
@@ -5481,10 +5407,8 @@ bool JSObject::HasElementWithInterceptor(JSObject* receiver, uint32_t index) {
   Handle<InterceptorInfo> interceptor(GetIndexedInterceptor());
   Handle<JSObject> receiver_handle(receiver);
   Handle<JSObject> holder_handle(this);
-  Handle<Object> data_handle(interceptor->data());
-  v8::AccessorInfo info(v8::Utils::ToLocal(receiver_handle),
-                        v8::Utils::ToLocal(data_handle),
-                        v8::Utils::ToLocal(holder_handle));
+  CustomArguments args(interceptor->data(), receiver, this);
+  v8::AccessorInfo info(args.end());
   if (!interceptor->query()->IsUndefined()) {
     v8::IndexedPropertyQuery query =
         v8::ToCData<v8::IndexedPropertyQuery>(interceptor->query());
@@ -5541,6 +5465,16 @@ bool JSObject::HasLocalElement(uint32_t index) {
       PixelArray* pixels = PixelArray::cast(elements());
       return (index < static_cast<uint32_t>(pixels->length()));
     }
+    case EXTERNAL_BYTE_ELEMENTS:
+    case EXTERNAL_UNSIGNED_BYTE_ELEMENTS:
+    case EXTERNAL_SHORT_ELEMENTS:
+    case EXTERNAL_UNSIGNED_SHORT_ELEMENTS:
+    case EXTERNAL_INT_ELEMENTS:
+    case EXTERNAL_UNSIGNED_INT_ELEMENTS:
+    case EXTERNAL_FLOAT_ELEMENTS: {
+      ExternalArray* array = ExternalArray::cast(elements());
+      return (index < static_cast<uint32_t>(array->length()));
+    }
     case DICTIONARY_ELEMENTS: {
       return element_dictionary()->FindEntry(index)
           != NumberDictionary::kNotFound;
@@ -5584,6 +5518,19 @@ bool JSObject::HasElementWithReceiver(JSObject* receiver, uint32_t index) {
       }
       break;
     }
+    case EXTERNAL_BYTE_ELEMENTS:
+    case EXTERNAL_UNSIGNED_BYTE_ELEMENTS:
+    case EXTERNAL_SHORT_ELEMENTS:
+    case EXTERNAL_UNSIGNED_SHORT_ELEMENTS:
+    case EXTERNAL_INT_ELEMENTS:
+    case EXTERNAL_UNSIGNED_INT_ELEMENTS:
+    case EXTERNAL_FLOAT_ELEMENTS: {
+      ExternalArray* array = ExternalArray::cast(elements());
+      if (index < static_cast<uint32_t>(array->length())) {
+        return true;
+      }
+      break;
+    }
     case DICTIONARY_ELEMENTS: {
       if (element_dictionary()->FindEntry(index)
           != NumberDictionary::kNotFound) {
@@ -5616,11 +5563,9 @@ Object* JSObject::SetElementWithInterceptor(uint32_t index, Object* value) {
   if (!interceptor->setter()->IsUndefined()) {
     v8::IndexedPropertySetter setter =
         v8::ToCData<v8::IndexedPropertySetter>(interceptor->setter());
-    Handle<Object> data_handle(interceptor->data());
     LOG(ApiIndexedPropertyAccess("interceptor-indexed-set", this, index));
-    v8::AccessorInfo info(v8::Utils::ToLocal(this_handle),
-                          v8::Utils::ToLocal(data_handle),
-                          v8::Utils::ToLocal(this_handle));
+    CustomArguments args(interceptor->data(), this, this);
+    v8::AccessorInfo info(args.end());
     v8::Handle<v8::Value> result;
     {
       // Leaving JavaScript.
@@ -5725,6 +5670,37 @@ Object* JSObject::SetElementWithoutInterceptor(uint32_t index, Object* value) {
     case PIXEL_ELEMENTS: {
       PixelArray* pixels = PixelArray::cast(elements());
       return pixels->SetValue(index, value);
+    }
+    case EXTERNAL_BYTE_ELEMENTS: {
+      ExternalByteArray* array = ExternalByteArray::cast(elements());
+      return array->SetValue(index, value);
+    }
+    case EXTERNAL_UNSIGNED_BYTE_ELEMENTS: {
+      ExternalUnsignedByteArray* array =
+          ExternalUnsignedByteArray::cast(elements());
+      return array->SetValue(index, value);
+    }
+    case EXTERNAL_SHORT_ELEMENTS: {
+      ExternalShortArray* array = ExternalShortArray::cast(elements());
+      return array->SetValue(index, value);
+    }
+    case EXTERNAL_UNSIGNED_SHORT_ELEMENTS: {
+      ExternalUnsignedShortArray* array =
+          ExternalUnsignedShortArray::cast(elements());
+      return array->SetValue(index, value);
+    }
+    case EXTERNAL_INT_ELEMENTS: {
+      ExternalIntArray* array = ExternalIntArray::cast(elements());
+      return array->SetValue(index, value);
+    }
+    case EXTERNAL_UNSIGNED_INT_ELEMENTS: {
+      ExternalUnsignedIntArray* array =
+          ExternalUnsignedIntArray::cast(elements());
+      return array->SetValue(index, value);
+    }
+    case EXTERNAL_FLOAT_ELEMENTS: {
+      ExternalFloatArray* array = ExternalFloatArray::cast(elements());
+      return array->SetValue(index, value);
     }
     case DICTIONARY_ELEMENTS: {
       // Insert element in the dictionary.
@@ -5843,6 +5819,17 @@ Object* JSObject::GetElementPostInterceptor(JSObject* receiver,
       UNIMPLEMENTED();
       break;
     }
+    case EXTERNAL_BYTE_ELEMENTS:
+    case EXTERNAL_UNSIGNED_BYTE_ELEMENTS:
+    case EXTERNAL_SHORT_ELEMENTS:
+    case EXTERNAL_UNSIGNED_SHORT_ELEMENTS:
+    case EXTERNAL_INT_ELEMENTS:
+    case EXTERNAL_UNSIGNED_INT_ELEMENTS:
+    case EXTERNAL_FLOAT_ELEMENTS: {
+      // TODO(kbr): Add testcase and implement.
+      UNIMPLEMENTED();
+      break;
+    }
     case DICTIONARY_ELEMENTS: {
       NumberDictionary* dictionary = element_dictionary();
       int entry = dictionary->FindEntry(index);
@@ -5888,13 +5875,11 @@ Object* JSObject::GetElementWithInterceptor(JSObject* receiver,
   Handle<JSObject> holder_handle(this);
 
   if (!interceptor->getter()->IsUndefined()) {
-    Handle<Object> data_handle(interceptor->data());
     v8::IndexedPropertyGetter getter =
         v8::ToCData<v8::IndexedPropertyGetter>(interceptor->getter());
     LOG(ApiIndexedPropertyAccess("interceptor-indexed-get", this, index));
-    v8::AccessorInfo info(v8::Utils::ToLocal(this_handle),
-                          v8::Utils::ToLocal(data_handle),
-                          v8::Utils::ToLocal(holder_handle));
+    CustomArguments args(interceptor->data(), receiver, this);
+    v8::AccessorInfo info(args.end());
     v8::Handle<v8::Value> result;
     {
       // Leaving JavaScript.
@@ -5943,6 +5928,65 @@ Object* JSObject::GetElementWithReceiver(JSObject* receiver, uint32_t index) {
       }
       break;
     }
+    case EXTERNAL_BYTE_ELEMENTS: {
+      ExternalByteArray* array = ExternalByteArray::cast(elements());
+      if (index < static_cast<uint32_t>(array->length())) {
+        int8_t value = array->get(index);
+        return Smi::FromInt(value);
+      }
+      break;
+    }
+    case EXTERNAL_UNSIGNED_BYTE_ELEMENTS: {
+      ExternalUnsignedByteArray* array =
+          ExternalUnsignedByteArray::cast(elements());
+      if (index < static_cast<uint32_t>(array->length())) {
+        uint8_t value = array->get(index);
+        return Smi::FromInt(value);
+      }
+      break;
+    }
+    case EXTERNAL_SHORT_ELEMENTS: {
+      ExternalShortArray* array = ExternalShortArray::cast(elements());
+      if (index < static_cast<uint32_t>(array->length())) {
+        int16_t value = array->get(index);
+        return Smi::FromInt(value);
+      }
+      break;
+    }
+    case EXTERNAL_UNSIGNED_SHORT_ELEMENTS: {
+      ExternalUnsignedShortArray* array =
+          ExternalUnsignedShortArray::cast(elements());
+      if (index < static_cast<uint32_t>(array->length())) {
+        uint16_t value = array->get(index);
+        return Smi::FromInt(value);
+      }
+      break;
+    }
+    case EXTERNAL_INT_ELEMENTS: {
+      ExternalIntArray* array = ExternalIntArray::cast(elements());
+      if (index < static_cast<uint32_t>(array->length())) {
+        int32_t value = array->get(index);
+        return Heap::NumberFromInt32(value);
+      }
+      break;
+    }
+    case EXTERNAL_UNSIGNED_INT_ELEMENTS: {
+      ExternalUnsignedIntArray* array =
+          ExternalUnsignedIntArray::cast(elements());
+      if (index < static_cast<uint32_t>(array->length())) {
+        uint32_t value = array->get(index);
+        return Heap::NumberFromUint32(value);
+      }
+      break;
+    }
+    case EXTERNAL_FLOAT_ELEMENTS: {
+      ExternalFloatArray* array = ExternalFloatArray::cast(elements());
+      if (index < static_cast<uint32_t>(array->length())) {
+        float value = array->get(index);
+        return Heap::AllocateHeapNumber(value);
+      }
+      break;
+    }
     case DICTIONARY_ELEMENTS: {
       NumberDictionary* dictionary = element_dictionary();
       int entry = dictionary->FindEntry(index);
@@ -5986,7 +6030,14 @@ bool JSObject::HasDenseElements() {
       }
       break;
     }
-    case PIXEL_ELEMENTS: {
+    case PIXEL_ELEMENTS:
+    case EXTERNAL_BYTE_ELEMENTS:
+    case EXTERNAL_UNSIGNED_BYTE_ELEMENTS:
+    case EXTERNAL_SHORT_ELEMENTS:
+    case EXTERNAL_UNSIGNED_SHORT_ELEMENTS:
+    case EXTERNAL_INT_ELEMENTS:
+    case EXTERNAL_UNSIGNED_INT_ELEMENTS:
+    case EXTERNAL_FLOAT_ELEMENTS: {
       return true;
     }
     case DICTIONARY_ELEMENTS: {
@@ -6117,6 +6168,18 @@ Object* JSObject::GetPropertyPostInterceptor(JSObject* receiver,
 }
 
 
+Object* JSObject::GetLocalPropertyPostInterceptor(
+    JSObject* receiver,
+    String* name,
+    PropertyAttributes* attributes) {
+  // Check local property in holder, ignore interceptor.
+  LookupResult result;
+  LocalLookupRealNamedProperty(name, &result);
+  if (!result.IsValid()) return Heap::undefined_value();
+  return GetProperty(receiver, &result, name, attributes);
+}
+
+
 Object* JSObject::GetPropertyWithInterceptor(
     JSObject* receiver,
     String* name,
@@ -6126,15 +6189,13 @@ Object* JSObject::GetPropertyWithInterceptor(
   Handle<JSObject> receiver_handle(receiver);
   Handle<JSObject> holder_handle(this);
   Handle<String> name_handle(name);
-  Handle<Object> data_handle(interceptor->data());
 
   if (!interceptor->getter()->IsUndefined()) {
     v8::NamedPropertyGetter getter =
         v8::ToCData<v8::NamedPropertyGetter>(interceptor->getter());
     LOG(ApiNamedPropertyAccess("interceptor-named-get", *holder_handle, name));
-    v8::AccessorInfo info(v8::Utils::ToLocal(receiver_handle),
-                          v8::Utils::ToLocal(data_handle),
-                          v8::Utils::ToLocal(holder_handle));
+    CustomArguments args(interceptor->data(), receiver, this);
+    v8::AccessorInfo info(args.end());
     v8::Handle<v8::Value> result;
     {
       // Leaving JavaScript.
@@ -6211,6 +6272,16 @@ bool JSObject::HasRealElementProperty(uint32_t index) {
     case PIXEL_ELEMENTS: {
       PixelArray* pixels = PixelArray::cast(elements());
       return index < static_cast<uint32_t>(pixels->length());
+    }
+    case EXTERNAL_BYTE_ELEMENTS:
+    case EXTERNAL_UNSIGNED_BYTE_ELEMENTS:
+    case EXTERNAL_SHORT_ELEMENTS:
+    case EXTERNAL_UNSIGNED_SHORT_ELEMENTS:
+    case EXTERNAL_INT_ELEMENTS:
+    case EXTERNAL_UNSIGNED_INT_ELEMENTS:
+    case EXTERNAL_FLOAT_ELEMENTS: {
+      ExternalArray* array = ExternalArray::cast(elements());
+      return index < static_cast<uint32_t>(array->length());
     }
     case DICTIONARY_ELEMENTS: {
       return element_dictionary()->FindEntry(index)
@@ -6398,6 +6469,15 @@ int JSObject::NumberOfLocalElements(PropertyAttributes filter) {
 
 
 int JSObject::NumberOfEnumElements() {
+  // Fast case for objects with no elements.
+  if (!IsJSValue() && HasFastElements()) {
+    uint32_t length = IsJSArray() ?
+        static_cast<uint32_t>(
+            Smi::cast(JSArray::cast(this)->length())->value()) :
+        static_cast<uint32_t>(FixedArray::cast(elements())->length());
+    if (length == 0) return 0;
+  }
+  // Compute the number of enumerable elements.
   return NumberOfLocalElements(static_cast<PropertyAttributes>(DONT_ENUM));
 }
 
@@ -6423,6 +6503,23 @@ int JSObject::GetLocalElementKeys(FixedArray* storage,
     }
     case PIXEL_ELEMENTS: {
       int length = PixelArray::cast(elements())->length();
+      while (counter < length) {
+        if (storage != NULL) {
+          storage->set(counter, Smi::FromInt(counter), SKIP_WRITE_BARRIER);
+        }
+        counter++;
+      }
+      ASSERT(!storage || storage->length() >= counter);
+      break;
+    }
+    case EXTERNAL_BYTE_ELEMENTS:
+    case EXTERNAL_UNSIGNED_BYTE_ELEMENTS:
+    case EXTERNAL_SHORT_ELEMENTS:
+    case EXTERNAL_UNSIGNED_SHORT_ELEMENTS:
+    case EXTERNAL_INT_ELEMENTS:
+    case EXTERNAL_UNSIGNED_INT_ELEMENTS:
+    case EXTERNAL_FLOAT_ELEMENTS: {
+      int length = ExternalArray::cast(elements())->length();
       while (counter < length) {
         if (storage != NULL) {
           storage->set(counter, Smi::FromInt(counter), SKIP_WRITE_BARRIER);
@@ -6603,6 +6700,10 @@ class RegExpKey : public HashTableKey {
       : string_(string),
         flags_(Smi::FromInt(flags.value())) { }
 
+  // Rather than storing the key in the hash table, a pointer to the
+  // stored value is stored where the key should be.  IsMatch then
+  // compares the search key to the found object, rather than comparing
+  // a key to a key.
   bool IsMatch(Object* obj) {
     FixedArray* val = FixedArray::cast(obj);
     return string_->Equals(String::cast(val->get(JSRegExp::kSourceIndex)))
@@ -6636,19 +6737,19 @@ class RegExpKey : public HashTableKey {
 class Utf8SymbolKey : public HashTableKey {
  public:
   explicit Utf8SymbolKey(Vector<const char> string)
-      : string_(string), length_field_(0) { }
+      : string_(string), hash_field_(0) { }
 
   bool IsMatch(Object* string) {
     return String::cast(string)->IsEqualTo(string_);
   }
 
   uint32_t Hash() {
-    if (length_field_ != 0) return length_field_ >> String::kHashShift;
+    if (hash_field_ != 0) return hash_field_ >> String::kHashShift;
     unibrow::Utf8InputBuffer<> buffer(string_.start(),
                                       static_cast<unsigned>(string_.length()));
     chars_ = buffer.Length();
-    length_field_ = String::ComputeLengthAndHashField(&buffer, chars_);
-    uint32_t result = length_field_ >> String::kHashShift;
+    hash_field_ = String::ComputeHashField(&buffer, chars_);
+    uint32_t result = hash_field_ >> String::kHashShift;
     ASSERT(result != 0);  // Ensure that the hash value of 0 is never computed.
     return result;
   }
@@ -6658,12 +6759,12 @@ class Utf8SymbolKey : public HashTableKey {
   }
 
   Object* AsObject() {
-    if (length_field_ == 0) Hash();
-    return Heap::AllocateSymbol(string_, chars_, length_field_);
+    if (hash_field_ == 0) Hash();
+    return Heap::AllocateSymbol(string_, chars_, hash_field_);
   }
 
   Vector<const char> string_;
-  uint32_t length_field_;
+  uint32_t hash_field_;
   int chars_;  // Caches the number of characters when computing the hash code.
 };
 
@@ -6704,7 +6805,7 @@ class SymbolKey : public HashTableKey {
     StringInputBuffer buffer(string_);
     return Heap::AllocateInternalSymbol(&buffer,
                                         string_->length(),
-                                        string_->length_field());
+                                        string_->hash_field());
   }
 
   static uint32_t StringHash(Object* obj) {
@@ -6974,7 +7075,7 @@ Object* JSObject::PrepareSlowElementsForSort(uint32_t limit) {
 // If the object is in dictionary mode, it is converted to fast elements
 // mode.
 Object* JSObject::PrepareElementsForSort(uint32_t limit) {
-  ASSERT(!HasPixelElements());
+  ASSERT(!HasPixelElements() && !HasExternalArrayElements());
 
   if (HasDictionaryElements()) {
     // Convert to fast elements containing only the existing properties.
@@ -7106,6 +7207,99 @@ Object* PixelArray::SetValue(uint32_t index, Object* value) {
 }
 
 
+template<typename ExternalArrayClass, typename ValueType>
+static Object* ExternalArrayIntSetter(ExternalArrayClass* receiver,
+                                      uint32_t index,
+                                      Object* value) {
+  ValueType cast_value = 0;
+  if (index < static_cast<uint32_t>(receiver->length())) {
+    if (value->IsSmi()) {
+      int int_value = Smi::cast(value)->value();
+      cast_value = static_cast<ValueType>(int_value);
+    } else if (value->IsHeapNumber()) {
+      double double_value = HeapNumber::cast(value)->value();
+      cast_value = static_cast<ValueType>(DoubleToInt32(double_value));
+    } else {
+      // Clamp undefined to zero (default). All other types have been
+      // converted to a number type further up in the call chain.
+      ASSERT(value->IsUndefined());
+    }
+    receiver->set(index, cast_value);
+  }
+  return Heap::NumberFromInt32(cast_value);
+}
+
+
+Object* ExternalByteArray::SetValue(uint32_t index, Object* value) {
+  return ExternalArrayIntSetter<ExternalByteArray, int8_t>
+      (this, index, value);
+}
+
+
+Object* ExternalUnsignedByteArray::SetValue(uint32_t index, Object* value) {
+  return ExternalArrayIntSetter<ExternalUnsignedByteArray, uint8_t>
+      (this, index, value);
+}
+
+
+Object* ExternalShortArray::SetValue(uint32_t index, Object* value) {
+  return ExternalArrayIntSetter<ExternalShortArray, int16_t>
+      (this, index, value);
+}
+
+
+Object* ExternalUnsignedShortArray::SetValue(uint32_t index, Object* value) {
+  return ExternalArrayIntSetter<ExternalUnsignedShortArray, uint16_t>
+      (this, index, value);
+}
+
+
+Object* ExternalIntArray::SetValue(uint32_t index, Object* value) {
+  return ExternalArrayIntSetter<ExternalIntArray, int32_t>
+      (this, index, value);
+}
+
+
+Object* ExternalUnsignedIntArray::SetValue(uint32_t index, Object* value) {
+  uint32_t cast_value = 0;
+  if (index < static_cast<uint32_t>(length())) {
+    if (value->IsSmi()) {
+      int int_value = Smi::cast(value)->value();
+      cast_value = static_cast<uint32_t>(int_value);
+    } else if (value->IsHeapNumber()) {
+      double double_value = HeapNumber::cast(value)->value();
+      cast_value = static_cast<uint32_t>(DoubleToUint32(double_value));
+    } else {
+      // Clamp undefined to zero (default). All other types have been
+      // converted to a number type further up in the call chain.
+      ASSERT(value->IsUndefined());
+    }
+    set(index, cast_value);
+  }
+  return Heap::NumberFromUint32(cast_value);
+}
+
+
+Object* ExternalFloatArray::SetValue(uint32_t index, Object* value) {
+  float cast_value = 0;
+  if (index < static_cast<uint32_t>(length())) {
+    if (value->IsSmi()) {
+      int int_value = Smi::cast(value)->value();
+      cast_value = static_cast<float>(int_value);
+    } else if (value->IsHeapNumber()) {
+      double double_value = HeapNumber::cast(value)->value();
+      cast_value = static_cast<float>(double_value);
+    } else {
+      // Clamp undefined to zero (default). All other types have been
+      // converted to a number type further up in the call chain.
+      ASSERT(value->IsUndefined());
+    }
+    set(index, cast_value);
+  }
+  return Heap::AllocateHeapNumber(cast_value);
+}
+
+
 Object* GlobalObject::GetPropertyCell(LookupResult* result) {
   ASSERT(!HasFastProperties());
   Object* value = property_dictionary()->ValueAt(result->GetDictionaryEntry());
@@ -7140,8 +7334,85 @@ Object* SymbolTable::LookupString(String* string, Object** s) {
 }
 
 
+// This class is used for looking up two character strings in the symbol table.
+// If we don't have a hit we don't want to waste much time so we unroll the
+// string hash calculation loop here for speed.  Doesn't work if the two
+// characters form a decimal integer, since such strings have a different hash
+// algorithm.
+class TwoCharHashTableKey : public HashTableKey {
+ public:
+  TwoCharHashTableKey(uint32_t c1, uint32_t c2)
+    : c1_(c1), c2_(c2) {
+    // Char 1.
+    uint32_t hash = c1 + (c1 << 10);
+    hash ^= hash >> 6;
+    // Char 2.
+    hash += c2;
+    hash += hash << 10;
+    hash ^= hash >> 6;
+    // GetHash.
+    hash += hash << 3;
+    hash ^= hash >> 11;
+    hash += hash << 15;
+    if (hash == 0) hash = 27;
+#ifdef DEBUG
+    StringHasher hasher(2);
+    hasher.AddCharacter(c1);
+    hasher.AddCharacter(c2);
+    // If this assert fails then we failed to reproduce the two-character
+    // version of the string hashing algorithm above.  One reason could be
+    // that we were passed two digits as characters, since the hash
+    // algorithm is different in that case.
+    ASSERT_EQ(static_cast<int>(hasher.GetHash()), static_cast<int>(hash));
+#endif
+    hash_ = hash;
+  }
+
+  bool IsMatch(Object* o) {
+    if (!o->IsString()) return false;
+    String* other = String::cast(o);
+    if (other->length() != 2) return false;
+    if (other->Get(0) != c1_) return false;
+    return other->Get(1) == c2_;
+  }
+
+  uint32_t Hash() { return hash_; }
+  uint32_t HashForObject(Object* key) {
+    if (!key->IsString()) return 0;
+    return String::cast(key)->Hash();
+  }
+
+  Object* AsObject() {
+    // The TwoCharHashTableKey is only used for looking in the symbol
+    // table, not for adding to it.
+    UNREACHABLE();
+    return NULL;
+  }
+ private:
+  uint32_t c1_;
+  uint32_t c2_;
+  uint32_t hash_;
+};
+
+
 bool SymbolTable::LookupSymbolIfExists(String* string, String** symbol) {
   SymbolKey key(string);
+  int entry = FindEntry(&key);
+  if (entry == kNotFound) {
+    return false;
+  } else {
+    String* result = String::cast(KeyAt(entry));
+    ASSERT(StringShape(result).IsSymbol());
+    *symbol = result;
+    return true;
+  }
+}
+
+
+bool SymbolTable::LookupTwoCharsSymbolIfExists(uint32_t c1,
+                                               uint32_t c2,
+                                               String** symbol) {
+  TwoCharHashTableKey key(c1, c2);
   int entry = FindEntry(&key);
   if (entry == kNotFound) {
     return false;
@@ -7262,6 +7533,8 @@ Object* CompilationCacheTable::PutRegExp(String* src,
   CompilationCacheTable* cache =
       reinterpret_cast<CompilationCacheTable*>(obj);
   int entry = cache->FindInsertionEntry(key.Hash());
+  // We store the value in the key slot, and compare the search key
+  // to the stored value with a custon IsMatch function during lookups.
   cache->set(EntryToIndex(entry), value);
   cache->set(EntryToIndex(entry) + 1, value);
   cache->ElementAdded();

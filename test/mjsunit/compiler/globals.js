@@ -1,4 +1,4 @@
-// Copyright 2008 the V8 project authors. All rights reserved.
+// Copyright 2009 the V8 project authors. All rights reserved.
 // Redistribution and use in source and binary forms, with or without
 // modification, are permitted provided that the following conditions are
 // met:
@@ -25,36 +25,41 @@
 // (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
 // OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
-// Simple splice tests based on webkit layout tests.
-var arr = ['a','b','c','d'];
-assertArrayEquals(['a','b','c','d'], arr);
-assertArrayEquals(['c','d'], arr.splice(2));
-assertArrayEquals(['a','b'], arr);
-assertArrayEquals(['a','b'], arr.splice(0));
-assertArrayEquals([], arr)
+// Test references and assignments to global variables.
+var g = 0;
 
-arr = ['a','b','c','d'];
-assertEquals(undefined, arr.splice())
-assertArrayEquals(['a','b','c','d'], arr);
-assertArrayEquals(['a','b','c','d'], arr.splice(undefined))
-assertArrayEquals([], arr);
+// Test compilation of a global variable store.
+assertEquals(1, eval('g = 1'));
+// Test that the store worked.
+assertEquals(1, g);
 
-arr = ['a','b','c','d'];
-assertArrayEquals(['a','b','c','d'], arr.splice(null))
-assertArrayEquals([], arr);
+// Test that patching the IC in the compiled code works.
+assertEquals(1, eval('g = 1'));
+assertEquals(1, g);
+assertEquals(1, eval('g = 1'));
+assertEquals(1, g);
 
-arr = ['a','b','c','d'];
-assertArrayEquals([], arr.splice(100))
-assertArrayEquals(['a','b','c','d'], arr);
-assertArrayEquals(['d'], arr.splice(-1))
-assertArrayEquals(['a','b','c'], arr);
+// Test a second store.
+assertEquals("2", eval('g = "2"'));
+assertEquals("2", g);
 
-assertArrayEquals([], arr.splice(2, undefined))
-assertArrayEquals([], arr.splice(2, null))
-assertArrayEquals([], arr.splice(2, -1))
-assertArrayEquals([], arr.splice(2, 0))
-assertArrayEquals(['a','b','c'], arr);
-assertArrayEquals(['c'], arr.splice(2, 100))
-assertArrayEquals(['a','b'], arr);
+// Test a load.
+assertEquals("2", eval('g'));
 
+// Test that patching the IC in the compiled code works.
+assertEquals("2", eval('g'));
+assertEquals("2", eval('g'));
 
+// Test a second load.
+g = 3;
+assertEquals(3, eval('g'));
+
+// Test postfix count operation
+var t;
+t = g++;
+assertEquals(3, t);
+assertEquals(4, g);
+
+code = "g--; 1";
+assertEquals(1, eval(code));
+assertEquals(3, g);

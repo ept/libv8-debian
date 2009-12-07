@@ -72,6 +72,8 @@
 namespace v8 {
 namespace internal {
 
+class Deserializer;
+
 class V8 : public AllStatic {
  public:
   // Global actions.
@@ -95,7 +97,7 @@ class V8 : public AllStatic {
   static Smi* RandomPositiveSmi();
 
   // Idle notification directly from the API.
-  static bool IdleNotification(bool is_high_priority);
+  static bool IdleNotification();
 
  private:
   // True if engine is currently running
