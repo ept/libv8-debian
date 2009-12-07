@@ -4,6 +4,12 @@ libv8 (2.0.3-1) unstable; urgency=low
   * restored jsmin.py, now it is DFSG compliant
     + debian/copyright modified accordingly
     + debian/repack.sh not needed anymore
+    + debian/patches: remove-jsmin.patch deleted
+  * using the library's SONAME (2.0.3)
+    + debian/control: libv8-0 renamed to libv8-2.0.3
+    + debian/patches: deleted enable_soname.patch
+    + debian/rules: adapted to support the upstream SONAME
+    + debian/libv8-0.symbols: removed, we will not maintain the symbols file
 
  -- Antonio Radici <antonio@dyne.org>  Mon, 07 Dec 2009 19:07:51 +0000
 
