@@ -126,7 +126,8 @@ Address IC::OriginalCodeAddress() {
   // Return the address in the original code. This is the place where
   // the call which has been overwritten by the DebugBreakXXX resides
   // and the place where the inline cache system should look.
-  int delta = original_code->instruction_start() - code->instruction_start();
+  intptr_t delta =
+      original_code->instruction_start() - code->instruction_start();
   return addr + delta;
 }
 #endif
@@ -262,6 +263,55 @@ void StoreIC::Clear(Address address, Code* target) {
 void KeyedStoreIC::Clear(Address address, Code* target) {
   if (target->ic_state() == UNINITIALIZED) return;
   SetTargetAtAddress(address, initialize_stub());
+}
+
+
+Code* KeyedLoadIC::external_array_stub(JSObject::ElementsKind elements_kind) {
+  switch (elements_kind) {
+    case JSObject::EXTERNAL_BYTE_ELEMENTS:
+      return Builtins::builtin(Builtins::KeyedLoadIC_ExternalByteArray);
+    case JSObject::EXTERNAL_UNSIGNED_BYTE_ELEMENTS:
+      return Builtins::builtin(Builtins::KeyedLoadIC_ExternalUnsignedByteArray);
+    case JSObject::EXTERNAL_SHORT_ELEMENTS:
+      return Builtins::builtin(Builtins::KeyedLoadIC_ExternalShortArray);
+    case JSObject::EXTERNAL_UNSIGNED_SHORT_ELEMENTS:
+      return Builtins::builtin(
+          Builtins::KeyedLoadIC_ExternalUnsignedShortArray);
+    case JSObject::EXTERNAL_INT_ELEMENTS:
+      return Builtins::builtin(Builtins::KeyedLoadIC_ExternalIntArray);
+    case JSObject::EXTERNAL_UNSIGNED_INT_ELEMENTS:
+      return Builtins::builtin(Builtins::KeyedLoadIC_ExternalUnsignedIntArray);
+    case JSObject::EXTERNAL_FLOAT_ELEMENTS:
+      return Builtins::builtin(Builtins::KeyedLoadIC_ExternalFloatArray);
+    default:
+      UNREACHABLE();
+      return NULL;
+  }
+}
+
+
+Code* KeyedStoreIC::external_array_stub(JSObject::ElementsKind elements_kind) {
+  switch (elements_kind) {
+    case JSObject::EXTERNAL_BYTE_ELEMENTS:
+      return Builtins::builtin(Builtins::KeyedStoreIC_ExternalByteArray);
+    case JSObject::EXTERNAL_UNSIGNED_BYTE_ELEMENTS:
+      return Builtins::builtin(
+          Builtins::KeyedStoreIC_ExternalUnsignedByteArray);
+    case JSObject::EXTERNAL_SHORT_ELEMENTS:
+      return Builtins::builtin(Builtins::KeyedStoreIC_ExternalShortArray);
+    case JSObject::EXTERNAL_UNSIGNED_SHORT_ELEMENTS:
+      return Builtins::builtin(
+          Builtins::KeyedStoreIC_ExternalUnsignedShortArray);
+    case JSObject::EXTERNAL_INT_ELEMENTS:
+      return Builtins::builtin(Builtins::KeyedStoreIC_ExternalIntArray);
+    case JSObject::EXTERNAL_UNSIGNED_INT_ELEMENTS:
+      return Builtins::builtin(Builtins::KeyedStoreIC_ExternalUnsignedIntArray);
+    case JSObject::EXTERNAL_FLOAT_ELEMENTS:
+      return Builtins::builtin(Builtins::KeyedStoreIC_ExternalFloatArray);
+    default:
+      UNREACHABLE();
+      return NULL;
+  }
 }
 
 
@@ -823,7 +873,14 @@ Object* KeyedLoadIC::Load(State state,
   bool use_ic = FLAG_use_ic && !object->IsAccessCheckNeeded();
 
   if (use_ic) {
-    set_target(generic_stub());
+    Code* stub = generic_stub();
+    if (object->IsJSObject()) {
+      Handle<JSObject> receiver = Handle<JSObject>::cast(object);
+      if (receiver->HasExternalArrayElements()) {
+        stub = external_array_stub(receiver->GetElementsKind());
+      }
+    }
+    set_target(stub);
     // For JSObjects that are not value wrappers and that do not have
     // indexed interceptors, we initialize the inlined fast case (if
     // present) by patching the inlined map check.
@@ -1110,7 +1167,16 @@ Object* KeyedStoreIC::Store(State state,
   bool use_ic = FLAG_use_ic && !object->IsAccessCheckNeeded();
   ASSERT(!(use_ic && object->IsJSGlobalProxy()));
 
-  if (use_ic) set_target(generic_stub());
+  if (use_ic) {
+    Code* stub = generic_stub();
+    if (object->IsJSObject()) {
+      Handle<JSObject> receiver = Handle<JSObject>::cast(object);
+      if (receiver->HasExternalArrayElements()) {
+        stub = external_array_stub(receiver->GetElementsKind());
+      }
+    }
+    set_target(stub);
+  }
 
   // Set the property.
   return Runtime::SetObjectProperty(object, key, value, NONE);

@@ -30,12 +30,11 @@
 
 #include "execution.h"
 #include "factory.h"
+#include "jsregexp.h"
+#include "jump-target.h"
 #include "runtime.h"
 #include "token.h"
 #include "variables.h"
-#include "macro-assembler.h"
-#include "jsregexp.h"
-#include "jump-target.h"
 
 namespace v8 {
 namespace internal {
@@ -64,10 +63,12 @@ namespace internal {
   V(WithEnterStatement)                         \
   V(WithExitStatement)                          \
   V(SwitchStatement)                            \
-  V(LoopStatement)                              \
+  V(DoWhileStatement)                           \
+  V(WhileStatement)                             \
+  V(ForStatement)                               \
   V(ForInStatement)                             \
-  V(TryCatch)                                   \
-  V(TryFinally)                                 \
+  V(TryCatchStatement)                          \
+  V(TryFinallyStatement)                        \
   V(DebuggerStatement)
 
 #define EXPRESSION_NODE_LIST(V)                 \
@@ -85,7 +86,6 @@ namespace internal {
   V(Throw)                                      \
   V(Property)                                   \
   V(Call)                                       \
-  V(CallEval)                                   \
   V(CallNew)                                    \
   V(CallRuntime)                                \
   V(UnaryOperation)                             \
@@ -116,7 +116,6 @@ typedef ZoneList<Handle<Object> > ZoneObjectList;
 
 class AstNode: public ZoneObject {
  public:
-  AstNode(): statement_pos_(RelocInfo::kNoPosition) { }
   virtual ~AstNode() { }
   virtual void Accept(AstVisitor* v) = 0;
 
@@ -140,6 +139,17 @@ class AstNode: public ZoneObject {
   virtual MaterializedLiteral* AsMaterializedLiteral() { return NULL; }
   virtual ObjectLiteral* AsObjectLiteral() { return NULL; }
   virtual ArrayLiteral* AsArrayLiteral() { return NULL; }
+};
+
+
+class Statement: public AstNode {
+ public:
+  Statement() : statement_pos_(RelocInfo::kNoPosition) {}
+
+  virtual Statement* AsStatement()  { return this; }
+  virtual ReturnStatement* AsReturnStatement() { return NULL; }
+
+  bool IsEmpty() { return AsEmptyStatement() != NULL; }
 
   void set_statement_pos(int statement_pos) { statement_pos_ = statement_pos; }
   int statement_pos() const { return statement_pos_; }
@@ -149,17 +159,28 @@ class AstNode: public ZoneObject {
 };
 
 
-class Statement: public AstNode {
- public:
-  virtual Statement* AsStatement()  { return this; }
-  virtual ReturnStatement* AsReturnStatement() { return NULL; }
-
-  bool IsEmpty() { return AsEmptyStatement() != NULL; }
-};
-
-
 class Expression: public AstNode {
  public:
+  enum Context {
+    // Not assigned a context yet, or else will not be visited during
+    // code generation.
+    kUninitialized,
+    // Evaluated for its side effects.
+    kEffect,
+    // Evaluated for its value (and side effects).
+    kValue,
+    // Evaluated for control flow (and side effects).
+    kTest,
+    // Evaluated for control flow and side effects.  Value is also
+    // needed if true.
+    kValueTest,
+    // Evaluated for control flow and side effects.  Value is also
+    // needed if false.
+    kTestValue
+  };
+
+  Expression() : context_(kUninitialized) {}
+
   virtual Expression* AsExpression()  { return this; }
 
   virtual bool IsValidJSON() { return false; }
@@ -173,8 +194,12 @@ class Expression: public AstNode {
   // Static type information for this expression.
   SmiAnalysis* type() { return &type_; }
 
+  Context context() { return context_; }
+  void set_context(Context context) { context_ = context; }
+
  private:
   SmiAnalysis type_;
+  Context context_;
 };
 
 
@@ -294,13 +319,65 @@ class IterationStatement: public BreakableStatement {
 };
 
 
-class LoopStatement: public IterationStatement {
+class DoWhileStatement: public IterationStatement {
  public:
-  enum Type { DO_LOOP, FOR_LOOP, WHILE_LOOP };
+  explicit DoWhileStatement(ZoneStringList* labels)
+      : IterationStatement(labels), cond_(NULL), condition_position_(-1) {
+  }
 
-  LoopStatement(ZoneStringList* labels, Type type)
+  void Initialize(Expression* cond, Statement* body) {
+    IterationStatement::Initialize(body);
+    cond_ = cond;
+  }
+
+  virtual void Accept(AstVisitor* v);
+
+  Expression* cond() const { return cond_; }
+
+  // Position where condition expression starts. We need it to make
+  // the loop's condition a breakable location.
+  int condition_position() { return condition_position_; }
+  void set_condition_position(int pos) { condition_position_ = pos; }
+
+ private:
+  Expression* cond_;
+  int condition_position_;
+};
+
+
+class WhileStatement: public IterationStatement {
+ public:
+  explicit WhileStatement(ZoneStringList* labels)
       : IterationStatement(labels),
-        type_(type),
+        cond_(NULL),
+        may_have_function_literal_(true) {
+  }
+
+  void Initialize(Expression* cond, Statement* body) {
+    IterationStatement::Initialize(body);
+    cond_ = cond;
+  }
+
+  virtual void Accept(AstVisitor* v);
+
+  Expression* cond() const { return cond_; }
+  bool may_have_function_literal() const {
+    return may_have_function_literal_;
+  }
+
+ private:
+  Expression* cond_;
+  // True if there is a function literal subexpression in the condition.
+  bool may_have_function_literal_;
+
+  friend class AstOptimizer;
+};
+
+
+class ForStatement: public IterationStatement {
+ public:
+  explicit ForStatement(ZoneStringList* labels)
+      : IterationStatement(labels),
         init_(NULL),
         cond_(NULL),
         next_(NULL),
@@ -311,8 +388,6 @@ class LoopStatement: public IterationStatement {
                   Expression* cond,
                   Statement* next,
                   Statement* body) {
-    ASSERT(init == NULL || type_ == FOR_LOOP);
-    ASSERT(next == NULL || type_ == FOR_LOOP);
     IterationStatement::Initialize(body);
     init_ = init;
     cond_ = cond;
@@ -321,7 +396,6 @@ class LoopStatement: public IterationStatement {
 
   virtual void Accept(AstVisitor* v);
 
-  Type type() const  { return type_; }
   Statement* init() const  { return init_; }
   Expression* cond() const  { return cond_; }
   Statement* next() const  { return next_; }
@@ -329,12 +403,7 @@ class LoopStatement: public IterationStatement {
     return may_have_function_literal_;
   }
 
-#ifdef DEBUG
-  const char* OperatorString() const;
-#endif
-
  private:
-  Type type_;
   Statement* init_;
   Expression* cond_;
   Statement* next_;
@@ -569,9 +638,11 @@ class TryStatement: public Statement {
 };
 
 
-class TryCatch: public TryStatement {
+class TryCatchStatement: public TryStatement {
  public:
-  TryCatch(Block* try_block, Expression* catch_var, Block* catch_block)
+  TryCatchStatement(Block* try_block,
+                    Expression* catch_var,
+                    Block* catch_block)
       : TryStatement(try_block),
         catch_var_(catch_var),
         catch_block_(catch_block) {
@@ -589,9 +660,9 @@ class TryCatch: public TryStatement {
 };
 
 
-class TryFinally: public TryStatement {
+class TryFinallyStatement: public TryStatement {
  public:
-  TryFinally(Block* try_block, Block* finally_block)
+  TryFinallyStatement(Block* try_block, Block* finally_block)
       : TryStatement(try_block),
         finally_block_(finally_block) { }
 
@@ -698,6 +769,8 @@ class ObjectLiteral: public MaterializedLiteral {
     Literal* key() { return key_; }
     Expression* value() { return value_; }
     Kind kind() { return kind_; }
+
+    bool IsCompileTimeValue();
 
    private:
     Literal* key_;
@@ -885,11 +958,7 @@ class Slot: public Expression {
     // variable name in the context object on the heap,
     // with lookup starting at the current context. index()
     // is invalid.
-    LOOKUP,
-
-    // A property in the global object. var()->name() is
-    // the property name.
-    GLOBAL
+    LOOKUP
   };
 
   Slot(Variable* var, Type type, int index)
@@ -954,12 +1023,8 @@ class Property: public Expression {
 
 class Call: public Expression {
  public:
-  Call(Expression* expression,
-       ZoneList<Expression*>* arguments,
-       int pos)
-      : expression_(expression),
-        arguments_(arguments),
-        pos_(pos) { }
+  Call(Expression* expression, ZoneList<Expression*>* arguments, int pos)
+      : expression_(expression), arguments_(arguments), pos_(pos) { }
 
   virtual void Accept(AstVisitor* v);
 
@@ -981,30 +1046,21 @@ class Call: public Expression {
 };
 
 
-class CallNew: public Call {
+class CallNew: public Expression {
  public:
   CallNew(Expression* expression, ZoneList<Expression*>* arguments, int pos)
-      : Call(expression, arguments, pos) { }
-
-  virtual void Accept(AstVisitor* v);
-};
-
-
-// The CallEval class represents a call of the form 'eval(...)' where eval
-// cannot be seen to be overwritten at compile time. It is potentially a
-// direct (i.e. not aliased) eval call. The real nature of the call is
-// determined at runtime.
-class CallEval: public Call {
- public:
-  CallEval(Expression* expression, ZoneList<Expression*>* arguments, int pos)
-      : Call(expression, arguments, pos) { }
+      : expression_(expression), arguments_(arguments), pos_(pos) { }
 
   virtual void Accept(AstVisitor* v);
 
-  static CallEval* sentinel() { return &sentinel_; }
+  Expression* expression() const { return expression_; }
+  ZoneList<Expression*>* arguments() const { return arguments_; }
+  int position() { return pos_; }
 
  private:
-  static CallEval sentinel_;
+  Expression* expression_;
+  ZoneList<Expression*>* arguments_;
+  int pos_;
 };
 
 
@@ -1024,6 +1080,7 @@ class CallRuntime: public Expression {
   Handle<String> name() const { return name_; }
   Runtime::Function* function() const { return function_; }
   ZoneList<Expression*>* arguments() const { return arguments_; }
+  bool is_jsruntime() const { return function_ == NULL; }
 
  private:
   Handle<String> name_;
@@ -1225,9 +1282,7 @@ class FunctionLiteral: public Expression {
                   Scope* scope,
                   ZoneList<Statement*>* body,
                   int materialized_literal_count,
-                  bool contains_array_literal,
                   int expected_property_count,
-                  bool has_only_this_property_assignments,
                   bool has_only_simple_this_property_assignments,
                   Handle<FixedArray> this_property_assignments,
                   int num_parameters,
@@ -1238,9 +1293,7 @@ class FunctionLiteral: public Expression {
         scope_(scope),
         body_(body),
         materialized_literal_count_(materialized_literal_count),
-        contains_array_literal_(contains_array_literal),
         expected_property_count_(expected_property_count),
-        has_only_this_property_assignments_(has_only_this_property_assignments),
         has_only_simple_this_property_assignments_(
             has_only_simple_this_property_assignments),
         this_property_assignments_(this_property_assignments),
@@ -1250,7 +1303,8 @@ class FunctionLiteral: public Expression {
         is_expression_(is_expression),
         loop_nesting_(0),
         function_token_position_(RelocInfo::kNoPosition),
-        inferred_name_(Heap::empty_string()) {
+        inferred_name_(Heap::empty_string()),
+        try_fast_codegen_(false) {
 #ifdef DEBUG
     already_compiled_ = false;
 #endif
@@ -1271,11 +1325,7 @@ class FunctionLiteral: public Expression {
   bool is_expression() const { return is_expression_; }
 
   int materialized_literal_count() { return materialized_literal_count_; }
-  bool contains_array_literal() { return contains_array_literal_; }
   int expected_property_count() { return expected_property_count_; }
-  bool has_only_this_property_assignments() {
-      return has_only_this_property_assignments_;
-  }
   bool has_only_simple_this_property_assignments() {
       return has_only_simple_this_property_assignments_;
   }
@@ -1294,6 +1344,9 @@ class FunctionLiteral: public Expression {
     inferred_name_ = inferred_name;
   }
 
+  bool try_fast_codegen() { return try_fast_codegen_; }
+  void set_try_fast_codegen(bool flag) { try_fast_codegen_ = flag; }
+
 #ifdef DEBUG
   void mark_as_compiled() {
     ASSERT(!already_compiled_);
@@ -1306,9 +1359,7 @@ class FunctionLiteral: public Expression {
   Scope* scope_;
   ZoneList<Statement*>* body_;
   int materialized_literal_count_;
-  bool contains_array_literal_;
   int expected_property_count_;
-  bool has_only_this_property_assignments_;
   bool has_only_simple_this_property_assignments_;
   Handle<FixedArray> this_property_assignments_;
   int num_parameters_;
@@ -1318,6 +1369,7 @@ class FunctionLiteral: public Expression {
   int loop_nesting_;
   int function_token_position_;
   Handle<String> inferred_name_;
+  bool try_fast_codegen_;
 #ifdef DEBUG
   bool already_compiled_;
 #endif
@@ -1703,6 +1755,7 @@ class AstVisitor BASE_EMBEDDED {
   void Visit(AstNode* node) { node->Accept(this); }
 
   // Iteration
+  virtual void VisitDeclarations(ZoneList<Declaration*>* declarations);
   virtual void VisitStatements(ZoneList<Statement*>* statements);
   virtual void VisitExpressions(ZoneList<Expression*>* expressions);
 

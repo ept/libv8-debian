@@ -37,8 +37,7 @@ TEST(HeapMaps) {
   CheckMap(Heap::meta_map(), MAP_TYPE, Map::kSize);
   CheckMap(Heap::heap_number_map(), HEAP_NUMBER_TYPE, HeapNumber::kSize);
   CheckMap(Heap::fixed_array_map(), FIXED_ARRAY_TYPE, FixedArray::kHeaderSize);
-  CheckMap(Heap::long_string_map(), LONG_STRING_TYPE,
-           SeqTwoByteString::kAlignedSize);
+  CheckMap(Heap::string_map(), STRING_TYPE, SeqTwoByteString::kAlignedSize);
 }
 
 
@@ -132,15 +131,19 @@ TEST(HeapObjects) {
   CHECK(value->IsNumber());
   CHECK_EQ(Smi::kMaxValue, Smi::cast(value)->value());
 
+#ifndef V8_TARGET_ARCH_X64
+  // TODO(lrn): We need a NumberFromIntptr function in order to test this.
   value = Heap::NumberFromInt32(Smi::kMinValue - 1);
   CHECK(value->IsHeapNumber());
   CHECK(value->IsNumber());
   CHECK_EQ(static_cast<double>(Smi::kMinValue - 1), value->Number());
+#endif
 
-  value = Heap::NumberFromInt32(Smi::kMaxValue + 1);
+  value = Heap::NumberFromUint32(static_cast<uint32_t>(Smi::kMaxValue) + 1);
   CHECK(value->IsHeapNumber());
   CHECK(value->IsNumber());
-  CHECK_EQ(static_cast<double>(Smi::kMaxValue + 1), value->Number());
+  CHECK_EQ(static_cast<double>(static_cast<uint32_t>(Smi::kMaxValue) + 1),
+           value->Number());
 
   // nan oddball checks
   CHECK(Heap::nan_value()->IsNumber());
@@ -258,7 +261,7 @@ TEST(GarbageCollection) {
 
 static void VerifyStringAllocation(const char* string) {
   String* s = String::cast(Heap::AllocateStringFromUtf8(CStrVector(string)));
-  CHECK_EQ(static_cast<int>(strlen(string)), s->length());
+  CHECK_EQ(StrLength(string), s->length());
   for (int index = 0; index < s->length(); index++) {
     CHECK_EQ(static_cast<uint16_t>(string[index]), s->Get(index));  }
 }
@@ -281,7 +284,7 @@ TEST(LocalHandles) {
   v8::HandleScope scope;
   const char* name = "Kasper the spunky";
   Handle<String> string = Factory::NewStringFromAscii(CStrVector(name));
-  CHECK_EQ(static_cast<int>(strlen(name)), string->length());
+  CHECK_EQ(StrLength(name), string->length());
 }
 
 
@@ -640,8 +643,9 @@ TEST(JSArray) {
   CHECK_EQ(Smi::FromInt(1), array->length());
   CHECK_EQ(array->GetElement(0), name);
 
-  // Set array length with larger than smi value.
-  Object* length = Heap::NumberFromInt32(Smi::kMaxValue + 1);
+// Set array length with larger than smi value.
+  Object* length =
+      Heap::NumberFromUint32(static_cast<uint32_t>(Smi::kMaxValue) + 1);
   array->SetElementsLength(length);
 
   uint32_t int_length = 0;

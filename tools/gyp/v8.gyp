@@ -81,13 +81,14 @@
           ['OS=="linux"', {
             'cflags!': [
               '-O2',
+              '-Os',
             ],
             'cflags': [
               '-fomit-frame-pointer',
               '-O3',
             ],
             'conditions': [
-              [ 'gcc_version=="44"', {
+              [ 'gcc_version==44', {
                 'cflags': [
                   # Avoid gcc 4.4 strict aliasing issues in dtoa.c
                   '-fno-strict-aliasing',
@@ -156,8 +157,8 @@
       'target_name': 'v8_snapshot',
       'type': '<(library)',
       'dependencies': [
-        'mksnapshot',
-        'js2c',
+        'mksnapshot#host',
+        'js2c#host',
         'v8_base',
       ],
       'include_dirs+': [
@@ -183,8 +184,9 @@
     {
       'target_name': 'v8_nosnapshot',
       'type': '<(library)',
+      'toolsets': ['host', 'target'],
       'dependencies': [
-        'js2c',
+        'js2c#host',
         'v8_base',
       ],
       'include_dirs+': [
@@ -194,10 +196,21 @@
         '<(SHARED_INTERMEDIATE_DIR)/libraries.cc',
         '../../src/snapshot-empty.cc',
       ],
+      'conditions': [
+        # The ARM assembler assumes the host is 32 bits, so force building
+        # 32-bit host tools.
+        # TODO(piman): This assumes that the host is ia32 or amd64. Fixing the
+        # code would be better
+        ['target_arch=="arm" and _toolset=="host"', {
+          'cflags': ['-m32'],
+          'ldflags': ['-m32'],
+        }]
+      ]
     },
     {
       'target_name': 'v8_base',
       'type': '<(library)',
+      'toolsets': ['host', 'target'],
       'include_dirs+': [
         '../../src',
       ],
@@ -219,8 +232,6 @@
         '../../src/builtins.cc',
         '../../src/builtins.h',
         '../../src/bytecodes-irregexp.h',
-        '../../src/cfg.cc',
-        '../../src/cfg.h',
         '../../src/char-predicates-inl.h',
         '../../src/char-predicates.h',
         '../../src/checks.cc',
@@ -258,14 +269,16 @@
         '../../src/execution.h',
         '../../src/factory.cc',
         '../../src/factory.h',
+        '../../src/fast-codegen.cc',
+        '../../src/fast-codegen.h',
         '../../src/flag-definitions.h',
         '../../src/flags.cc',
         '../../src/flags.h',
+        '../../src/frame-element.cc',
+        '../../src/frame-element.h',
         '../../src/frames-inl.h',
         '../../src/frames.cc',
         '../../src/frames.h',
-        '../../src/frame-element.cc',
-        '../../src/frame-element.h',
         '../../src/func-name-inferrer.cc',
         '../../src/func-name-inferrer.h',
         '../../src/global-handles.cc',
@@ -279,6 +292,8 @@
         '../../src/heap-inl.h',
         '../../src/heap.cc',
         '../../src/heap.h',
+        '../../src/heap-profiler.cc',
+        '../../src/heap-profiler.h',
         '../../src/ic-inl.h',
         '../../src/ic.cc',
         '../../src/ic.h',
@@ -291,11 +306,11 @@
         '../../src/jsregexp.h',
         '../../src/list-inl.h',
         '../../src/list.h',
-        '../../src/log.cc',
         '../../src/log-inl.h',
-        '../../src/log.h',
         '../../src/log-utils.cc',
         '../../src/log-utils.h',
+        '../../src/log.cc',
+        '../../src/log.h',
         '../../src/macro-assembler.h',
         '../../src/mark-compact.cc',
         '../../src/mark-compact.h',
@@ -388,13 +403,14 @@
             '../../src/arm/assembler-arm.cc',
             '../../src/arm/assembler-arm.h',
             '../../src/arm/builtins-arm.cc',
-            '../../src/arm/cfg-arm.cc',
             '../../src/arm/codegen-arm.cc',
             '../../src/arm/codegen-arm.h',
             '../../src/arm/constants-arm.h',
+            '../../src/arm/constants-arm.cc',
             '../../src/arm/cpu-arm.cc',
             '../../src/arm/debug-arm.cc',
             '../../src/arm/disasm-arm.cc',
+            '../../src/arm/fast-codegen-arm.cc',
             '../../src/arm/frames-arm.cc',
             '../../src/arm/frames-arm.h',
             '../../src/arm/ic-arm.cc',
@@ -409,6 +425,16 @@
             '../../src/arm/virtual-frame-arm.cc',
             '../../src/arm/virtual-frame-arm.h',
           ],
+          'conditions': [
+            # The ARM assembler assumes the host is 32 bits, so force building
+            # 32-bit host tools.
+            # TODO(piman): This assumes that the host is ia32 or amd64. Fixing
+            # the code would be better
+            ['_toolset=="host"', {
+              'cflags': ['-m32'],
+              'ldflags': ['-m32'],
+            }]
+          ]
         }],
         ['target_arch=="ia32"', {
           'include_dirs+': [
@@ -419,12 +445,12 @@
             '../../src/ia32/assembler-ia32.cc',
             '../../src/ia32/assembler-ia32.h',
             '../../src/ia32/builtins-ia32.cc',
-            '../../src/ia32/cfg-ia32.cc',
             '../../src/ia32/codegen-ia32.cc',
             '../../src/ia32/codegen-ia32.h',
             '../../src/ia32/cpu-ia32.cc',
             '../../src/ia32/debug-ia32.cc',
             '../../src/ia32/disasm-ia32.cc',
+            '../../src/ia32/fast-codegen-ia32.cc',
             '../../src/ia32/frames-ia32.cc',
             '../../src/ia32/frames-ia32.h',
             '../../src/ia32/ic-ia32.cc',
@@ -448,12 +474,12 @@
             '../../src/x64/assembler-x64.cc',
             '../../src/x64/assembler-x64.h',
             '../../src/x64/builtins-x64.cc',
-            '../../src/x64/cfg-x64.cc',
             '../../src/x64/codegen-x64.cc',
             '../../src/x64/codegen-x64.h',
             '../../src/x64/cpu-x64.cc',
             '../../src/x64/debug-x64.cc',
             '../../src/x64/disasm-x64.cc',
+            '../../src/x64/fast-codegen-x64.cc',
             '../../src/x64/frames-x64.cc',
             '../../src/x64/frames-x64.h',
             '../../src/x64/ic-x64.cc',
@@ -476,6 +502,17 @@
             ]},
             'sources': [
               '../../src/platform-linux.cc',
+              '../../src/platform-posix.cc'
+            ],
+          }
+        ],
+        ['OS=="openbsd"', {
+            'link_settings': {
+              'libraries': [
+                '-L/usr/local/lib -lexecinfo',
+            ]},
+            'sources': [
+              '../../src/platform-openbsd.cc',
               '../../src/platform-posix.cc'
             ],
           }
@@ -505,6 +542,7 @@
     {
       'target_name': 'js2c',
       'type': 'none',
+      'toolsets': ['host'],
       'variables': {
         'library_files': [
           '../../src/runtime.js',
@@ -547,6 +585,7 @@
     {
       'target_name': 'mksnapshot',
       'type': 'executable',
+      'toolsets': ['host'],
       'dependencies': [
         'v8_nosnapshot',
       ],
@@ -556,6 +595,16 @@
       'sources': [
         '../../src/mksnapshot.cc',
       ],
+      'conditions': [
+        # The ARM assembler assumes the host is 32 bits, so force building
+        # 32-bit host tools.
+        # TODO(piman): This assumes that the host is ia32 or amd64. Fixing
+        # the code would be better
+        ['target_arch=="arm" and _toolset=="host"', {
+          'cflags': ['-m32'],
+          'ldflags': ['-m32'],
+        }]
+      ]
     },
     {
       'target_name': 'v8_shell',

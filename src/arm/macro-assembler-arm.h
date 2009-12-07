@@ -79,6 +79,11 @@ class MacroAssembler: public Assembler {
   void RecordWrite(Register object, Register offset, Register scratch);
 
   // ---------------------------------------------------------------------------
+  // Stack limit support
+
+  void StackLimitCheck(Label* on_stack_limit_hit);
+
+  // ---------------------------------------------------------------------------
   // Activation frames
 
   void EnterInternalFrame() { EnterFrame(StackFrame::INTERNAL); }
@@ -87,15 +92,19 @@ class MacroAssembler: public Assembler {
   void EnterConstructFrame() { EnterFrame(StackFrame::CONSTRUCT); }
   void LeaveConstructFrame() { LeaveFrame(StackFrame::CONSTRUCT); }
 
-  // Enter specific kind of exit frame; either EXIT or
-  // EXIT_DEBUG. Expects the number of arguments in register r0 and
+  // Enter specific kind of exit frame; either normal or debug mode.
+  // Expects the number of arguments in register r0 and
   // the builtin function to call in register r1. Exits with argc in
   // r4, argv in r6, and and the builtin function to call in r5.
-  void EnterExitFrame(StackFrame::Type type);
+  void EnterExitFrame(ExitFrame::Mode mode);
 
   // Leave the current exit frame. Expects the return value in r0.
-  void LeaveExitFrame(StackFrame::Type type);
+  void LeaveExitFrame(ExitFrame::Mode mode);
 
+  // Align the stack by optionally pushing a Smi zero.
+  void AlignStack(int offset);
+
+  void LoadContext(Register dst, int context_chain_length);
 
   // ---------------------------------------------------------------------------
   // JavaScript invokes
@@ -171,18 +180,18 @@ class MacroAssembler: public Assembler {
   // bytes). If the new space is exhausted control continues at the gc_required
   // label. The allocated object is returned in result. If the flag
   // tag_allocated_object is true the result is tagged as as a heap object.
-  void AllocateObjectInNewSpace(int object_size,
-                                Register result,
-                                Register scratch1,
-                                Register scratch2,
-                                Label* gc_required,
-                                AllocationFlags flags);
-  void AllocateObjectInNewSpace(Register object_size,
-                                Register result,
-                                Register scratch1,
-                                Register scratch2,
-                                Label* gc_required,
-                                AllocationFlags flags);
+  void AllocateInNewSpace(int object_size,
+                          Register result,
+                          Register scratch1,
+                          Register scratch2,
+                          Label* gc_required,
+                          AllocationFlags flags);
+  void AllocateInNewSpace(Register object_size,
+                          Register result,
+                          Register scratch1,
+                          Register scratch2,
+                          Label* gc_required,
+                          AllocationFlags flags);
 
   // Undo allocation in new space. The object passed and objects allocated after
   // it will no longer be allocated. The caller must make sure that no pointers
@@ -238,13 +247,17 @@ class MacroAssembler: public Assembler {
   // occurred.
   void IllegalOperation(int num_arguments);
 
+  // Uses VFP instructions to Convert a Smi to a double.
+  void IntegerToDoubleConversionWithVFP3(Register inReg,
+                                         Register outHighReg,
+                                         Register outLowReg);
+
 
   // ---------------------------------------------------------------------------
   // Runtime calls
 
   // Call a code stub.
   void CallStub(CodeStub* stub, Condition cond = al);
-  void CallJSExitStub(CodeStub* stub);
 
   // Return from a code stub after popping its arguments.
   void StubReturn(int argc);
@@ -257,14 +270,14 @@ class MacroAssembler: public Assembler {
   void CallRuntime(Runtime::FunctionId fid, int num_arguments);
 
   // Tail call of a runtime routine (jump).
-  // Like JumpToBuiltin, but also takes care of passing the number
+  // Like JumpToRuntime, but also takes care of passing the number
   // of parameters.
   void TailCallRuntime(const ExternalReference& ext,
                        int num_arguments,
                        int result_size);
 
-  // Jump to the builtin routine.
-  void JumpToBuiltin(const ExternalReference& builtin);
+  // Jump to a runtime routine.
+  void JumpToRuntime(const ExternalReference& builtin);
 
   // Invoke specified builtin JavaScript function. Adds an entry to
   // the unresolved list if the name does not resolve.
@@ -329,8 +342,16 @@ class MacroAssembler: public Assembler {
                       Label* done,
                       InvokeFlag flag);
 
-  // Get the code for the given builtin. Returns if able to resolve
-  // the function in the 'resolved' flag.
+  // Prepares for a call or jump to a builtin by doing two things:
+  // 1. Emits code that fetches the builtin's function object from the context
+  //    at runtime, and puts it in the register rdi.
+  // 2. Fetches the builtin's code object, and returns it in a handle, at
+  //    compile time, so that later code can emit instructions to jump or call
+  //    the builtin directly.  If the code object has not yet been created, it
+  //    returns the builtin code object for IllegalFunction, and sets the
+  //    output parameter "resolved" to false.  Code that uses the return value
+  //    should then add the address and the builtin name to the list of fixups
+  //    called unresolved_, which is fixed up by the bootstrapper.
   Handle<Code> ResolveBuiltin(Builtins::JavaScript id, bool* resolved);
 
   // Activation support.

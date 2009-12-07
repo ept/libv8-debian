@@ -31,6 +31,7 @@
 #include "ic-inl.h"
 #include "runtime.h"
 #include "stub-cache.h"
+#include "utils.h"
 
 namespace v8 {
 namespace internal {
@@ -108,7 +109,7 @@ static void GenerateDictionaryLoad(MacroAssembler* masm, Label* miss_label,
       StringDictionary::kElementsStartIndex * kPointerSize;
   for (int i = 0; i < kProbes; i++) {
     // Compute the masked index: (hash + i + i * i) & mask.
-    __ mov(r1, FieldOperand(name, String::kLengthOffset));
+    __ mov(r1, FieldOperand(name, String::kHashFieldOffset));
     __ shr(r1, String::kHashShift);
     if (i > 0) {
       __ add(Operand(r1), Immediate(StringDictionary::GetProbeOffset(i)));
@@ -216,18 +217,6 @@ void LoadIC::GenerateFunctionPrototype(MacroAssembler* masm) {
 }
 
 
-#ifdef DEBUG
-// For use in assert below.
-static int TenToThe(int exponent) {
-  ASSERT(exponent <= 9);
-  ASSERT(exponent >= 1);
-  int answer = 10;
-  for (int i = 1; i < exponent; i++) answer *= 10;
-  return answer;
-}
-#endif
-
-
 void KeyedLoadIC::GenerateGeneric(MacroAssembler* masm) {
   // ----------- S t a t e -------------
   //  -- esp[0] : return address
@@ -298,11 +287,10 @@ void KeyedLoadIC::GenerateGeneric(MacroAssembler* masm) {
   __ shl(eax, kSmiTagSize);
   __ ret(0);
 
-
   // Slow case: Load name and receiver from stack and jump to runtime.
   __ bind(&slow);
   __ IncrementCounter(&Counters::keyed_load_generic_slow, 1);
-  KeyedLoadIC::Generate(masm, ExternalReference(Runtime::kKeyedGetProperty));
+  Generate(masm, ExternalReference(Runtime::kKeyedGetProperty));
 
   __ bind(&check_string);
   // The key is not a smi.
@@ -310,7 +298,7 @@ void KeyedLoadIC::GenerateGeneric(MacroAssembler* masm) {
   __ CmpObjectType(eax, FIRST_NONSTRING_TYPE, edx);
   __ j(above_equal, &slow);
   // Is the string an array index, with cached numeric value?
-  __ mov(ebx, FieldOperand(eax, String::kLengthOffset));
+  __ mov(ebx, FieldOperand(eax, String::kHashFieldOffset));
   __ test(ebx, Immediate(String::kIsArrayIndexMask));
   __ j(not_zero, &index_string, not_taken);
 
@@ -325,21 +313,177 @@ void KeyedLoadIC::GenerateGeneric(MacroAssembler* masm) {
   __ mov(eax, Operand(ecx));
   __ IncrementCounter(&Counters::keyed_load_generic_symbol, 1);
   __ ret(0);
-  // Array index string: If short enough use cache in length/hash field (ebx).
-  // We assert that there are enough bits in an int32_t after the hash shift
-  // bits have been subtracted to allow space for the length and the cached
-  // array index.
+  // If the hash field contains an array index pick it out. The assert checks
+  // that the constants for the maximum number of digits for an array index
+  // cached in the hash field and the number of bits reserved for it does not
+  // conflict.
   ASSERT(TenToThe(String::kMaxCachedArrayIndexLength) <
-         (1 << (String::kShortLengthShift - String::kHashShift)));
+         (1 << String::kArrayIndexValueBits));
   __ bind(&index_string);
-  const int kLengthFieldLimit =
-      (String::kMaxCachedArrayIndexLength + 1) << String::kShortLengthShift;
-  __ cmp(ebx, kLengthFieldLimit);
-  __ j(above_equal, &slow);
   __ mov(eax, Operand(ebx));
-  __ and_(eax, (1 << String::kShortLengthShift) - 1);
-  __ shr(eax, String::kLongLengthShift);
+  __ and_(eax, String::kArrayIndexHashMask);
+  __ shr(eax, String::kHashShift);
   __ jmp(&index_int);
+}
+
+
+void KeyedLoadIC::GenerateExternalArray(MacroAssembler* masm,
+                                        ExternalArrayType array_type) {
+  // ----------- S t a t e -------------
+  //  -- esp[0] : return address
+  //  -- esp[4] : key
+  //  -- esp[8] : receiver
+  // -----------------------------------
+  Label slow, failed_allocation;
+
+  // Load name and receiver.
+  __ mov(eax, Operand(esp, kPointerSize));
+  __ mov(ecx, Operand(esp, 2 * kPointerSize));
+
+  // Check that the object isn't a smi.
+  __ test(ecx, Immediate(kSmiTagMask));
+  __ j(zero, &slow, not_taken);
+
+  // Check that the key is a smi.
+  __ test(eax, Immediate(kSmiTagMask));
+  __ j(not_zero, &slow, not_taken);
+
+  // Get the map of the receiver.
+  __ mov(edx, FieldOperand(ecx, HeapObject::kMapOffset));
+  // Check that the receiver does not require access checks.  We need
+  // to check this explicitly since this generic stub does not perform
+  // map checks.
+  __ movzx_b(ebx, FieldOperand(edx, Map::kBitFieldOffset));
+  __ test(ebx, Immediate(1 << Map::kIsAccessCheckNeeded));
+  __ j(not_zero, &slow, not_taken);
+
+  // Get the instance type from the map of the receiver.
+  __ movzx_b(edx, FieldOperand(edx, Map::kInstanceTypeOffset));
+  // Check that the object is a JS object.
+  __ cmp(edx, JS_OBJECT_TYPE);
+  __ j(not_equal, &slow, not_taken);
+
+  // Check that the elements array is the appropriate type of
+  // ExternalArray.
+  // eax: index (as a smi)
+  // ecx: JSObject
+  __ mov(ecx, FieldOperand(ecx, JSObject::kElementsOffset));
+  Handle<Map> map(Heap::MapForExternalArrayType(array_type));
+  __ cmp(FieldOperand(ecx, HeapObject::kMapOffset),
+         Immediate(map));
+  __ j(not_equal, &slow, not_taken);
+
+  // Check that the index is in range.
+  __ sar(eax, kSmiTagSize);  // Untag the index.
+  __ cmp(eax, FieldOperand(ecx, ExternalArray::kLengthOffset));
+  // Unsigned comparison catches both negative and too-large values.
+  __ j(above_equal, &slow);
+
+  // eax: untagged index
+  // ecx: elements array
+  __ mov(ecx, FieldOperand(ecx, ExternalArray::kExternalPointerOffset));
+  // ecx: base pointer of external storage
+  switch (array_type) {
+    case kExternalByteArray:
+      __ movsx_b(eax, Operand(ecx, eax, times_1, 0));
+      break;
+    case kExternalUnsignedByteArray:
+      __ movzx_b(eax, Operand(ecx, eax, times_1, 0));
+      break;
+    case kExternalShortArray:
+      __ movsx_w(eax, Operand(ecx, eax, times_2, 0));
+      break;
+    case kExternalUnsignedShortArray:
+      __ movzx_w(eax, Operand(ecx, eax, times_2, 0));
+      break;
+    case kExternalIntArray:
+    case kExternalUnsignedIntArray:
+      __ mov(eax, Operand(ecx, eax, times_4, 0));
+      break;
+    case kExternalFloatArray:
+      __ fld_s(Operand(ecx, eax, times_4, 0));
+      break;
+    default:
+      UNREACHABLE();
+      break;
+  }
+
+  // For integer array types:
+  // eax: value
+  // For floating-point array type:
+  // FP(0): value
+
+  if (array_type == kExternalIntArray ||
+      array_type == kExternalUnsignedIntArray) {
+    // For the Int and UnsignedInt array types, we need to see whether
+    // the value can be represented in a Smi. If not, we need to convert
+    // it to a HeapNumber.
+    Label box_int;
+    if (array_type == kExternalIntArray) {
+      // See Smi::IsValid for why this works.
+      __ mov(ebx, eax);
+      __ add(Operand(ebx), Immediate(0x40000000));
+      __ cmp(ebx, 0x80000000);
+      __ j(above_equal, &box_int);
+    } else {
+      ASSERT_EQ(array_type, kExternalUnsignedIntArray);
+      // The test is different for unsigned int values. Since we need
+      // the Smi-encoded result to be treated as unsigned, we can't
+      // handle either of the top two bits being set in the value.
+      __ test(eax, Immediate(0xC0000000));
+      __ j(not_zero, &box_int);
+    }
+
+    __ shl(eax, kSmiTagSize);
+    __ ret(0);
+
+    __ bind(&box_int);
+
+    // Allocate a HeapNumber for the int and perform int-to-double
+    // conversion.
+    if (array_type == kExternalIntArray) {
+      __ push(eax);
+      __ fild_s(Operand(esp, 0));
+      __ pop(eax);
+    } else {
+      ASSERT(array_type == kExternalUnsignedIntArray);
+      // Need to zero-extend the value.
+      // There's no fild variant for unsigned values, so zero-extend
+      // to a 64-bit int manually.
+      __ push(Immediate(0));
+      __ push(eax);
+      __ fild_d(Operand(esp, 0));
+      __ pop(eax);
+      __ pop(eax);
+    }
+    // FP(0): value
+    __ AllocateHeapNumber(eax, ebx, ecx, &failed_allocation);
+    // Set the value.
+    __ fstp_d(FieldOperand(eax, HeapNumber::kValueOffset));
+    __ ret(0);
+  } else if (array_type == kExternalFloatArray) {
+    // For the floating-point array type, we need to always allocate a
+    // HeapNumber.
+    __ AllocateHeapNumber(eax, ebx, ecx, &failed_allocation);
+    // Set the value.
+    __ fstp_d(FieldOperand(eax, HeapNumber::kValueOffset));
+    __ ret(0);
+  } else {
+    __ shl(eax, kSmiTagSize);
+    __ ret(0);
+  }
+
+  // If we fail allocation of the HeapNumber, we still have a value on
+  // top of the FPU stack. Remove it.
+  __ bind(&failed_allocation);
+  __ ffree();
+  __ fincstp();
+  // Fall through to slow case.
+
+  // Slow case: Load name and receiver from stack and jump to runtime.
+  __ bind(&slow);
+  __ IncrementCounter(&Counters::keyed_load_external_array_slow, 1);
+  Generate(masm, ExternalReference(Runtime::kKeyedGetProperty));
 }
 
 
@@ -396,15 +540,9 @@ void KeyedStoreIC::GenerateGeneric(MacroAssembler* masm) {
   // ebx: index (as a smi)
   __ j(below, &fast, taken);
 
-  // Slow case: Push extra copies of the arguments (3).
+  // Slow case: call runtime.
   __ bind(&slow);
-  __ pop(ecx);
-  __ push(Operand(esp, 1 * kPointerSize));
-  __ push(Operand(esp, 1 * kPointerSize));
-  __ push(eax);
-  __ push(ecx);
-  // Do tail-call to runtime routine.
-  __ TailCallRuntime(ExternalReference(Runtime::kSetProperty), 3, 1);
+  Generate(masm, ExternalReference(Runtime::kSetProperty));
 
   // Check whether the elements is a pixel array.
   // eax: value
@@ -421,21 +559,19 @@ void KeyedStoreIC::GenerateGeneric(MacroAssembler* masm) {
   __ sar(ebx, kSmiTagSize);  // Untag the index.
   __ cmp(ebx, FieldOperand(ecx, PixelArray::kLengthOffset));
   __ j(above_equal, &slow);
+  __ mov(edx, eax);  // Save the value.
   __ sar(eax, kSmiTagSize);  // Untag the value.
   {  // Clamp the value to [0..255].
-    Label done, check_255;
-    __ cmp(eax, 0);
-    __ j(greater_equal, &check_255);
-    __ mov(eax, Immediate(0));
-    __ jmp(&done);
-    __ bind(&check_255);
-    __ cmp(eax, 255);
-    __ j(less_equal, &done);
-    __ mov(eax, Immediate(255));
+    Label done;
+    __ test(eax, Immediate(0xFFFFFF00));
+    __ j(zero, &done);
+    __ setcc(negative, eax);  // 1 if negative, 0 if positive.
+    __ dec_b(eax);  // 0 if negative, 255 if positive.
     __ bind(&done);
   }
   __ mov(ecx, FieldOperand(ecx, PixelArray::kExternalPointerOffset));
   __ mov_b(Operand(ecx, ebx, times_1, 0), eax);
+  __ mov(eax, edx);  // Return the original value.
   __ ret(0);
 
   // Extra capacity case: Check if there is extra capacity to
@@ -456,7 +592,6 @@ void KeyedStoreIC::GenerateGeneric(MacroAssembler* masm) {
   __ mov(FieldOperand(edx, JSArray::kLengthOffset), ebx);
   __ sub(Operand(ebx), Immediate(1 << kSmiTagSize));  // decrement ebx again
   __ jmp(&fast);
-
 
   // Array case: Get the length and the elements array from the JS
   // array. Check that the array is in fast mode; if it is the
@@ -486,6 +621,201 @@ void KeyedStoreIC::GenerateGeneric(MacroAssembler* masm) {
   __ mov(edx, Operand(eax));
   __ RecordWrite(ecx, 0, edx, ebx);
   __ ret(0);
+}
+
+
+void KeyedStoreIC::GenerateExternalArray(MacroAssembler* masm,
+                                         ExternalArrayType array_type) {
+  // ----------- S t a t e -------------
+  //  -- eax    : value
+  //  -- esp[0] : return address
+  //  -- esp[4] : key
+  //  -- esp[8] : receiver
+  // -----------------------------------
+  Label slow, check_heap_number;
+
+  // Get the receiver from the stack.
+  __ mov(edx, Operand(esp, 2 * kPointerSize));
+  // Check that the object isn't a smi.
+  __ test(edx, Immediate(kSmiTagMask));
+  __ j(zero, &slow);
+  // Get the map from the receiver.
+  __ mov(ecx, FieldOperand(edx, HeapObject::kMapOffset));
+  // Check that the receiver does not require access checks.  We need
+  // to do this because this generic stub does not perform map checks.
+  __ movzx_b(ebx, FieldOperand(ecx, Map::kBitFieldOffset));
+  __ test(ebx, Immediate(1 << Map::kIsAccessCheckNeeded));
+  __ j(not_zero, &slow);
+  // Get the key from the stack.
+  __ mov(ebx, Operand(esp, 1 * kPointerSize));  // 1 ~ return address
+  // Check that the key is a smi.
+  __ test(ebx, Immediate(kSmiTagMask));
+  __ j(not_zero, &slow);
+  // Get the instance type from the map of the receiver.
+  __ movzx_b(ecx, FieldOperand(ecx, Map::kInstanceTypeOffset));
+  // Check that the object is a JS object.
+  __ cmp(ecx, JS_OBJECT_TYPE);
+  __ j(not_equal, &slow);
+
+  // Check that the elements array is the appropriate type of
+  // ExternalArray.
+  // eax: value
+  // edx: JSObject
+  // ebx: index (as a smi)
+  __ mov(ecx, FieldOperand(edx, JSObject::kElementsOffset));
+  Handle<Map> map(Heap::MapForExternalArrayType(array_type));
+  __ cmp(FieldOperand(ecx, HeapObject::kMapOffset),
+         Immediate(map));
+  __ j(not_equal, &slow);
+
+  // Check that the index is in range.
+  __ sar(ebx, kSmiTagSize);  // Untag the index.
+  __ cmp(ebx, FieldOperand(ecx, ExternalArray::kLengthOffset));
+  // Unsigned comparison catches both negative and too-large values.
+  __ j(above_equal, &slow);
+
+  // Handle both smis and HeapNumbers in the fast path. Go to the
+  // runtime for all other kinds of values.
+  // eax: value
+  // ecx: elements array
+  // ebx: untagged index
+  __ test(eax, Immediate(kSmiTagMask));
+  __ j(not_equal, &check_heap_number);
+  // smi case
+  __ mov(edx, eax);  // Save the value.
+  __ sar(eax, kSmiTagSize);  // Untag the value.
+  __ mov(ecx, FieldOperand(ecx, ExternalArray::kExternalPointerOffset));
+  // ecx: base pointer of external storage
+  switch (array_type) {
+    case kExternalByteArray:
+    case kExternalUnsignedByteArray:
+      __ mov_b(Operand(ecx, ebx, times_1, 0), eax);
+      break;
+    case kExternalShortArray:
+    case kExternalUnsignedShortArray:
+      __ mov_w(Operand(ecx, ebx, times_2, 0), eax);
+      break;
+    case kExternalIntArray:
+    case kExternalUnsignedIntArray:
+      __ mov(Operand(ecx, ebx, times_4, 0), eax);
+      break;
+    case kExternalFloatArray:
+      // Need to perform int-to-float conversion.
+      __ push(eax);
+      __ fild_s(Operand(esp, 0));
+      __ pop(eax);
+      __ fstp_s(Operand(ecx, ebx, times_4, 0));
+      break;
+    default:
+      UNREACHABLE();
+      break;
+  }
+  __ mov(eax, edx);  // Return the original value.
+  __ ret(0);
+
+  __ bind(&check_heap_number);
+  __ cmp(FieldOperand(eax, HeapObject::kMapOffset),
+         Immediate(Factory::heap_number_map()));
+  __ j(not_equal, &slow);
+
+  // The WebGL specification leaves the behavior of storing NaN and
+  // +/-Infinity into integer arrays basically undefined. For more
+  // reproducible behavior, convert these to zero.
+  __ fld_d(FieldOperand(eax, HeapNumber::kValueOffset));
+  __ mov(edx, eax);  // Save the value.
+  __ mov(ecx, FieldOperand(ecx, ExternalArray::kExternalPointerOffset));
+  // ebx: untagged index
+  // ecx: base pointer of external storage
+  // top of FPU stack: value
+  if (array_type == kExternalFloatArray) {
+    __ fstp_s(Operand(ecx, ebx, times_4, 0));
+    __ mov(eax, edx);  // Return the original value.
+    __ ret(0);
+  } else {
+    // Need to perform float-to-int conversion.
+    // Test the top of the FP stack for NaN.
+    Label is_nan;
+    __ fucomi(0);
+    __ j(parity_even, &is_nan);
+
+    if (array_type != kExternalUnsignedIntArray) {
+      __ push(eax);  // Make room on stack
+      __ fistp_s(Operand(esp, 0));
+      __ pop(eax);
+    } else {
+      // fistp stores values as signed integers.
+      // To represent the entire range, we need to store as a 64-bit
+      // int and discard the high 32 bits.
+      __ push(eax);  // Make room on stack
+      __ push(eax);  // Make room on stack
+      __ fistp_d(Operand(esp, 0));
+      __ pop(eax);
+      __ mov(Operand(esp, 0), eax);
+      __ pop(eax);
+    }
+    // eax: untagged integer value
+    switch (array_type) {
+      case kExternalByteArray:
+      case kExternalUnsignedByteArray:
+        __ mov_b(Operand(ecx, ebx, times_1, 0), eax);
+        break;
+      case kExternalShortArray:
+      case kExternalUnsignedShortArray:
+        __ mov_w(Operand(ecx, ebx, times_2, 0), eax);
+        break;
+      case kExternalIntArray:
+      case kExternalUnsignedIntArray: {
+        // We also need to explicitly check for +/-Infinity. These are
+        // converted to MIN_INT, but we need to be careful not to
+        // confuse with legal uses of MIN_INT.
+        Label not_infinity;
+        // This test would apparently detect both NaN and Infinity,
+        // but we've already checked for NaN using the FPU hardware
+        // above.
+        __ mov_w(edi, FieldOperand(edx, HeapNumber::kValueOffset + 6));
+        __ and_(edi, 0x7FF0);
+        __ cmp(edi, 0x7FF0);
+        __ j(not_equal, &not_infinity);
+        __ mov(eax, 0);
+        __ bind(&not_infinity);
+        __ mov(Operand(ecx, ebx, times_4, 0), eax);
+        break;
+      }
+      default:
+        UNREACHABLE();
+        break;
+    }
+    __ mov(eax, edx);  // Return the original value.
+    __ ret(0);
+
+    __ bind(&is_nan);
+    __ ffree();
+    __ fincstp();
+    switch (array_type) {
+      case kExternalByteArray:
+      case kExternalUnsignedByteArray:
+        __ mov_b(Operand(ecx, ebx, times_1, 0), 0);
+        break;
+      case kExternalShortArray:
+      case kExternalUnsignedShortArray:
+        __ mov(eax, 0);
+        __ mov_w(Operand(ecx, ebx, times_2, 0), eax);
+        break;
+      case kExternalIntArray:
+      case kExternalUnsignedIntArray:
+        __ mov(Operand(ecx, ebx, times_4, 0), Immediate(0));
+        break;
+      default:
+        UNREACHABLE();
+        break;
+    }
+    __ mov(eax, edx);  // Return the original value.
+    __ ret(0);
+  }
+
+  // Slow case: call runtime.
+  __ bind(&slow);
+  Generate(masm, ExternalReference(Runtime::kSetProperty));
 }
 
 
