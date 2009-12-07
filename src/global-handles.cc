@@ -165,6 +165,9 @@ class GlobalHandles::Node : public Malloced {
       // It's fine though to reuse nodes that were destroyed in weak callback
       // as those cannot be deallocated until we are back from the callback.
       set_first_free(NULL);
+      if (first_deallocated()) {
+        first_deallocated()->set_next(head());
+      }
       // Leaving V8.
       VMState state(EXTERNAL);
       func(object, par);
@@ -270,6 +273,7 @@ Handle<Object> GlobalHandles::Create(Object* value) {
     // Next try deallocated list
     result = first_deallocated();
     set_first_deallocated(result->next_free());
+    ASSERT(result->next() == head());
     set_head(result);
   } else {
     // Allocate a new node.
@@ -390,14 +394,24 @@ void GlobalHandles::PostGarbageCollectionProcessing() {
 }
 
 
-void GlobalHandles::IterateRoots(ObjectVisitor* v) {
-  // Traversal of global handles marked as NORMAL or NEAR_DEATH.
+void GlobalHandles::IterateStrongRoots(ObjectVisitor* v) {
+  // Traversal of global handles marked as NORMAL.
   for (Node* current = head_; current != NULL; current = current->next()) {
     if (current->state_ == Node::NORMAL) {
       v->VisitPointer(&current->object_);
     }
   }
 }
+
+
+void GlobalHandles::IterateAllRoots(ObjectVisitor* v) {
+  for (Node* current = head_; current != NULL; current = current->next()) {
+    if (current->state_ != Node::DESTROYED) {
+      v->VisitPointer(&current->object_);
+    }
+  }
+}
+
 
 void GlobalHandles::TearDown() {
   // Reset all the lists.
@@ -414,6 +428,26 @@ int GlobalHandles::number_of_global_object_weak_handles_ = 0;
 GlobalHandles::Node* GlobalHandles::head_ = NULL;
 GlobalHandles::Node* GlobalHandles::first_free_ = NULL;
 GlobalHandles::Node* GlobalHandles::first_deallocated_ = NULL;
+
+void GlobalHandles::RecordStats(HeapStats* stats) {
+  *stats->global_handle_count = 0;
+  *stats->weak_global_handle_count = 0;
+  *stats->pending_global_handle_count = 0;
+  *stats->near_death_global_handle_count = 0;
+  *stats->destroyed_global_handle_count = 0;
+  for (Node* current = head_; current != NULL; current = current->next()) {
+    *stats->global_handle_count++;
+    if (current->state_ == Node::WEAK) {
+      *stats->weak_global_handle_count++;
+    } else if (current->state_ == Node::PENDING) {
+      *stats->pending_global_handle_count++;
+    } else if (current->state_ == Node::NEAR_DEATH) {
+      *stats->near_death_global_handle_count++;
+    } else if (current->state_ == Node::DESTROYED) {
+      *stats->destroyed_global_handle_count++;
+    }
+  }
+}
 
 #ifdef DEBUG
 

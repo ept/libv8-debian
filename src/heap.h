@@ -59,62 +59,20 @@ namespace internal {
   V(Object, termination_exception, TerminationException)                       \
   V(Map, hash_table_map, HashTableMap)                                         \
   V(FixedArray, empty_fixed_array, EmptyFixedArray)                            \
-  V(Map, short_string_map, ShortStringMap)                                     \
-  V(Map, medium_string_map, MediumStringMap)                                   \
-  V(Map, long_string_map, LongStringMap)                                       \
-  V(Map, short_ascii_string_map, ShortAsciiStringMap)                          \
-  V(Map, medium_ascii_string_map, MediumAsciiStringMap)                        \
-  V(Map, long_ascii_string_map, LongAsciiStringMap)                            \
-  V(Map, short_symbol_map, ShortSymbolMap)                                     \
-  V(Map, medium_symbol_map, MediumSymbolMap)                                   \
-  V(Map, long_symbol_map, LongSymbolMap)                                       \
-  V(Map, short_ascii_symbol_map, ShortAsciiSymbolMap)                          \
-  V(Map, medium_ascii_symbol_map, MediumAsciiSymbolMap)                        \
-  V(Map, long_ascii_symbol_map, LongAsciiSymbolMap)                            \
-  V(Map, short_cons_symbol_map, ShortConsSymbolMap)                            \
-  V(Map, medium_cons_symbol_map, MediumConsSymbolMap)                          \
-  V(Map, long_cons_symbol_map, LongConsSymbolMap)                              \
-  V(Map, short_cons_ascii_symbol_map, ShortConsAsciiSymbolMap)                 \
-  V(Map, medium_cons_ascii_symbol_map, MediumConsAsciiSymbolMap)               \
-  V(Map, long_cons_ascii_symbol_map, LongConsAsciiSymbolMap)                   \
-  V(Map, short_sliced_symbol_map, ShortSlicedSymbolMap)                        \
-  V(Map, medium_sliced_symbol_map, MediumSlicedSymbolMap)                      \
-  V(Map, long_sliced_symbol_map, LongSlicedSymbolMap)                          \
-  V(Map, short_sliced_ascii_symbol_map, ShortSlicedAsciiSymbolMap)             \
-  V(Map, medium_sliced_ascii_symbol_map, MediumSlicedAsciiSymbolMap)           \
-  V(Map, long_sliced_ascii_symbol_map, LongSlicedAsciiSymbolMap)               \
-  V(Map, short_external_symbol_map, ShortExternalSymbolMap)                    \
-  V(Map, medium_external_symbol_map, MediumExternalSymbolMap)                  \
-  V(Map, long_external_symbol_map, LongExternalSymbolMap)                      \
-  V(Map, short_external_ascii_symbol_map, ShortExternalAsciiSymbolMap)         \
-  V(Map, medium_external_ascii_symbol_map, MediumExternalAsciiSymbolMap)       \
-  V(Map, long_external_ascii_symbol_map, LongExternalAsciiSymbolMap)           \
-  V(Map, short_cons_string_map, ShortConsStringMap)                            \
-  V(Map, medium_cons_string_map, MediumConsStringMap)                          \
-  V(Map, long_cons_string_map, LongConsStringMap)                              \
-  V(Map, short_cons_ascii_string_map, ShortConsAsciiStringMap)                 \
-  V(Map, medium_cons_ascii_string_map, MediumConsAsciiStringMap)               \
-  V(Map, long_cons_ascii_string_map, LongConsAsciiStringMap)                   \
-  V(Map, short_sliced_string_map, ShortSlicedStringMap)                        \
-  V(Map, medium_sliced_string_map, MediumSlicedStringMap)                      \
-  V(Map, long_sliced_string_map, LongSlicedStringMap)                          \
-  V(Map, short_sliced_ascii_string_map, ShortSlicedAsciiStringMap)             \
-  V(Map, medium_sliced_ascii_string_map, MediumSlicedAsciiStringMap)           \
-  V(Map, long_sliced_ascii_string_map, LongSlicedAsciiStringMap)               \
-  V(Map, short_external_string_map, ShortExternalStringMap)                    \
-  V(Map, medium_external_string_map, MediumExternalStringMap)                  \
-  V(Map, long_external_string_map, LongExternalStringMap)                      \
-  V(Map, short_external_ascii_string_map, ShortExternalAsciiStringMap)         \
-  V(Map, medium_external_ascii_string_map, MediumExternalAsciiStringMap)       \
-  V(Map, long_external_ascii_string_map, LongExternalAsciiStringMap)           \
-  V(Map, undetectable_short_string_map, UndetectableShortStringMap)            \
-  V(Map, undetectable_medium_string_map, UndetectableMediumStringMap)          \
-  V(Map, undetectable_long_string_map, UndetectableLongStringMap)              \
-  V(Map, undetectable_short_ascii_string_map, UndetectableShortAsciiStringMap) \
-  V(Map,                                                                       \
-    undetectable_medium_ascii_string_map,                                      \
-    UndetectableMediumAsciiStringMap)                                          \
-  V(Map, undetectable_long_ascii_string_map, UndetectableLongAsciiStringMap)   \
+  V(Map, string_map, StringMap)                                                \
+  V(Map, ascii_string_map, AsciiStringMap)                                     \
+  V(Map, symbol_map, SymbolMap)                                                \
+  V(Map, ascii_symbol_map, AsciiSymbolMap)                                     \
+  V(Map, cons_symbol_map, ConsSymbolMap)                                       \
+  V(Map, cons_ascii_symbol_map, ConsAsciiSymbolMap)                            \
+  V(Map, external_symbol_map, ExternalSymbolMap)                               \
+  V(Map, external_ascii_symbol_map, ExternalAsciiSymbolMap)                    \
+  V(Map, cons_string_map, ConsStringMap)                                       \
+  V(Map, cons_ascii_string_map, ConsAsciiStringMap)                            \
+  V(Map, external_string_map, ExternalStringMap)                               \
+  V(Map, external_ascii_string_map, ExternalAsciiStringMap)                    \
+  V(Map, undetectable_string_map, UndetectableStringMap)                       \
+  V(Map, undetectable_ascii_string_map, UndetectableAsciiStringMap)            \
   V(Map, pixel_array_map, PixelArrayMap)                                       \
   V(Map, external_byte_array_map, ExternalByteArrayMap)                        \
   V(Map, external_unsigned_byte_array_map, ExternalUnsignedByteArrayMap)       \
@@ -148,6 +106,7 @@ namespace internal {
   V(FixedArray, single_character_string_cache, SingleCharacterStringCache)     \
   V(FixedArray, natives_source_cache, NativesSourceCache)                      \
   V(Object, last_script_id, LastScriptId)                                      \
+  V(Smi, real_stack_limit, RealStackLimit)                                     \
 
 #if V8_TARGET_ARCH_ARM && V8_NATIVE_REGEXP
 #define STRONG_ROOT_LIST(V)                                                    \
@@ -230,6 +189,7 @@ namespace internal {
 
 // Forward declaration of the GCTracer class.
 class GCTracer;
+class HeapStats;
 
 
 // The all static Heap captures the interface to the global object heap.
@@ -250,10 +210,10 @@ class Heap : public AllStatic {
   // Destroys all memory allocated by the heap.
   static void TearDown();
 
-  // Sets the stack limit in the roots_ array.  Some architectures generate code
-  // that looks here, because it is faster than loading from the static jslimit_
-  // variable.
-  static void SetStackLimit(intptr_t limit);
+  // Set the stack limit in the roots_ array.  Some architectures generate
+  // code that looks here, because it is faster than loading from the static
+  // jslimit_/real_jslimit_ variable in the StackGuard.
+  static void SetStackLimits();
 
   // Returns whether Setup has been called.
   static bool HasBeenSetup();
@@ -420,11 +380,11 @@ class Heap : public AllStatic {
   // Please note this function does not perform a garbage collection.
   static inline Object* AllocateSymbol(Vector<const char> str,
                                        int chars,
-                                       uint32_t length_field);
+                                       uint32_t hash_field);
 
   static Object* AllocateInternalSymbol(unibrow::CharacterStream* buffer,
                                         int chars,
-                                        uint32_t length_field);
+                                        uint32_t hash_field);
 
   static Object* AllocateExternalSymbol(Vector<const char> str,
                                         int chars);
@@ -586,16 +546,6 @@ class Heap : public AllStatic {
   // Please note this does not perform a garbage collection.
   static Object* AllocateConsString(String* first, String* second);
 
-  // Allocates a new sliced string object which is a slice of an underlying
-  // string buffer stretching from the index start (inclusive) to the index
-  // end (exclusive).
-  // Returns Failure::RetryAfterGC(requested_bytes, space) if the allocation
-  // failed.
-  // Please note this does not perform a garbage collection.
-  static Object* AllocateSlicedString(String* buffer,
-                                      int start,
-                                      int end);
-
   // Allocates a new sub string object which is a substring of an underlying
   // string buffer stretching from the index start (inclusive) to the index
   // end (exclusive).
@@ -652,6 +602,7 @@ class Heap : public AllStatic {
   }
   static Object* LookupSymbol(String* str);
   static bool LookupSymbolIfExists(String* str, String** symbol);
+  static bool LookupTwoCharsSymbolIfExists(String* str, String** symbol);
 
   // Compute the matching symbol map for a string if possible.
   // NULL is returned if string is in new space or not flattened.
@@ -729,9 +680,9 @@ class Heap : public AllStatic {
   static String* hidden_symbol() { return hidden_symbol_; }
 
   // Iterates over all roots in the heap.
-  static void IterateRoots(ObjectVisitor* v);
+  static void IterateRoots(ObjectVisitor* v, VisitMode mode);
   // Iterates over all strong roots in the heap.
-  static void IterateStrongRoots(ObjectVisitor* v);
+  static void IterateStrongRoots(ObjectVisitor* v, VisitMode mode);
 
   // Iterates remembered set of an old space.
   static void IterateRSet(PagedSpace* space, ObjectSlotCallback callback);
@@ -915,6 +866,8 @@ class Heap : public AllStatic {
   static RootListIndex RootIndexForExternalArrayType(
       ExternalArrayType array_type);
 
+  static void RecordStats(HeapStats* stats);
+
  private:
   static int reserved_semispace_size_;
   static int max_semispace_size_;
@@ -930,7 +883,10 @@ class Heap : public AllStatic {
   static int linear_allocation_scope_depth_;
   static bool context_disposed_pending_;
 
-  static const int kMaxMapSpaceSize = 8*MB;
+  // The number of MapSpace pages is limited by the way we pack
+  // Map pointers during GC.
+  static const int kMaxMapSpaceSize =
+      (1 << MapWord::kMapPageIndexBits) * Page::kPageSize;
 
 #if defined(V8_TARGET_ARCH_X64)
   static const int kMaxObjectSizeInNewSpace = 512*KB;
@@ -1144,6 +1100,31 @@ class Heap : public AllStatic {
   friend class DisallowAllocationFailure;
   friend class AlwaysAllocateScope;
   friend class LinearAllocationScope;
+};
+
+
+class HeapStats {
+ public:
+  int *start_marker;
+  int *new_space_size;
+  int *new_space_capacity;
+  int *old_pointer_space_size;
+  int *old_pointer_space_capacity;
+  int *old_data_space_size;
+  int *old_data_space_capacity;
+  int *code_space_size;
+  int *code_space_capacity;
+  int *map_space_size;
+  int *map_space_capacity;
+  int *cell_space_size;
+  int *cell_space_capacity;
+  int *lo_space_size;
+  int *global_handle_count;
+  int *weak_global_handle_count;
+  int *pending_global_handle_count;
+  int *near_death_global_handle_count;
+  int *destroyed_global_handle_count;
+  int *end_marker;
 };
 
 
