@@ -1,0 +1,26 @@
+patch to enable the soname that is not automatically shipped with SConstruct
+
+--- a/SConstruct
++++ b/SConstruct
+@@ -897,7 +897,9 @@
+   version = GetVersion()
+   if context.options['soname'] == 'on':
+     # When building shared object with SONAME version the library name.
+-    library_name += '-' + version
++    soname = GetSpecificSONAME()
++    if soname == '':
++      library_name += '-' + version
+   env['LIBRARY'] = library_name
+ 
+   # Generate library SONAME if required by the build.
+--- a/src/version.cc
++++ b/src/version.cc
+@@ -41,7 +41,7 @@
+ // Define SONAME to have the SCons build the put a specific SONAME into the
+ // shared library instead the generic SONAME generated from the V8 version
+ // number. This define is mainly used by the SCons build script.
+-#define SONAME            ""
++#define SONAME            "libv8.so.2.0.3"
+ 
+ namespace v8 {
+ namespace internal {

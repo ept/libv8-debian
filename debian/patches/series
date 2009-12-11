@@ -1,3 +1,4 @@
 install_target.patch
+enable_soname.patch
 armel-build.patch
 x86_64_code.patch

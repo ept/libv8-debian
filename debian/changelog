@@ -1,3 +1,13 @@
+libv8 (2.0.3-2) unstable; urgency=low
+
+  * Modified the upstream soname (from libv8-2.0.3.so to libv8.so.2.0.3)
+    + restored patches/enable_soname.patch
+    + restore the link commands in debian/rules
+  * Added a libv8-2.0.3.install so that the package is not empty anymore
+    + (Closes: 560433)
+
+ -- Antonio Radici <antonio@dyne.org>  Fri, 11 Dec 2009 20:33:23 +0000
+
 libv8 (2.0.3-1) unstable; urgency=low
 
   * New upstream release
