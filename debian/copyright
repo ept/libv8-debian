@@ -21,7 +21,13 @@ License: GPL-2+
 Files: src/arm/assembler-arm*
 Copyright: 
  1994-2006 Sun Microsystems Inc.
- 2006-2008 the V8 Project Authors
+ 2006-2010 the V8 Project Authors
+License: BSD
+
+Files: src/arm/assembler-thumb2*
+Copyright: 
+ 1994-2006 Sun Microsystems Inc.
+ 2006-2010 the V8 Project Authors
 License: BSD
 
 Files: src/ia32/assembler-ia32*
@@ -30,14 +36,20 @@ Copyright:
  2006-2008 the V8 Project Authors
 License: BSD
 
+Files: src/ia32/assembler-mips*
+Copyright: 
+ 1994-2006 Sun Microsystems Inc.
+ 2010 the V8 Project Authors
+License: BSD
+
 Files: src/x64/assembler-x64.h
  1994-2006 Sun Microsystems Inc.
- 2006-2008 the V8 Project Authors
+ 2006-2009 the V8 Project Authors
 License: BSD
 
 Files: src/assembler.*
  1994-2006 Sun Microsystems Inc.
- 2006-2008 the V8 Project Authors
+ 2006-2009 the V8 Project Authors
 License: BSD
 
 Files: src/third-party/dtoa/*

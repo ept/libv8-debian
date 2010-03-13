@@ -1,11 +1,15 @@
 libv8 (2.1.6-1) unstable; urgency=low
 
+  [ Antonio Radici ]
   * New upstream release
     + package should now build clean with gcc-4.5 (Closes: 565030)
   * debian/patches:
     + refreshed all patches
     + x86_64_code.patch: changed to drop any reference to ia64 
       (it does not seem to build there)
+
+  [ Jérémy Lal ]
+  * debian/copyright: updated to reflect the missing files
 
  -- Antonio Radici <antonio@dyne.org>  Sun, 21 Mar 2010 10:58:49 +0000
 
