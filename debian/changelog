@@ -1,3 +1,10 @@
+libv8 (2.1.6-1) unstable; urgency=low
+
+  * New upstream release
+    + package should now build clean with gcc-4.5 (Closes: 565030)
+
+ -- Antonio Radici <antonio@dyne.org>  Sun, 21 Mar 2010 10:48:10 +0000
+
 libv8 (2.0.3-2) unstable; urgency=low
 
   * Modified the upstream soname (from libv8-2.0.3.so to libv8.so.2.0.3)
