@@ -1,7 +1,7 @@
 Source: libv8
 Priority: extra
 Maintainer: Antonio Radici <antonio@dyne.org>
-Build-Depends: debhelper (>= 7), pkg-config, scons, quilt, cdbs (>= 0.4.73)
+Build-Depends: debhelper (>= 7), pkg-config, scons, quilt, cdbs
 Standards-Version: 3.8.4
 Section: libs
 Homepage: http://code.google.com/p/v8/

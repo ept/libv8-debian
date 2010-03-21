@@ -11,7 +11,6 @@ libv8 (2.1.6-1) unstable; urgency=low
     + refreshed all patches
     + x86_64_code.patch: changed to drop any reference to ia64 
       (it does not seem to build there)
-  * removed any ref to scons.mk, now included in scons >= 0.4.73
 
   [ Jérémy Lal ]
   * debian/copyright: updated to reflect the missing files/dates
