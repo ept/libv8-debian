@@ -3,6 +3,10 @@ libv8 (2.1.6-1) unstable; urgency=low
   [ Antonio Radici ]
   * New upstream release
     + package should now build clean with gcc-4.5 (Closes: 565030)
+    + debian/rules: SONAME var updated
+    + debian/libv8-2.0.3.install edited and renamed to libv8-2.1.6.install
+    + debian/control: s/2.0.3/2.1.6/
+  * debian/control: Standards-Version bumped to 3.8.4 (no changes required)
   * debian/patches:
     + refreshed all patches
     + x86_64_code.patch: changed to drop any reference to ia64 
