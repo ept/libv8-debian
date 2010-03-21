@@ -59,9 +59,6 @@ class Bootstrapper : public AllStatic {
                                  Handle<JSFunction>* handle);
   static void NativesCacheAdd(Vector<const char> name, Handle<JSFunction> fun);
 
-  // Append code that needs fixup at the end of boot strapping.
-  static void AddFixup(Code* code, MacroAssembler* masm);
-
   // Tells whether bootstrapping is active.
   static bool IsActive();
 
@@ -74,6 +71,10 @@ class Bootstrapper : public AllStatic {
   static char* ArchiveState(char* to);
   static char* RestoreState(char* from);
   static void FreeThreadResources();
+
+  // This will allocate a char array that is deleted when V8 is shut down.
+  // It should only be used for strictly finite allocations.
+  static char* AllocateAutoDeletedArray(int bytes);
 };
 
 

@@ -58,22 +58,36 @@ AST_NODE_LIST(DECL_ACCEPT)
 // ----------------------------------------------------------------------------
 // Implementation of other node functionality.
 
+Assignment* ExpressionStatement::StatementAsSimpleAssignment() {
+  return (expression()->AsAssignment() != NULL &&
+          !expression()->AsAssignment()->is_compound())
+      ? expression()->AsAssignment()
+      : NULL;
+}
+
+
+CountOperation* ExpressionStatement::StatementAsCountOperation() {
+  return expression()->AsCountOperation();
+}
+
+
 VariableProxy::VariableProxy(Handle<String> name,
                              bool is_this,
                              bool inside_with)
   : name_(name),
     var_(NULL),
     is_this_(is_this),
-    inside_with_(inside_with) {
+    inside_with_(inside_with),
+    is_trivial_(false),
+    reaching_definitions_(NULL) {
   // names must be canonicalized for fast equality checks
   ASSERT(name->IsSymbol());
-  // at least one access, otherwise no need for a VariableProxy
-  var_uses_.RecordRead(1);
 }
 
 
 VariableProxy::VariableProxy(bool is_this)
-  : is_this_(is_this) {
+  : is_this_(is_this),
+    reaching_definitions_(NULL) {
 }
 
 
@@ -87,8 +101,7 @@ void VariableProxy::BindTo(Variable* var) {
   // eval() etc.  Const-ness and variable declarations are a complete mess
   // in JS. Sigh...
   var_ = var;
-  var->var_uses()->RecordUses(&var_uses_);
-  var->obj_uses()->RecordUses(&obj_uses_);
+  var->set_is_used(true);
 }
 
 
@@ -143,27 +156,6 @@ bool ObjectLiteral::Property::IsCompileTimeValue() {
   return kind_ == CONSTANT ||
       (kind_ == MATERIALIZED_LITERAL &&
        CompileTimeValue::IsCompileTimeValue(value_));
-}
-
-
-bool ObjectLiteral::IsValidJSON() {
-  int length = properties()->length();
-  for (int i = 0; i < length; i++) {
-    Property* prop = properties()->at(i);
-    if (!prop->value()->IsValidJSON())
-      return false;
-  }
-  return true;
-}
-
-
-bool ArrayLiteral::IsValidJSON() {
-  int length = values()->length();
-  for (int i = 0; i < length; i++) {
-    if (!values()->at(i)->IsValidJSON())
-      return false;
-  }
-  return true;
 }
 
 
@@ -433,7 +425,7 @@ void* RegExpUnparser::VisitQuantifier(RegExpQuantifier* that, void* data) {
   } else {
     stream()->Add("%i ", that->max());
   }
-  stream()->Add(that->is_greedy() ? "g " : "n ");
+  stream()->Add(that->is_greedy() ? "g " : that->is_possessive() ? "p " : "n ");
   that->body()->Accept(this, data);
   stream()->Add(")");
   return NULL;
@@ -507,6 +499,97 @@ RegExpAlternative::RegExpAlternative(ZoneList<RegExpTree*>* nodes)
     }
   }
 }
+
+// IsPrimitive implementation.  IsPrimitive is true if the value of an
+// expression is known at compile-time to be any JS type other than Object
+// (e.g, it is Undefined, Null, Boolean, String, or Number).
+
+// The following expression types are never primitive because they express
+// Object values.
+bool FunctionLiteral::IsPrimitive() { return false; }
+bool FunctionBoilerplateLiteral::IsPrimitive() { return false; }
+bool RegExpLiteral::IsPrimitive() { return false; }
+bool ObjectLiteral::IsPrimitive() { return false; }
+bool ArrayLiteral::IsPrimitive() { return false; }
+bool CatchExtensionObject::IsPrimitive() { return false; }
+bool CallNew::IsPrimitive() { return false; }
+bool ThisFunction::IsPrimitive() { return false; }
+
+
+// The following expression types are not always primitive because we do not
+// have enough information to conclude that they are.
+bool VariableProxy::IsPrimitive() { return false; }
+bool Property::IsPrimitive() { return false; }
+bool Call::IsPrimitive() { return false; }
+bool CallRuntime::IsPrimitive() { return false; }
+
+
+// The value of a conditional is the value of one of the alternatives.  It's
+// always primitive if both alternatives are always primitive.
+bool Conditional::IsPrimitive() {
+  return then_expression()->IsPrimitive() && else_expression()->IsPrimitive();
+}
+
+
+// A literal is primitive when it is not a JSObject.
+bool Literal::IsPrimitive() { return !handle()->IsJSObject(); }
+
+
+// The value of an assignment is the value of its right-hand side.
+bool Assignment::IsPrimitive() {
+  switch (op()) {
+    case Token::INIT_VAR:
+    case Token::INIT_CONST:
+    case Token::ASSIGN:
+      return value()->IsPrimitive();
+
+    default:
+      // {|=, ^=, &=, <<=, >>=, >>>=, +=, -=, *=, /=, %=}
+      // Arithmetic operations are always primitive.  They express Numbers
+      // with the exception of +, which expresses a Number or a String.
+      return true;
+  }
+}
+
+
+// Throw does not express a value, so it's trivially always primitive.
+bool Throw::IsPrimitive() { return true; }
+
+
+// Unary operations always express primitive values.  delete and ! express
+// Booleans, void Undefined, typeof String, +, -, and ~ Numbers.
+bool UnaryOperation::IsPrimitive() { return true; }
+
+
+// Count operations (pre- and post-fix increment and decrement) always
+// express primitive values (Numbers).  See ECMA-262-3, 11.3.1, 11.3.2,
+// 11.4.4, ane 11.4.5.
+bool CountOperation::IsPrimitive() { return true; }
+
+
+// Binary operations depend on the operator.
+bool BinaryOperation::IsPrimitive() {
+  switch (op()) {
+    case Token::COMMA:
+      // Value is the value of the right subexpression.
+      return right()->IsPrimitive();
+
+    case Token::OR:
+    case Token::AND:
+      // Value is the value one of the subexpressions.
+      return left()->IsPrimitive() && right()->IsPrimitive();
+
+    default:
+      // {|, ^, &, <<, >>, >>>, +, -, *, /, %}
+      // Arithmetic operations are always primitive.  They express Numbers
+      // with the exception of +, which expresses a Number or a String.
+      return true;
+  }
+}
+
+
+// Compare operations always express Boolean values.
+bool CompareOperation::IsPrimitive() { return true; }
 
 
 } }  // namespace v8::internal

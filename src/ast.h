@@ -1,4 +1,4 @@
-// Copyright 2006-2008 the V8 project authors. All rights reserved.
+// Copyright 2010 the V8 project authors. All rights reserved.
 // Redistribution and use in source and binary forms, with or without
 // modification, are permitted provided that the following conditions are
 // met:
@@ -102,6 +102,8 @@ namespace internal {
 // Forward declarations
 class TargetCollector;
 class MaterializedLiteral;
+class DefinitionInfo;
+class BitVector;
 
 #define DEF_FORWARD_DECLARATION(type) class type;
 AST_NODE_LIST(DEF_FORWARD_DECLARATION)
@@ -116,6 +118,9 @@ typedef ZoneList<Handle<Object> > ZoneObjectList;
 
 class AstNode: public ZoneObject {
  public:
+  static const int kNoNumber = -1;
+
+  AstNode() : num_(kNoNumber) {}
   virtual ~AstNode() { }
   virtual void Accept(AstVisitor* v) = 0;
 
@@ -133,12 +138,21 @@ class AstNode: public ZoneObject {
   virtual BreakableStatement* AsBreakableStatement() { return NULL; }
   virtual IterationStatement* AsIterationStatement() { return NULL; }
   virtual UnaryOperation* AsUnaryOperation() { return NULL; }
+  virtual CountOperation* AsCountOperation() { return NULL; }
   virtual BinaryOperation* AsBinaryOperation() { return NULL; }
   virtual Assignment* AsAssignment() { return NULL; }
   virtual FunctionLiteral* AsFunctionLiteral() { return NULL; }
   virtual MaterializedLiteral* AsMaterializedLiteral() { return NULL; }
   virtual ObjectLiteral* AsObjectLiteral() { return NULL; }
   virtual ArrayLiteral* AsArrayLiteral() { return NULL; }
+  virtual CompareOperation* AsCompareOperation() { return NULL; }
+
+  int num() { return num_; }
+  void set_num(int n) { num_ = n; }
+
+ private:
+  // Support for ast node numbering.
+  int num_;
 };
 
 
@@ -148,6 +162,9 @@ class Statement: public AstNode {
 
   virtual Statement* AsStatement()  { return this; }
   virtual ReturnStatement* AsReturnStatement() { return NULL; }
+
+  virtual Assignment* StatementAsSimpleAssignment() { return NULL; }
+  virtual CountOperation* StatementAsCountOperation() { return NULL; }
 
   bool IsEmpty() { return AsEmptyStatement() != NULL; }
 
@@ -179,12 +196,34 @@ class Expression: public AstNode {
     kTestValue
   };
 
-  Expression() : context_(kUninitialized) {}
+  Expression()
+      : bitfields_(0),
+        def_(NULL),
+        defined_vars_(NULL) {}
 
   virtual Expression* AsExpression()  { return this; }
 
-  virtual bool IsValidJSON() { return false; }
   virtual bool IsValidLeftHandSide() { return false; }
+
+  virtual Variable* AssignedVar() { return NULL; }
+
+  // Symbols that cannot be parsed as array indices are considered property
+  // names.  We do not treat symbols that can be array indexes as property
+  // names because [] for string objects is handled only by keyed ICs.
+  virtual bool IsPropertyName() { return false; }
+
+  // True if the expression does not have (evaluated) subexpressions.
+  // Function literals are leaves because their subexpressions are not
+  // evaluated.
+  virtual bool IsLeaf() { return false; }
+
+  // True if the expression has no side effects and is safe to
+  // evaluate out of order.
+  virtual bool IsTrivial() { return false; }
+
+  // True if the expression always has one of the non-Object JS types
+  // (Undefined, Null, Boolean, String, or Number).
+  virtual bool IsPrimitive() = 0;
 
   // Mark the expression as being compiled as an expression
   // statement. This is used to transform postfix increments to
@@ -192,14 +231,67 @@ class Expression: public AstNode {
   virtual void MarkAsStatement() { /* do nothing */ }
 
   // Static type information for this expression.
-  SmiAnalysis* type() { return &type_; }
+  StaticType* type() { return &type_; }
 
-  Context context() { return context_; }
-  void set_context(Context context) { context_ = context; }
+  // Data flow information.
+  DefinitionInfo* var_def() { return def_; }
+  void set_var_def(DefinitionInfo* def) { def_ = def; }
+
+  ZoneList<DefinitionInfo*>* defined_vars() { return defined_vars_; }
+  void set_defined_vars(ZoneList<DefinitionInfo*>* defined_vars) {
+    defined_vars_ = defined_vars;
+  }
+
+  // AST analysis results
+
+  // True if the expression rooted at this node can be compiled by the
+  // side-effect free compiler.
+  bool side_effect_free() { return SideEffectFreeField::decode(bitfields_); }
+  void set_side_effect_free(bool is_side_effect_free) {
+    bitfields_ &= ~SideEffectFreeField::mask();
+    bitfields_ |= SideEffectFreeField::encode(is_side_effect_free);
+  }
+
+  // Will the use of this expression treat -0 the same as 0 in all cases?
+  // If so, we can return 0 instead of -0 if we want to, to optimize code.
+  bool no_negative_zero() { return NoNegativeZeroField::decode(bitfields_); }
+  void set_no_negative_zero(bool no_negative_zero) {
+    bitfields_ &= ~NoNegativeZeroField::mask();
+    bitfields_ |= NoNegativeZeroField::encode(no_negative_zero);
+  }
+
+  // Will ToInt32 (ECMA 262-3 9.5) or ToUint32 (ECMA 262-3 9.6)
+  // be applied to the value of this expression?
+  // If so, we may be able to optimize the calculation of the value.
+  bool to_int32() { return ToInt32Field::decode(bitfields_); }
+  void set_to_int32(bool to_int32) {
+    bitfields_ &= ~ToInt32Field::mask();
+    bitfields_ |= ToInt32Field::encode(to_int32);
+  }
+
+  // How many bitwise logical or shift operators are used in this expression?
+  int num_bit_ops() { return NumBitOpsField::decode(bitfields_); }
+  void set_num_bit_ops(int num_bit_ops) {
+    bitfields_ &= ~NumBitOpsField::mask();
+    num_bit_ops = Min(num_bit_ops, kMaxNumBitOps);
+    bitfields_ |= NumBitOpsField::encode(num_bit_ops);
+  }
+
 
  private:
-  SmiAnalysis type_;
-  Context context_;
+  static const int kMaxNumBitOps = (1 << 5) - 1;
+
+  uint32_t bitfields_;
+  StaticType type_;
+
+  DefinitionInfo* def_;
+  ZoneList<DefinitionInfo*>* defined_vars_;
+
+  // Using template BitField<type, start, size>.
+  class SideEffectFreeField : public BitField<bool, 0, 1> {};
+  class NoNegativeZeroField : public BitField<bool, 1, 1> {};
+  class ToInt32Field : public BitField<bool, 2, 1> {};
+  class NumBitOpsField : public BitField<int, 3, 5> {};
 };
 
 
@@ -213,6 +305,12 @@ class ValidLeftHandSideSentinel: public Expression {
   virtual bool IsValidLeftHandSide() { return true; }
   virtual void Accept(AstVisitor* v) { UNREACHABLE(); }
   static ValidLeftHandSideSentinel* instance() { return &instance_; }
+
+  virtual bool IsPrimitive() {
+    UNREACHABLE();
+    return false;
+  }
+
  private:
   static ValidLeftHandSideSentinel instance_;
 };
@@ -259,6 +357,16 @@ class Block: public BreakableStatement {
         is_initializer_block_(is_initializer_block) { }
 
   virtual void Accept(AstVisitor* v);
+
+  virtual Assignment* StatementAsSimpleAssignment() {
+    if (statements_.length() != 1) return NULL;
+    return statements_[0]->StatementAsSimpleAssignment();
+  }
+
+  virtual CountOperation* StatementAsCountOperation() {
+    if (statements_.length() != 1) return NULL;
+    return statements_[0]->StatementAsCountOperation();
+  }
 
   void AddStatement(Statement* statement) { statements_.Add(statement); }
 
@@ -381,8 +489,8 @@ class ForStatement: public IterationStatement {
         init_(NULL),
         cond_(NULL),
         next_(NULL),
-        may_have_function_literal_(true) {
-  }
+        may_have_function_literal_(true),
+        loop_variable_(NULL) {}
 
   void Initialize(Statement* init,
                   Expression* cond,
@@ -403,12 +511,17 @@ class ForStatement: public IterationStatement {
     return may_have_function_literal_;
   }
 
+  bool is_fast_smi_loop() { return loop_variable_ != NULL; }
+  Variable* loop_variable() { return loop_variable_; }
+  void set_loop_variable(Variable* var) { loop_variable_ = var; }
+
  private:
   Statement* init_;
   Expression* cond_;
   Statement* next_;
   // True if there is a function literal subexpression in the condition.
   bool may_have_function_literal_;
+  Variable* loop_variable_;
 
   friend class AstOptimizer;
 };
@@ -445,6 +558,9 @@ class ExpressionStatement: public Statement {
 
   // Type testing & conversion.
   virtual ExpressionStatement* AsExpressionStatement() { return this; }
+
+  virtual Assignment* StatementAsSimpleAssignment();
+  virtual CountOperation* StatementAsCountOperation();
 
   void set_expression(Expression* e) { expression_ = e; }
   Expression* expression() { return expression_; }
@@ -641,21 +757,20 @@ class TryStatement: public Statement {
 class TryCatchStatement: public TryStatement {
  public:
   TryCatchStatement(Block* try_block,
-                    Expression* catch_var,
+                    VariableProxy* catch_var,
                     Block* catch_block)
       : TryStatement(try_block),
         catch_var_(catch_var),
         catch_block_(catch_block) {
-    ASSERT(catch_var->AsVariableProxy() != NULL);
   }
 
   virtual void Accept(AstVisitor* v);
 
-  Expression* catch_var() const  { return catch_var_; }
+  VariableProxy* catch_var() const  { return catch_var_; }
   Block* catch_block() const  { return catch_block_; }
 
  private:
-  Expression* catch_var_;
+  VariableProxy* catch_var_;
   Block* catch_block_;
 };
 
@@ -704,7 +819,17 @@ class Literal: public Expression {
     return handle_.is_identical_to(other->handle_);
   }
 
-  virtual bool IsValidJSON() { return true; }
+  virtual bool IsPropertyName() {
+    if (handle_->IsSymbol()) {
+      uint32_t ignored;
+      return !String::cast(*handle_)->AsArrayIndex(&ignored);
+    }
+    return false;
+  }
+
+  virtual bool IsLeaf() { return true; }
+  virtual bool IsTrivial() { return true; }
+  virtual bool IsPrimitive();
 
   // Identity testers.
   bool IsNull() const { return handle_.is_identical_to(Factory::null_value()); }
@@ -733,8 +858,6 @@ class MaterializedLiteral: public Expression {
   // A materialized literal is simple if the values consist of only
   // constants and simple object and array literals.
   bool is_simple() const { return is_simple_; }
-
-  virtual bool IsValidJSON() { return true; }
 
   int depth() const { return depth_; }
 
@@ -782,23 +905,31 @@ class ObjectLiteral: public MaterializedLiteral {
                 ZoneList<Property*>* properties,
                 int literal_index,
                 bool is_simple,
+                bool fast_elements,
                 int depth)
       : MaterializedLiteral(literal_index, is_simple, depth),
         constant_properties_(constant_properties),
-        properties_(properties) {}
+        properties_(properties),
+        fast_elements_(fast_elements) {}
 
   virtual ObjectLiteral* AsObjectLiteral() { return this; }
   virtual void Accept(AstVisitor* v);
-  virtual bool IsValidJSON();
+
+  virtual bool IsLeaf() { return properties()->is_empty(); }
+
+  virtual bool IsPrimitive();
 
   Handle<FixedArray> constant_properties() const {
     return constant_properties_;
   }
   ZoneList<Property*>* properties() const { return properties_; }
 
+  bool fast_elements() const { return fast_elements_; }
+
  private:
   Handle<FixedArray> constant_properties_;
   ZoneList<Property*>* properties_;
+  bool fast_elements_;
 };
 
 
@@ -814,6 +945,10 @@ class RegExpLiteral: public MaterializedLiteral {
 
   virtual void Accept(AstVisitor* v);
 
+  virtual bool IsLeaf() { return true; }
+
+  virtual bool IsPrimitive();
+
   Handle<String> pattern() const { return pattern_; }
   Handle<String> flags() const { return flags_; }
 
@@ -826,24 +961,27 @@ class RegExpLiteral: public MaterializedLiteral {
 // for minimizing the work when constructing it at runtime.
 class ArrayLiteral: public MaterializedLiteral {
  public:
-  ArrayLiteral(Handle<FixedArray> literals,
+  ArrayLiteral(Handle<FixedArray> constant_elements,
                ZoneList<Expression*>* values,
                int literal_index,
                bool is_simple,
                int depth)
       : MaterializedLiteral(literal_index, is_simple, depth),
-        literals_(literals),
+        constant_elements_(constant_elements),
         values_(values) {}
 
   virtual void Accept(AstVisitor* v);
   virtual ArrayLiteral* AsArrayLiteral() { return this; }
-  virtual bool IsValidJSON();
 
-  Handle<FixedArray> literals() const { return literals_; }
+  virtual bool IsLeaf() { return values()->is_empty(); }
+
+  virtual bool IsPrimitive();
+
+  Handle<FixedArray> constant_elements() const { return constant_elements_; }
   ZoneList<Expression*>* values() const { return values_; }
 
  private:
-  Handle<FixedArray> literals_;
+  Handle<FixedArray> constant_elements_;
   ZoneList<Expression*>* values_;
 };
 
@@ -858,6 +996,8 @@ class CatchExtensionObject: public Expression {
   }
 
   virtual void Accept(AstVisitor* v);
+
+  virtual bool IsPrimitive();
 
   Literal* key() const { return key_; }
   VariableProxy* value() const { return value_; }
@@ -886,6 +1026,17 @@ class VariableProxy: public Expression {
     return var_ == NULL ? true : var_->IsValidLeftHandSide();
   }
 
+  virtual bool IsLeaf() {
+    ASSERT(var_ != NULL);  // Variable must be resolved.
+    return var()->is_global() || var()->rewrite()->IsLeaf();
+  }
+
+  // Reading from a mutable variable is a side effect, but 'this' is
+  // immutable.
+  virtual bool IsTrivial() { return is_trivial_; }
+
+  virtual bool IsPrimitive();
+
   bool IsVariable(Handle<String> n) {
     return !is_this() && name().is_identical_to(n);
   }
@@ -897,10 +1048,13 @@ class VariableProxy: public Expression {
 
   Handle<String> name() const  { return name_; }
   Variable* var() const  { return var_; }
-  UseCount* var_uses()  { return &var_uses_; }
-  UseCount* obj_uses()  { return &obj_uses_; }
   bool is_this() const  { return is_this_; }
   bool inside_with() const  { return inside_with_; }
+  bool is_trivial() { return is_trivial_; }
+  void set_is_trivial(bool b) { is_trivial_ = b; }
+
+  BitVector* reaching_definitions() { return reaching_definitions_; }
+  void set_reaching_definitions(BitVector* rd) { reaching_definitions_ = rd; }
 
   // Bind this proxy to the variable var.
   void BindTo(Variable* var);
@@ -910,10 +1064,8 @@ class VariableProxy: public Expression {
   Variable* var_;  // resolved variable, or NULL
   bool is_this_;
   bool inside_with_;
-
-  // VariableProxy usage info.
-  UseCount var_uses_;  // uses of the variable value
-  UseCount obj_uses_;  // uses of the object the variable points to
+  bool is_trivial_;
+  BitVector* reaching_definitions_;
 
   VariableProxy(Handle<String> name, bool is_this, bool inside_with);
   explicit VariableProxy(bool is_this);
@@ -928,6 +1080,11 @@ class VariableProxySentinel: public VariableProxy {
   static VariableProxySentinel* this_proxy() { return &this_proxy_; }
   static VariableProxySentinel* identifier_proxy() {
     return &identifier_proxy_;
+  }
+
+  virtual bool IsPrimitive() {
+    UNREACHABLE();
+    return false;
   }
 
  private:
@@ -971,6 +1128,15 @@ class Slot: public Expression {
   // Type testing & conversion
   virtual Slot* AsSlot() { return this; }
 
+  virtual bool IsLeaf() { return true; }
+
+  virtual bool IsPrimitive() {
+    UNREACHABLE();
+    return false;
+  }
+
+  bool IsStackAllocated() { return type_ == PARAMETER || type_ == LOCAL; }
+
   // Accessors
   Variable* var() const { return var_; }
   Type type() const { return type_; }
@@ -1000,6 +1166,8 @@ class Property: public Expression {
   virtual Property* AsProperty() { return this; }
 
   virtual bool IsValidLeftHandSide() { return true; }
+
+  virtual bool IsPrimitive();
 
   Expression* obj() const { return obj_; }
   Expression* key() const { return key_; }
@@ -1031,6 +1199,8 @@ class Call: public Expression {
   // Type testing and conversion.
   virtual Call* AsCall() { return this; }
 
+  virtual bool IsPrimitive();
+
   Expression* expression() const { return expression_; }
   ZoneList<Expression*>* arguments() const { return arguments_; }
   int position() { return pos_; }
@@ -1052,6 +1222,8 @@ class CallNew: public Expression {
       : expression_(expression), arguments_(arguments), pos_(pos) { }
 
   virtual void Accept(AstVisitor* v);
+
+  virtual bool IsPrimitive();
 
   Expression* expression() const { return expression_; }
   ZoneList<Expression*>* arguments() const { return arguments_; }
@@ -1077,6 +1249,8 @@ class CallRuntime: public Expression {
 
   virtual void Accept(AstVisitor* v);
 
+  virtual bool IsPrimitive();
+
   Handle<String> name() const { return name_; }
   Runtime::Function* function() const { return function_; }
   ZoneList<Expression*>* arguments() const { return arguments_; }
@@ -1101,6 +1275,8 @@ class UnaryOperation: public Expression {
   // Type testing & conversion
   virtual UnaryOperation* AsUnaryOperation() { return this; }
 
+  virtual bool IsPrimitive();
+
   Token::Value op() const { return op_; }
   Expression* expression() const { return expression_; }
 
@@ -1121,6 +1297,8 @@ class BinaryOperation: public Expression {
 
   // Type testing & conversion
   virtual BinaryOperation* AsBinaryOperation() { return this; }
+
+  virtual bool IsPrimitive();
 
   // True iff the result can be safely overwritten (to avoid allocation).
   // False for operations that can return one of their operands.
@@ -1168,9 +1346,20 @@ class CountOperation: public Expression {
 
   virtual void Accept(AstVisitor* v);
 
+  virtual CountOperation* AsCountOperation() { return this; }
+
+  virtual Variable* AssignedVar() {
+    return expression()->AsVariableProxy()->AsVariable();
+  }
+
+  virtual bool IsPrimitive();
+
   bool is_prefix() const { return is_prefix_; }
   bool is_postfix() const { return !is_prefix_; }
   Token::Value op() const { return op_; }
+  Token::Value binary_op() {
+    return op_ == Token::INC ? Token::ADD : Token::SUB;
+  }
   Expression* expression() const { return expression_; }
 
   virtual void MarkAsStatement() { is_prefix_ = true; }
@@ -1185,20 +1374,30 @@ class CountOperation: public Expression {
 class CompareOperation: public Expression {
  public:
   CompareOperation(Token::Value op, Expression* left, Expression* right)
-      : op_(op), left_(left), right_(right) {
+      : op_(op), left_(left), right_(right), is_for_loop_condition_(false) {
     ASSERT(Token::IsCompareOp(op));
   }
 
   virtual void Accept(AstVisitor* v);
 
+  virtual bool IsPrimitive();
+
   Token::Value op() const { return op_; }
   Expression* left() const { return left_; }
   Expression* right() const { return right_; }
+
+  // Accessors for flag whether this compare operation is hanging of a for loop.
+  bool is_for_loop_condition() const { return is_for_loop_condition_; }
+  void set_is_for_loop_condition() { is_for_loop_condition_ = true; }
+
+  // Type testing & conversion
+  virtual CompareOperation* AsCompareOperation() { return this; }
 
  private:
   Token::Value op_;
   Expression* left_;
   Expression* right_;
+  bool is_for_loop_condition_;
 };
 
 
@@ -1212,6 +1411,8 @@ class Conditional: public Expression {
         else_expression_(else_expression) { }
 
   virtual void Accept(AstVisitor* v);
+
+  virtual bool IsPrimitive();
 
   Expression* condition() const { return condition_; }
   Expression* then_expression() const { return then_expression_; }
@@ -1235,12 +1436,22 @@ class Assignment: public Expression {
   virtual void Accept(AstVisitor* v);
   virtual Assignment* AsAssignment() { return this; }
 
+  virtual bool IsPrimitive();
+
+  Assignment* AsSimpleAssignment() { return !is_compound() ? this : NULL; }
+
+  virtual Variable* AssignedVar() {
+    return target()->AsVariableProxy()->AsVariable();
+  }
+
   Token::Value binary_op() const;
 
   Token::Value op() const { return op_; }
   Expression* target() const { return target_; }
   Expression* value() const { return value_; }
   int position() { return pos_; }
+  // This check relies on the definition order of token in token.h.
+  bool is_compound() const { return op() > Token::ASSIGN; }
 
   // An initialization block is a series of statments of the form
   // x.y.z.a = ...; x.y.z.b = ...; etc. The parser marks the beginning and
@@ -1267,6 +1478,9 @@ class Throw: public Expression {
       : exception_(exception), pos_(pos) {}
 
   virtual void Accept(AstVisitor* v);
+
+  virtual bool IsPrimitive();
+
   Expression* exception() const { return exception_; }
   int position() const { return pos_; }
 
@@ -1301,10 +1515,9 @@ class FunctionLiteral: public Expression {
         start_position_(start_position),
         end_position_(end_position),
         is_expression_(is_expression),
-        loop_nesting_(0),
         function_token_position_(RelocInfo::kNoPosition),
         inferred_name_(Heap::empty_string()),
-        try_fast_codegen_(false) {
+        try_full_codegen_(false) {
 #ifdef DEBUG
     already_compiled_ = false;
 #endif
@@ -1314,6 +1527,10 @@ class FunctionLiteral: public Expression {
 
   // Type testing & conversion
   virtual FunctionLiteral* AsFunctionLiteral()  { return this; }
+
+  virtual bool IsLeaf() { return true; }
+
+  virtual bool IsPrimitive();
 
   Handle<String> name() const  { return name_; }
   Scope* scope() const  { return scope_; }
@@ -1336,16 +1553,13 @@ class FunctionLiteral: public Expression {
 
   bool AllowsLazyCompilation();
 
-  bool loop_nesting() const { return loop_nesting_; }
-  void set_loop_nesting(int nesting) { loop_nesting_ = nesting; }
-
   Handle<String> inferred_name() const  { return inferred_name_; }
   void set_inferred_name(Handle<String> inferred_name) {
     inferred_name_ = inferred_name;
   }
 
-  bool try_fast_codegen() { return try_fast_codegen_; }
-  void set_try_fast_codegen(bool flag) { try_fast_codegen_ = flag; }
+  bool try_full_codegen() { return try_full_codegen_; }
+  void set_try_full_codegen(bool flag) { try_full_codegen_ = flag; }
 
 #ifdef DEBUG
   void mark_as_compiled() {
@@ -1366,10 +1580,9 @@ class FunctionLiteral: public Expression {
   int start_position_;
   int end_position_;
   bool is_expression_;
-  int loop_nesting_;
   int function_token_position_;
   Handle<String> inferred_name_;
-  bool try_fast_codegen_;
+  bool try_full_codegen_;
 #ifdef DEBUG
   bool already_compiled_;
 #endif
@@ -1385,7 +1598,11 @@ class FunctionBoilerplateLiteral: public Expression {
 
   Handle<JSFunction> boilerplate() const { return boilerplate_; }
 
+  virtual bool IsLeaf() { return true; }
+
   virtual void Accept(AstVisitor* v);
+
+  virtual bool IsPrimitive();
 
  private:
   Handle<JSFunction> boilerplate_;
@@ -1395,6 +1612,8 @@ class FunctionBoilerplateLiteral: public Expression {
 class ThisFunction: public Expression {
  public:
   virtual void Accept(AstVisitor* v);
+  virtual bool IsLeaf() { return true; }
+  virtual bool IsPrimitive();
 };
 
 
@@ -1515,6 +1734,7 @@ class CharacterSet BASE_EMBEDDED {
     standard_set_type_ = special_set_type;
   }
   bool is_standard() { return standard_set_type_ != 0; }
+  void Canonicalize();
  private:
   ZoneList<CharacterRange>* ranges_;
   // If non-zero, the value represents a standard set (e.g., all whitespace
@@ -1608,12 +1828,13 @@ class RegExpText: public RegExpTree {
 
 class RegExpQuantifier: public RegExpTree {
  public:
-  RegExpQuantifier(int min, int max, bool is_greedy, RegExpTree* body)
-      : min_(min),
+  enum Type { GREEDY, NON_GREEDY, POSSESSIVE };
+  RegExpQuantifier(int min, int max, Type type, RegExpTree* body)
+      : body_(body),
+        min_(min),
         max_(max),
-        is_greedy_(is_greedy),
-        body_(body),
-        min_match_(min * body->min_match()) {
+        min_match_(min * body->min_match()),
+        type_(type) {
     if (max > 0 && body->max_match() > kInfinity / max) {
       max_match_ = kInfinity;
     } else {
@@ -1637,15 +1858,17 @@ class RegExpQuantifier: public RegExpTree {
   virtual int max_match() { return max_match_; }
   int min() { return min_; }
   int max() { return max_; }
-  bool is_greedy() { return is_greedy_; }
+  bool is_possessive() { return type_ == POSSESSIVE; }
+  bool is_non_greedy() { return type_ == NON_GREEDY; }
+  bool is_greedy() { return type_ == GREEDY; }
   RegExpTree* body() { return body_; }
  private:
+  RegExpTree* body_;
   int min_;
   int max_;
-  bool is_greedy_;
-  RegExpTree* body_;
   int min_match_;
   int max_match_;
+  Type type_;
 };
 
 

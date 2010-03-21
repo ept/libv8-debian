@@ -1,4 +1,4 @@
-// Copyright 2009 the V8 project authors. All rights reserved.
+// Copyright 2010 the V8 project authors. All rights reserved.
 // Redistribution and use in source and binary forms, with or without
 // modification, are permitted provided that the following conditions are
 // met:
@@ -28,88 +28,93 @@
 #ifndef V8_FAST_CODEGEN_H_
 #define V8_FAST_CODEGEN_H_
 
+#if V8_TARGET_ARCH_IA32
+#include "ia32/fast-codegen-ia32.h"
+#else
+
 #include "v8.h"
 
 #include "ast.h"
+#include "compiler.h"
+#include "list.h"
 
 namespace v8 {
 namespace internal {
 
+class FastCodeGenSyntaxChecker: public AstVisitor {
+ public:
+  explicit FastCodeGenSyntaxChecker()
+      : info_(NULL), has_supported_syntax_(true) {
+  }
+
+  void Check(CompilationInfo* info);
+
+  CompilationInfo* info() { return info_; }
+  bool has_supported_syntax() { return has_supported_syntax_; }
+
+ private:
+  void VisitDeclarations(ZoneList<Declaration*>* decls);
+  void VisitStatements(ZoneList<Statement*>* stmts);
+
+  // AST node visit functions.
+#define DECLARE_VISIT(type) virtual void Visit##type(type* node);
+  AST_NODE_LIST(DECLARE_VISIT)
+#undef DECLARE_VISIT
+
+  CompilationInfo* info_;
+  bool has_supported_syntax_;
+
+  DISALLOW_COPY_AND_ASSIGN(FastCodeGenSyntaxChecker);
+};
+
 
 class FastCodeGenerator: public AstVisitor {
  public:
-  FastCodeGenerator(MacroAssembler* masm, Handle<Script> script, bool is_eval)
-      : masm_(masm),
-        function_(NULL),
-        script_(script),
-        is_eval_(is_eval),
-        loop_depth_(0),
-        true_label_(NULL),
-        false_label_(NULL) {
+  explicit FastCodeGenerator(MacroAssembler* masm)
+      : masm_(masm), info_(NULL), destination_(no_reg), smi_bits_(0) {
   }
 
-  static Handle<Code> MakeCode(FunctionLiteral* fun,
-                               Handle<Script> script,
-                               bool is_eval);
+  static Handle<Code> MakeCode(CompilationInfo* info);
 
-  void Generate(FunctionLiteral* fun);
+  void Generate(CompilationInfo* compilation_info);
 
  private:
-  int SlotOffset(Slot* slot);
-  void Move(Expression::Context destination, Register source);
-  void Move(Expression::Context destination, Slot* source, Register scratch);
-  void Move(Expression::Context destination, Literal* source);
-  void Move(Slot* dst, Register source, Register scratch1, Register scratch2);
-  void Move(Register dst, Slot* source);
+  MacroAssembler* masm() { return masm_; }
+  CompilationInfo* info() { return info_; }
 
-  // Templated to allow for Operand on intel and MemOperand on ARM.
-  template <typename MemoryLocation>
-  MemoryLocation CreateSlotOperand(Slot* slot, Register scratch);
+  Register destination() { return destination_; }
+  void set_destination(Register reg) { destination_ = reg; }
 
-  // Drop the TOS, and store source to destination.
-  // If destination is TOS, just overwrite TOS with source.
-  void DropAndMove(Expression::Context destination,
-                   Register source,
-                   int drop_count = 1);
+  FunctionLiteral* function() { return info_->function(); }
+  Scope* scope() { return info_->scope(); }
 
-  // Test the JavaScript value in source as if in a test context, compile
-  // control flow to a pair of labels.
-  void TestAndBranch(Register source, Label* true_label, Label* false_label);
+  // Platform-specific fixed registers, all guaranteed distinct.
+  Register accumulator0();
+  Register accumulator1();
+  Register scratch0();
+  Register scratch1();
+  Register scratch2();
+  Register receiver_reg();
+  Register context_reg();
 
-  void VisitDeclarations(ZoneList<Declaration*>* declarations);
-  void DeclareGlobals(Handle<FixedArray> pairs);
+  Register other_accumulator(Register reg) {
+    ASSERT(reg.is(accumulator0()) || reg.is(accumulator1()));
+    return (reg.is(accumulator0())) ? accumulator1() : accumulator0();
+  }
 
-  // Platform-specific return sequence
-  void EmitReturnSequence(int position);
-
-  // Platform-specific code sequences for calls
-  void EmitCallWithStub(Call* expr);
-  void EmitCallWithIC(Call* expr, RelocInfo::Mode reloc_info);
-
-  // Platform-specific support for compiling assignments.
-
-  // Complete a variable assignment.  The right-hand-side value is expected
-  // on top of the stack.
-  void EmitVariableAssignment(Assignment* expr);
-
-  // Complete a named property assignment.  The receiver and right-hand-side
-  // value are expected on top of the stack.
-  void EmitNamedPropertyAssignment(Assignment* expr);
-
-  // Complete a keyed property assignment.  The reciever, key, and
-  // right-hand-side value are expected on top of the stack.
-  void EmitKeyedPropertyAssignment(Assignment* expr);
-
-  void SetFunctionPosition(FunctionLiteral* fun);
-  void SetReturnPosition(FunctionLiteral* fun);
-  void SetStatementPosition(Statement* stmt);
-  void SetSourcePosition(int pos);
-
-  int loop_depth() { return loop_depth_; }
-  void increment_loop_depth() { loop_depth_++; }
-  void decrement_loop_depth() {
-    ASSERT(loop_depth_ > 0);
-    loop_depth_--;
+  // Flags are true if the respective register is statically known to hold a
+  // smi.  We do not track every register, only the accumulator registers.
+  bool is_smi(Register reg) {
+    ASSERT(!reg.is(no_reg));
+    return (smi_bits_ & reg.bit()) != 0;
+  }
+  void set_as_smi(Register reg) {
+    ASSERT(!reg.is(no_reg));
+    smi_bits_ = smi_bits_ | reg.bit();
+  }
+  void clear_as_smi(Register reg) {
+    ASSERT(!reg.is(no_reg));
+    smi_bits_ = smi_bits_ & ~reg.bit();
   }
 
   // AST node visit functions.
@@ -117,23 +122,40 @@ class FastCodeGenerator: public AstVisitor {
   AST_NODE_LIST(DECLARE_VISIT)
 #undef DECLARE_VISIT
 
-  // Handles the shortcutted logical binary operations in VisitBinaryOperation.
-  void EmitLogicalOperation(BinaryOperation* expr);
+  // Emit code to load the receiver from the stack into receiver_reg.
+  void EmitLoadReceiver();
+
+  // Emit code to load a global variable directly from a global property
+  // cell into the destination register.
+  void EmitGlobalVariableLoad(Handle<Object> cell);
+
+  // Emit a store to an own property of this.  The stored value is expected
+  // in accumulator0 and the receiver in receiver_reg.  The receiver
+  // register is preserved and the result (the stored value) is left in the
+  // destination register.
+  void EmitThisPropertyStore(Handle<String> name);
+
+  // Emit a load from an own property of this.  The receiver is expected in
+  // receiver_reg.  The receiver register is preserved and the result is
+  // left in the destination register.
+  void EmitThisPropertyLoad(Handle<String> name);
+
+  // Emit a bitwise or operation.  The left operand is in accumulator1 and
+  // the right is in accumulator0.  The result should be left in the
+  // destination register.
+  void EmitBitOr();
 
   MacroAssembler* masm_;
-  FunctionLiteral* function_;
-  Handle<Script> script_;
-  bool is_eval_;
-  Label return_label_;
-  int loop_depth_;
-
-  Label* true_label_;
-  Label* false_label_;
+  CompilationInfo* info_;
+  Register destination_;
+  uint32_t smi_bits_;
 
   DISALLOW_COPY_AND_ASSIGN(FastCodeGenerator);
 };
 
 
 } }  // namespace v8::internal
+
+#endif  // V8_TARGET_ARCH_IA32
 
 #endif  // V8_FAST_CODEGEN_H_

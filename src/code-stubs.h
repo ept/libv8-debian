@@ -28,6 +28,8 @@
 #ifndef V8_CODE_STUBS_H_
 #define V8_CODE_STUBS_H_
 
+#include "globals.h"
+
 namespace v8 {
 namespace internal {
 
@@ -37,21 +39,29 @@ namespace internal {
   V(CallFunction)                        \
   V(GenericBinaryOp)                     \
   V(StringAdd)                           \
+  V(SubString)                           \
+  V(StringCompare)                       \
   V(SmiOp)                               \
   V(Compare)                             \
   V(RecordWrite)                         \
   V(ConvertToDouble)                     \
   V(WriteInt32ToHeapNumber)              \
   V(StackCheck)                          \
-  V(UnarySub)                            \
+  V(FastNewClosure)                      \
+  V(FastNewContext)                      \
+  V(FastCloneShallowArray)               \
+  V(TranscendentalCache)                 \
+  V(GenericUnaryOp)                      \
   V(RevertToNumber)                      \
   V(ToBoolean)                           \
   V(Instanceof)                          \
   V(CounterOp)                           \
   V(ArgumentsAccess)                     \
-  V(Runtime)                             \
+  V(RegExpExec)                          \
+  V(NumberToString)                      \
   V(CEntry)                              \
-  V(JSEntry)
+  V(JSEntry)                             \
+  V(DebuggerStatement)
 
 // List of code stubs only used on ARM platforms.
 #ifdef V8_TARGET_ARCH_ARM
@@ -83,13 +93,18 @@ class CodeStub BASE_EMBEDDED {
   // Retrieve the code for the stub. Generate the code if needed.
   Handle<Code> GetCode();
 
+  // Retrieve the code for the stub if already generated.  Do not
+  // generate the code if not already generated and instead return a
+  // retry after GC Failure object.
+  Object* TryGetCode();
+
   static Major MajorKeyFromKey(uint32_t key) {
     return static_cast<Major>(MajorKeyBits::decode(key));
   };
   static int MinorKeyFromKey(uint32_t key) {
     return MinorKeyBits::decode(key);
   };
-  static const char* MajorName(Major major_key);
+  static const char* MajorName(Major major_key, bool allow_unknown_keys);
 
   virtual ~CodeStub() {}
 
@@ -104,8 +119,19 @@ class CodeStub BASE_EMBEDDED {
   static const int kMinorBits = kBitsPerInt - kSmiTagSize - kMajorBits;
 
  private:
+  // Lookup the code in the (possibly custom) cache.
+  bool FindCodeInCache(Code** code_out);
+
+  // Nonvirtual wrapper around the stub-specific Generate function.  Call
+  // this function to set up the macro assembler and generate the code.
+  void GenerateCode(MacroAssembler* masm);
+
   // Generates the assembler code for the stub.
   virtual void Generate(MacroAssembler* masm) = 0;
+
+  // Perform bookkeeping required after code generation when stub code is
+  // initially generated.
+  void RecordCodeGeneration(Code* code, MacroAssembler* masm);
 
   // Returns information for computing the number key.
   virtual Major MajorKey() = 0;
@@ -115,8 +141,16 @@ class CodeStub BASE_EMBEDDED {
   // lazily generated function should be fully optimized or not.
   virtual InLoopFlag InLoop() { return NOT_IN_LOOP; }
 
+  // GenericBinaryOpStub needs to override this.
+  virtual int GetCodeKind();
+
+  // GenericBinaryOpStub needs to override this.
+  virtual InlineCacheState GetICState() {
+    return UNINITIALIZED;
+  }
+
   // Returns a name for logging/debugging purposes.
-  virtual const char* GetName() { return MajorName(MajorKey()); }
+  virtual const char* GetName() { return MajorName(MajorKey(), false); }
 
 #ifdef DEBUG
   virtual void Print() { PrintF("%s\n", GetName()); }

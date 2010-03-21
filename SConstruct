@@ -35,7 +35,6 @@ root_dir = dirname(File('SConstruct').rfile().abspath)
 sys.path.append(join(root_dir, 'tools'))
 import js2c, utils
 
-
 # ANDROID_TOP is the top of the Android checkout, fetched from the environment
 # variable 'TOP'.   You will also need to set the CXX, CC, AR and RANLIB
 # environment variables to the cross-compiling tools.
@@ -47,8 +46,8 @@ if ANDROID_TOP is None:
 # on linux we need these compiler flags to avoid crashes in the v8 test suite
 # and avoid dtoa.c strict aliasing issues
 if os.environ.get('GCC_VERSION') == '44':
-    GCC_EXTRA_CCFLAGS = ['-fno-tree-vrp']
-    GCC_DTOA_EXTRA_CCFLAGS = ['-fno-strict-aliasing']
+    GCC_EXTRA_CCFLAGS = ['-fno-tree-vrp', '-fno-strict-aliasing']
+    GCC_DTOA_EXTRA_CCFLAGS = []
 else:
     GCC_EXTRA_CCFLAGS = []
     GCC_DTOA_EXTRA_CCFLAGS = []
@@ -143,6 +142,9 @@ LIBRARY_FLAGS = {
     },
     'os:macos': {
       'CCFLAGS':      ['-ansi', '-mmacosx-version-min=10.4'],
+      'library:shared': {
+        'CPPDEFINES': ['V8_SHARED']
+      }
     },
     'os:freebsd': {
       'CPPPATH' : ['/usr/local/include'],
@@ -150,6 +152,11 @@ LIBRARY_FLAGS = {
       'CCFLAGS':      ['-ansi'],
     },
     'os:openbsd': {
+      'CPPPATH' : ['/usr/local/include'],
+      'LIBPATH' : ['/usr/local/lib'],
+      'CCFLAGS':      ['-ansi'],
+    },
+    'os:solaris': {
       'CPPPATH' : ['/usr/local/include'],
       'LIBPATH' : ['/usr/local/lib'],
       'CCFLAGS':      ['-ansi'],
@@ -175,6 +182,23 @@ LIBRARY_FLAGS = {
       'CPPDEFINES':   ['V8_TARGET_ARCH_ARM']
     },
     'simulator:arm': {
+      'CCFLAGS':      ['-m32'],
+      'LINKFLAGS':    ['-m32']
+    },
+    'armvariant:thumb2': {
+      'CPPDEFINES':   ['V8_ARM_VARIANT_THUMB']
+    },
+    'armvariant:arm': {
+      'CPPDEFINES':   ['V8_ARM_VARIANT_ARM']
+    },
+    'arch:mips': {
+      'CPPDEFINES':   ['V8_TARGET_ARCH_MIPS'],
+      'simulator:none': {
+        'CCFLAGS':      ['-EL', '-mips32r2', '-Wa,-mips32r2', '-fno-inline'],
+        'LDFLAGS':      ['-EL']
+      }
+    },
+    'simulator:mips': {
       'CCFLAGS':      ['-m32'],
       'LINKFLAGS':    ['-m32']
     },
@@ -231,8 +255,16 @@ LIBRARY_FLAGS = {
       },
       'msvcltcg:on': {
         'CCFLAGS':      ['/GL'],
-        'LINKFLAGS':    ['/LTCG'],
         'ARFLAGS':      ['/LTCG'],
+        'pgo:off': {
+          'LINKFLAGS':    ['/LTCG'],
+        },
+        'pgo:instrument': {
+          'LINKFLAGS':    ['/LTCG:PGI']
+        },
+        'pgo:optimize': {
+          'LINKFLAGS':    ['/LTCG:PGO']
+        }
       }
     }
   }
@@ -268,23 +300,20 @@ V8_EXTRA_FLAGS = {
   },
   'msvc': {
     'all': {
-      'WARNINGFLAGS': ['/WX', '/wd4355', '/wd4800']
+      'WARNINGFLAGS': ['/W3', '/WX', '/wd4355', '/wd4800']
     },
     'library:shared': {
       'CPPDEFINES': ['BUILDING_V8_SHARED'],
       'LIBS': ['winmm', 'ws2_32']
-    },
-    'arch:ia32': {
-      'WARNINGFLAGS': ['/W3']
-    },
-    'arch:x64': {
-      'WARNINGFLAGS': ['/W3']
     },
     'arch:arm': {
       'CPPDEFINES':   ['V8_TARGET_ARCH_ARM'],
       # /wd4996 is to silence the warning about sscanf
       # used by the arm simulator.
       'WARNINGFLAGS': ['/wd4996']
+    },
+    'arch:mips': {
+      'CPPDEFINES':   ['V8_TARGET_ARCH_MIPS'],
     },
     'disassembler:on': {
       'CPPDEFINES':   ['ENABLE_DISASSEMBLER']
@@ -303,6 +332,10 @@ MKSNAPSHOT_EXTRA_FLAGS = {
     },
     'os:freebsd': {
       'LIBS': ['execinfo', 'pthread']
+    },
+    'os:solaris': {
+      'LIBS': ['m', 'pthread', 'socket', 'nsl', 'rt'],
+      'LINKFLAGS': ['-mt']
     },
     'os:openbsd': {
       'LIBS': ['execinfo', 'pthread']
@@ -352,6 +385,10 @@ CCTEST_EXTRA_FLAGS = {
     },
     'os:freebsd': {
       'LIBS':         ['execinfo', 'pthread']
+    },
+    'os:solaris': {
+      'LIBS':         ['m', 'pthread', 'socket', 'nsl', 'rt'],
+      'LINKFLAGS':    ['-mt']
     },
     'os:openbsd': {
       'LIBS':         ['execinfo', 'pthread']
@@ -411,6 +448,11 @@ SAMPLE_FLAGS = {
       'LIBPATH' : ['/usr/local/lib'],
       'LIBS':     ['execinfo', 'pthread']
     },
+    'os:solaris': {
+      'LIBPATH' : ['/usr/local/lib'],
+      'LIBS':     ['m', 'pthread', 'socket', 'nsl', 'rt'],
+      'LINKFLAGS': ['-mt']
+    },
     'os:openbsd': {
       'LIBPATH' : ['/usr/local/lib'],
       'LIBS':     ['execinfo', 'pthread']
@@ -438,7 +480,19 @@ SAMPLE_FLAGS = {
       'CCFLAGS':      ['-m64'],
       'LINKFLAGS':    ['-m64']
     },
+    'arch:mips': {
+      'CPPDEFINES':   ['V8_TARGET_ARCH_MIPS'],
+      'simulator:none': {
+        'CCFLAGS':      ['-EL', '-mips32r2', '-Wa,-mips32r2', '-fno-inline'],
+        'LINKFLAGS':    ['-EL'],
+        'LDFLAGS':      ['-EL']
+      }
+    },
     'simulator:arm': {
+      'CCFLAGS':      ['-m32'],
+      'LINKFLAGS':    ['-m32']
+    },
+    'simulator:mips': {
       'CCFLAGS':      ['-m32'],
       'LINKFLAGS':    ['-m32']
     },
@@ -481,7 +535,15 @@ SAMPLE_FLAGS = {
       },
       'msvcltcg:on': {
         'CCFLAGS':      ['/GL'],
-        'LINKFLAGS':    ['/LTCG'],
+        'pgo:off': {
+          'LINKFLAGS':    ['/LTCG'],
+        },
+      },
+      'pgo:instrument': {
+        'LINKFLAGS':    ['/LTCG:PGI']
+      },
+      'pgo:optimize': {
+        'LINKFLAGS':    ['/LTCG:PGO']
       }
     },
     'arch:ia32': {
@@ -519,6 +581,10 @@ D8_FLAGS = {
     },
     'os:freebsd': {
       'LIBS': ['pthread'],
+    },
+    'os:solaris': {
+      'LIBS': ['m', 'pthread', 'socket', 'nsl', 'rt'],
+      'LINKFLAGS': ['-mt']
     },
     'os:openbsd': {
       'LIBS': ['pthread'],
@@ -573,12 +639,12 @@ SIMPLE_OPTIONS = {
     'help': 'the toolchain to use (' + TOOLCHAIN_GUESS + ')'
   },
   'os': {
-    'values': ['freebsd', 'linux', 'macos', 'win32', 'android', 'openbsd'],
+    'values': ['freebsd', 'linux', 'macos', 'win32', 'android', 'openbsd', 'solaris'],
     'default': OS_GUESS,
     'help': 'the os to build for (' + OS_GUESS + ')'
   },
   'arch': {
-    'values':['arm', 'ia32', 'x64'],
+    'values':['arm', 'ia32', 'x64', 'mips'],
     'default': ARCH_GUESS,
     'help': 'the architecture to build for (' + ARCH_GUESS + ')'
   },
@@ -628,7 +694,7 @@ SIMPLE_OPTIONS = {
     'help': 'use Microsoft Visual C++ link-time code generation'
   },
   'simulator': {
-    'values': ['arm', 'none'],
+    'values': ['arm', 'mips', 'none'],
     'default': 'none',
     'help': 'build with simulator'
   },
@@ -656,6 +722,16 @@ SIMPLE_OPTIONS = {
     'values': ['default', 'hidden'],
     'default': 'hidden',
     'help': 'shared library symbol visibility'
+  },
+  'armvariant': {
+    'values': ['arm', 'thumb2', 'none'],
+    'default': 'none',
+    'help': 'generate thumb2 instructions instead of arm instructions (default)'
+  },
+  'pgo': {
+    'values': ['off', 'instrument', 'optimize'],
+    'default': 'off',
+    'help': 'select profile guided optimization variant',
   }
 }
 
@@ -663,7 +739,7 @@ SIMPLE_OPTIONS = {
 def GetOptions():
   result = Options()
   result.Add('mode', 'compilation mode (debug, release)', 'release')
-  result.Add('sample', 'build sample (shell, process)', '')
+  result.Add('sample', 'build sample (shell, process, lineprocessor)', '')
   result.Add('env', 'override environment settings (NAME0:value0,NAME1:value1,...)', '')
   result.Add('importenv', 'import environment settings (NAME0,NAME1,...)', '')
   for (name, option) in SIMPLE_OPTIONS.iteritems():
@@ -731,7 +807,7 @@ def IsLegal(env, option, values):
 def VerifyOptions(env):
   if not IsLegal(env, 'mode', ['debug', 'release']):
     return False
-  if not IsLegal(env, 'sample', ["shell", "process"]):
+  if not IsLegal(env, 'sample', ["shell", "process", "lineprocessor"]):
     return False
   if not IsLegal(env, 'regexp', ["native", "interpreted"]):
     return False
@@ -743,6 +819,8 @@ def VerifyOptions(env):
     Abort("Shared Object soname not applicable for Windows.")
   if env['soname'] == 'on' and env['library'] == 'static':
     Abort("Shared Object soname not applicable for static library.")
+  if env['os'] != 'win32' and env['pgo'] != 'off':
+    Abort("Profile guided optimization only supported on Windows.")
   for (name, option) in SIMPLE_OPTIONS.iteritems():
     if (not option.get('default')) and (name not in ARGUMENTS):
       message = ("A value for option %s must be specified (%s)." %
@@ -828,7 +906,7 @@ class BuildContext(object):
       env['ENV'] = self.env_overrides
 
 
-def PostprocessOptions(options):
+def PostprocessOptions(options, os):
   # Adjust architecture if the simulator option has been set
   if (options['simulator'] != 'none') and (options['arch'] != options['simulator']):
     if 'arch' in ARGUMENTS:
@@ -839,6 +917,19 @@ def PostprocessOptions(options):
     # Print a warning if profiling is enabled without profiling support
     print "Warning: forcing profilingsupport on when prof is on"
     options['profilingsupport'] = 'on'
+  if os == 'win32' and options['pgo'] != 'off' and options['msvcltcg'] == 'off':
+    if 'msvcltcg' in ARGUMENTS:
+      print "Warning: forcing msvcltcg on as it is required for pgo (%s)" % options['pgo']
+    options['msvcltcg'] = 'on'
+  if (options['armvariant'] == 'none' and options['arch'] == 'arm'):
+    options['armvariant'] = 'arm'
+  if (options['armvariant'] != 'none' and options['arch'] != 'arm'):
+    options['armvariant'] = 'none'
+  if options['arch'] == 'mips':
+    if ('regexp' in ARGUMENTS) and options['regexp'] == 'native':
+      # Print a warning if native regexp is specified for mips
+      print "Warning: forcing regexp to interpreted for mips"
+    options['regexp'] = 'interpreted'
 
 
 def ParseEnvOverrides(arg, imports):
@@ -860,7 +951,7 @@ def BuildSpecific(env, mode, env_overrides):
   options = {'mode': mode}
   for option in SIMPLE_OPTIONS:
     options[option] = env[option]
-  PostprocessOptions(options)
+  PostprocessOptions(options, env['os'])
 
   context = BuildContext(options, env_overrides, samples=SplitList(env['sample']))
 
@@ -918,6 +1009,7 @@ def BuildSpecific(env, mode, env_overrides):
 
   # Link the object files into a library.
   env.Replace(**context.flags['v8'])
+
   context.ApplyEnvOverrides(env)
   if context.options['library'] == 'static':
     library = env.StaticLibrary(library_name, object_files)
@@ -931,6 +1023,7 @@ def BuildSpecific(env, mode, env_overrides):
 
   d8_env = Environment()
   d8_env.Replace(**context.flags['d8'])
+  context.ApplyEnvOverrides(d8_env)
   shell = d8_env.Program('d8' + suffix, object_files + shell_files)
   context.d8_targets.append(shell)
 

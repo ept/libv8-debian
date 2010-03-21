@@ -33,46 +33,17 @@
 namespace v8 {
 namespace internal {
 
-class UseCount BASE_EMBEDDED {
- public:
-  UseCount();
-
-  // Inform the node of a "use". The weight can be used to indicate
-  // heavier use, for instance if the variable is accessed inside a loop.
-  void RecordRead(int weight);
-  void RecordWrite(int weight);
-  void RecordAccess(int weight);  // records a read & write
-  void RecordUses(UseCount* uses);
-
-  int nreads() const  { return nreads_; }
-  int nwrites() const  { return nwrites_; }
-  int nuses() const  { return nreads_ + nwrites_; }
-
-  bool is_read() const  { return nreads() > 0; }
-  bool is_written() const  { return nwrites() > 0; }
-  bool is_used() const  { return nuses() > 0; }
-
-#ifdef DEBUG
-  void Print();
-#endif
-
- private:
-  int nreads_;
-  int nwrites_;
-};
-
-
 // Variables and AST expression nodes can track their "type" to enable
 // optimizations and removal of redundant checks when generating code.
 
-class SmiAnalysis {
+class StaticType {
  public:
   enum Kind {
     UNKNOWN,
     LIKELY_SMI
   };
 
-  SmiAnalysis() : kind_(UNKNOWN) {}
+  StaticType() : kind_(UNKNOWN) {}
 
   bool Is(Kind kind) const { return kind_ == kind; }
 
@@ -80,11 +51,11 @@ class SmiAnalysis {
   bool IsUnknown() const { return Is(UNKNOWN); }
   bool IsLikelySmi() const { return Is(LIKELY_SMI); }
 
-  void CopyFrom(SmiAnalysis* other) {
+  void CopyFrom(StaticType* other) {
     kind_ = other->kind_;
   }
 
-  static const char* Type2String(SmiAnalysis* type);
+  static const char* Type2String(StaticType* type);
 
   // LIKELY_SMI accessors
   void SetAsLikelySmi() {
@@ -100,7 +71,7 @@ class SmiAnalysis {
  private:
   Kind kind_;
 
-  DISALLOW_COPY_AND_ASSIGN(SmiAnalysis);
+  DISALLOW_COPY_AND_ASSIGN(StaticType);
 };
 
 
@@ -168,12 +139,14 @@ class Variable: public ZoneObject {
   bool is_accessed_from_inner_scope() const  {
     return is_accessed_from_inner_scope_;
   }
-  UseCount* var_uses()  { return &var_uses_; }
-  UseCount* obj_uses()  { return &obj_uses_; }
+  bool is_used() { return is_used_; }
+  void set_is_used(bool flag) { is_used_ = flag; }
 
   bool IsVariable(Handle<String> n) const {
     return !is_this() && name().is_identical_to(n);
   }
+
+  bool IsStackAllocated() const;
 
   bool is_dynamic() const {
     return (mode_ == DYNAMIC ||
@@ -203,7 +176,7 @@ class Variable: public ZoneObject {
   Expression* rewrite() const  { return rewrite_; }
   Slot* slot() const;
 
-  SmiAnalysis* type() { return &type_; }
+  StaticType* type() { return &type_; }
 
  private:
   Scope* scope_;
@@ -216,11 +189,10 @@ class Variable: public ZoneObject {
 
   // Usage info.
   bool is_accessed_from_inner_scope_;  // set by variable resolver
-  UseCount var_uses_;  // uses of the variable value
-  UseCount obj_uses_;  // uses of the object the variable points to
+  bool is_used_;
 
   // Static type information
-  SmiAnalysis type_;
+  StaticType type_;
 
   // Code generation.
   // rewrite_ is usually a Slot or a Property, but may be any expression.

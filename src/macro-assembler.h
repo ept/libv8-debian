@@ -61,6 +61,8 @@ enum AllocationFlags {
   RESULT_CONTAINS_TOP = 1 << 1
 };
 
+// Invalid depth in prototype chain.
+const int kInvalidProtoDepth = -1;
 
 #if V8_TARGET_ARCH_IA32
 #include "assembler.h"
@@ -77,10 +79,22 @@ enum AllocationFlags {
 #elif V8_TARGET_ARCH_ARM
 #include "arm/constants-arm.h"
 #include "assembler.h"
+#ifdef V8_ARM_VARIANT_THUMB
+#include "arm/assembler-thumb2.h"
+#include "arm/assembler-thumb2-inl.h"
+#else
 #include "arm/assembler-arm.h"
 #include "arm/assembler-arm-inl.h"
+#endif
 #include "code.h"  // must be after assembler_*.h
 #include "arm/macro-assembler-arm.h"
+#elif V8_TARGET_ARCH_MIPS
+#include "mips/constants-mips.h"
+#include "assembler.h"
+#include "mips/assembler-mips.h"
+#include "mips/assembler-mips-inl.h"
+#include "code.h"  // must be after assembler_*.h
+#include "mips/macro-assembler-mips.h"
 #else
 #error Unsupported target architecture.
 #endif
