@@ -14,6 +14,8 @@ http://code.google.com/p/v8/issues/detail?id=429
      return 'ia32'
 +  elif id == 'x86_64':
 +    return 'x64'
++  elif id == 'mips':
++    return 'mips'
    else:
      return None
  

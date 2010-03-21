@@ -1,4 +1,4 @@
-install_target.patch
-enable_soname.patch
-armel-build.patch
-x86_64_code.patch
+0001-enable_soname.patch
+0002-armel-build.patch
+0003-platform-detection-x86_64-and-mips.patch
+0004-add-the-install-target.patch

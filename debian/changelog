@@ -10,6 +10,9 @@ libv8 (2.1.6-1) unstable; urgency=low
 
   [ Jérémy Lal ]
   * debian/copyright: updated to reflect the missing files
+  * debian/patches:
+    + new naming scheme which preserves the ordering
+    + added mips to the x86_64_code.patch
 
  -- Antonio Radici <antonio@dyne.org>  Sun, 21 Mar 2010 10:58:49 +0000
 
