@@ -3,7 +3,7 @@ http://code.google.com/p/v8/issues/detail?id=429
 
 --- a/tools/utils.py
 +++ b/tools/utils.py
-@@ -67,10 +67,12 @@
+@@ -67,10 +67,14 @@
    id = platform.machine()
    if id.startswith('arm'):
      return 'arm'
@@ -18,4 +18,3 @@ http://code.google.com/p/v8/issues/detail?id=429
 +    return 'mips'
    else:
      return None
- 
