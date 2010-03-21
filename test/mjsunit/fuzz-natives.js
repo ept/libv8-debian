@@ -27,6 +27,9 @@
 
 // Flags: --allow-natives-syntax
 
+var RUN_WITH_ALL_ARGUMENT_ENTRIES = false;
+var kOnManyArgumentsRemove = 5;
+
 function makeArguments() {
   var result = [ ];
   result.push(17);
@@ -54,9 +57,17 @@ function makeFunction(name, argc) {
   return new Function(args.join(", "), "return %" + name + "(" + argsStr + ");");
 }
 
-function testArgumentCount(name) {
+function testArgumentCount(name, argc) {
   for (var i = 0; i < 10; i++) {
-    var func = makeFunction(name, i);
+    var func = null;
+    try {
+      func = makeFunction(name, i);
+    } catch (e) {
+      if (e != "SyntaxError: illegal access") throw e;
+    }
+    if (func === null && i == argc) {
+      throw "unexpected exception";
+    }
     var args = [ ];
     for (var j = 0; j < i; j++)
       args.push(0);
@@ -74,13 +85,23 @@ function testArgumentTypes(name, argc) {
   var func = makeFunction(name, argc);
   while (hasMore) {
     var argPool = makeArguments();
+    // When we have 5 or more arguments we lower the amount of tests cases
+    // by randomly removing kOnManyArgumentsRemove entries
+    var numArguments = RUN_WITH_ALL_ARGUMENT_ENTRIES ?
+      kArgObjects : kArgObjects-kOnManyArgumentsRemove;
+    if (argc >= 5 && !RUN_WITH_ALL_ARGUMENT_ENTRIES) {
+      for (var i = 0; i < kOnManyArgumentsRemove; i++) {
+        var rand = Math.floor(Math.random() * (kArgObjects - i));
+        argPool.splice(rand,1);
+      }
+    }
     var current = type;
     var hasMore = false;
     var argList = [ ];
     for (var i = 0; i < argc; i++) {
-      var index = current % kArgObjects;
-      current = (current / kArgObjects) << 0;
-      if (index != (kArgObjects - 1))
+      var index = current % numArguments;
+      current = (current / numArguments) << 0;
+      if (index != (numArguments - 1))
         hasMore = true;
       argList.push(argPool[index]);
     }
@@ -95,7 +116,11 @@ function testArgumentTypes(name, argc) {
 
 var knownProblems = {
   "Abort": true,
-  
+
+  // Avoid calling the concat operation, because weird lengths
+  // may lead to out-of-memory.
+  "StringBuilderConcat": true,
+
   // These functions use pseudo-stack-pointers and are not robust
   // to unexpected integer values.
   "DebugEvaluate": true,
@@ -114,7 +139,7 @@ var knownProblems = {
   // the rest of the tests.
   "DisableAccessChecks": true,
   "EnableAccessChecks": true,
-  
+
   // These functions should not be callable as runtime functions.
   "NewContext": true,
   "NewArgumentsFast": true,
@@ -129,9 +154,20 @@ var knownProblems = {
   "Log": true,
   "DeclareGlobals": true,
 
-  "CollectStackTrace": true,
   "PromoteScheduledException": true,
-  "DeleteHandleScopeExtensions": true
+  "DeleteHandleScopeExtensions": true,
+
+  // That can only be invoked on Array.prototype.
+  "FinishArrayPrototypeSetup": true,
+
+  // LiveEdit feature is under development currently and has fragile input.
+  "LiveEditFindSharedFunctionInfosForScript": true,
+  "LiveEditGatherCompileInfo": true,
+  "LiveEditReplaceScript": true,
+  "LiveEditReplaceFunctionCode": true,
+  "LiveEditRelinkFunctionToScript": true,
+  "LiveEditPatchFunctionPositions": true,
+  "LiveEditCheckStackActivations": true
 };
 
 var currentlyUncallable = {
@@ -148,7 +184,7 @@ function testNatives() {
       continue;
     print(name);
     var argc = nativeInfo[1];
-    testArgumentCount(name);
+    testArgumentCount(name, argc);
     testArgumentTypes(name, argc);
   }
 }

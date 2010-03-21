@@ -116,6 +116,8 @@ DEFINE_bool(enable_sahf, true,
             "enable use of SAHF instruction if available (X64 only)")
 DEFINE_bool(enable_vfp3, true,
             "enable use of VFP3 instructions if available (ARM only)")
+DEFINE_bool(enable_armv7, true,
+            "enable use of ARMv7 instructions if available (ARM only)")
 
 // bootstrapper.cc
 DEFINE_string(expose_natives_as, NULL, "expose natives in global object")
@@ -143,12 +145,17 @@ DEFINE_bool(debug_info, true, "add debug information to compiled functions")
 DEFINE_bool(strict, false, "strict error checking")
 DEFINE_int(min_preparse_length, 1024,
            "minimum length for automatic enable preparsing")
-DEFINE_bool(fast_compiler, true,
-            "use the fast-mode compiler for some top-level code")
-DEFINE_bool(trace_bailout, false,
-            "print reasons for failing to use fast compilation")
+DEFINE_bool(full_compiler, true, "enable dedicated backend for run-once code")
+DEFINE_bool(fast_compiler, false, "enable speculative optimizing backend")
+DEFINE_bool(always_full_compiler, false,
+            "try to use the dedicated run-once backend for all code")
 DEFINE_bool(always_fast_compiler, false,
-            "always try using the fast compiler")
+            "try to use the speculative optimizing backend for all code")
+DEFINE_bool(trace_bailout, false,
+            "print reasons for falling back to using the classic V8 backend")
+DEFINE_bool(safe_int32_compiler, true,
+            "enable optimized side-effect-free int32 expressions.")
+DEFINE_bool(use_flow_graph, false, "perform flow-graph based optimizations")
 
 // compilation-cache.cc
 DEFINE_bool(compilation_cache, true, "enable compilation cache")
@@ -159,6 +166,7 @@ DEFINE_bool(trace_debug_json, false, "trace debugging JSON request/response")
 DEFINE_bool(debugger_auto_break, true,
             "automatically set the debug break flag when debugger commands are "
             "in the queue")
+DEFINE_bool(enable_liveedit, true, "enable liveedit experimental feature")
 
 // frames.cc
 DEFINE_int(max_stack_trace_source_length, 300,
@@ -198,6 +206,14 @@ DEFINE_bool(cleanup_caches_in_maps_at_gc, true,
 DEFINE_bool(canonicalize_object_literal_maps, true,
             "Canonicalize maps for object literals.")
 
+DEFINE_bool(use_big_map_space, true,
+            "Use big map space, but don't compact if it grew too big.")
+
+DEFINE_int(max_map_space_pages, MapSpace::kMaxMapPageIndex - 1,
+           "Maximum number of pages in map space which still allows to encode "
+           "forwarding pointers.  That's actually a constant, but it's useful "
+           "to control it with a flag for better testing.")
+
 // mksnapshot.cc
 DEFINE_bool(h, false, "print this message")
 DEFINE_bool(new_snapshot, true, "use new snapshot implementation")
@@ -208,7 +224,7 @@ DEFINE_bool(allow_natives_syntax, false, "allow natives syntax")
 // rewriter.cc
 DEFINE_bool(optimize_ast, true, "optimize the ast")
 
-// simulator-arm.cc
+// simulator-arm.cc and simulator-mips.cc
 DEFINE_bool(trace_sim, false, "trace simulator execution")
 DEFINE_int(stop_sim_at, 0, "Simulator stop after x number of instructions")
 
@@ -218,9 +234,6 @@ DEFINE_bool(trace_exception, false,
 DEFINE_bool(preallocate_message_memory, false,
             "preallocate some memory to build stack traces.")
 
-// usage-analyzer.cc
-DEFINE_bool(usage_computation, true, "compute variable usage counts")
-
 // v8.cc
 DEFINE_bool(preemption, false,
             "activate a 100ms timer that switches between V8 threads")
@@ -228,6 +241,7 @@ DEFINE_bool(preemption, false,
 // Regexp
 DEFINE_bool(trace_regexps, false, "trace regexp execution")
 DEFINE_bool(regexp_optimization, true, "generate optimized regexp code")
+DEFINE_bool(regexp_entry_native, true, "use native code to enter regexp")
 
 // Testing flags test/cctest/test-{flags,api,serialization}.cc
 DEFINE_bool(testing_bool_flag, true, "testing_bool_flag")
@@ -290,6 +304,9 @@ DEFINE_string(stop_at, "", "function name where to insert a breakpoint")
 // compiler.cc
 DEFINE_bool(print_builtin_scopes, false, "print scopes for builtins")
 DEFINE_bool(print_scopes, false, "print scopes")
+DEFINE_bool(print_ir, false, "print the AST as seen by the backend")
+DEFINE_bool(print_graph_text, false,
+            "print a text representation of the flow graph")
 
 // contexts.cc
 DEFINE_bool(trace_contexts, false, "trace contexts operations")
@@ -325,6 +342,9 @@ DEFINE_bool(collect_heap_spill_statistics, false,
             "(requires heap_stats)")
 
 // Regexp
+DEFINE_bool(regexp_possessive_quantifier,
+            false,
+            "enable possessive quantifier syntax for testing")
 DEFINE_bool(trace_regexp_bytecodes, false, "trace regexp bytecode execution")
 DEFINE_bool(trace_regexp_assembler,
             false,
@@ -351,6 +371,8 @@ DEFINE_bool(log_code, false,
 DEFINE_bool(log_gc, false,
             "Log heap samples on garbage collection for the hp2ps tool.")
 DEFINE_bool(log_handles, false, "Log global handle events.")
+DEFINE_bool(log_snapshot_positions, false,
+            "log positions of (de)serialized objects in the snapshot.")
 DEFINE_bool(log_state_changes, false, "Log state changes.")
 DEFINE_bool(log_suspect, false, "Log suspect operations.")
 DEFINE_bool(log_producers, false, "Log stack traces of JS objects allocations.")

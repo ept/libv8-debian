@@ -587,7 +587,6 @@ static const char* TypeToString(InstanceType type) {
     case JS_BUILTINS_OBJECT_TYPE: return "JS_BUILTINS_OBJECT";
     case JS_GLOBAL_PROXY_TYPE: return "JS_GLOBAL_PROXY";
     case PROXY_TYPE: return "PROXY";
-    case SMI_TYPE: return "SMI";
 #define MAKE_STRUCT_CASE(NAME, Name, name) case NAME##_TYPE: return #NAME;
   STRUCT_LIST(MAKE_STRUCT_CASE)
 #undef MAKE_STRUCT_CASE
@@ -642,6 +641,24 @@ void Map::MapVerify() {
          && instance_size() < Heap::Capacity());
   VerifyHeapPointer(prototype());
   VerifyHeapPointer(instance_descriptors());
+}
+
+
+void CodeCache::CodeCachePrint() {
+  HeapObject::PrintHeader("CodeCache");
+  PrintF("\n - default_cache: ");
+  default_cache()->ShortPrint();
+  PrintF("\n - normal_type_cache: ");
+  normal_type_cache()->ShortPrint();
+}
+
+
+void CodeCache::CodeCacheVerify() {
+  VerifyHeapPointer(default_cache());
+  VerifyHeapPointer(normal_type_cache());
+  ASSERT(default_cache()->IsFixedArray());
+  ASSERT(normal_type_cache()->IsUndefined()
+         || normal_type_cache()->IsCodeCacheHashTable());
 }
 
 
@@ -772,7 +789,7 @@ void SharedFunctionInfo::SharedFunctionInfoVerify() {
   VerifyObjectField(kNameOffset);
   VerifyObjectField(kCodeOffset);
   VerifyObjectField(kInstanceClassNameOffset);
-  VerifyObjectField(kExternalReferenceDataOffset);
+  VerifyObjectField(kFunctionDataOffset);
   VerifyObjectField(kScriptOffset);
   VerifyObjectField(kDebugInfoOffset);
 }
@@ -1037,6 +1054,8 @@ void FunctionTemplateInfo::FunctionTemplateInfoVerify() {
 
 void FunctionTemplateInfo::FunctionTemplateInfoPrint() {
   HeapObject::PrintHeader("FunctionTemplateInfo");
+  PrintF("\n - class name: ");
+  class_name()->ShortPrint();
   PrintF("\n - tag: ");
   tag()->ShortPrint();
   PrintF("\n - property_list: ");

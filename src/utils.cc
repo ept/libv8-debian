@@ -40,6 +40,7 @@ namespace internal {
 // Implementation is from "Hacker's Delight" by Henry S. Warren, Jr.,
 // figure 3-3, page 48, where the function is called clp2.
 uint32_t RoundUpToPowerOf2(uint32_t x) {
+  ASSERT(x <= 0x80000000u);
   x = x - 1;
   x = x | (x >> 1);
   x = x | (x >> 2);
@@ -47,43 +48,6 @@ uint32_t RoundUpToPowerOf2(uint32_t x) {
   x = x | (x >> 8);
   x = x | (x >> 16);
   return x + 1;
-}
-
-
-byte* EncodeInt(byte* p, int x) {
-  while (x < -64 || x >= 64) {
-    *p++ = static_cast<byte>(x & 127);
-    x = ArithmeticShiftRight(x, 7);
-  }
-  // -64 <= x && x < 64
-  *p++ = static_cast<byte>(x + 192);
-  return p;
-}
-
-
-byte* DecodeInt(byte* p, int* x) {
-  int r = 0;
-  unsigned int s = 0;
-  byte b = *p++;
-  while (b < 128) {
-    r |= static_cast<int>(b) << s;
-    s += 7;
-    b = *p++;
-  }
-  // b >= 128
-  *x = r | ((static_cast<int>(b) - 192) << s);
-  return p;
-}
-
-
-byte* EncodeUnsignedIntBackward(byte* p, unsigned int x) {
-  while (x >= 128) {
-    *--p = static_cast<byte>(x & 127);
-    x = x >> 7;
-  }
-  // x < 128
-  *--p = static_cast<byte>(x + 128);
-  return p;
 }
 
 

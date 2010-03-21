@@ -30,11 +30,14 @@
 
 #include <math.h>
 
-#include "zone-inl.h"
-
+#include "splay-tree-inl.h"
+#include "v8-counters.h"
 
 namespace v8 {
 namespace internal {
+
+// Forward declarations.
+class ZoneScopeInfo;
 
 // Defines all the roots in Heap.
 #define UNCONDITIONAL_STRONG_ROOT_LIST(V)                                      \
@@ -101,7 +104,6 @@ namespace internal {
   V(Code, js_entry_code, JsEntryCode)                                          \
   V(Code, js_construct_entry_code, JsConstructEntryCode)                       \
   V(Code, c_entry_code, CEntryCode)                                            \
-  V(Code, c_entry_debug_break_code, CEntryDebugBreakCode)                      \
   V(FixedArray, number_string_cache, NumberStringCache)                        \
   V(FixedArray, single_character_string_cache, SingleCharacterStringCache)     \
   V(FixedArray, natives_source_cache, NativesSourceCache)                      \
@@ -269,7 +271,7 @@ class Heap : public AllStatic {
     return reinterpret_cast<Address>(&always_allocate_scope_depth_);
   }
   static bool linear_allocation() {
-      return linear_allocation_scope_depth_ != 0;
+    return linear_allocation_scope_depth_ != 0;
   }
 
   static Address* NewSpaceAllocationTopAddress() {
@@ -345,6 +347,9 @@ class Heap : public AllStatic {
 
   // Allocate a map for the specified function
   static Object* AllocateInitialMap(JSFunction* fun);
+
+  // Allocates an empty code cache.
+  static Object* AllocateCodeCache();
 
   // Allocates and fully initializes a String.  There are two String
   // encodings: ASCII and two byte. One should choose between the three string
@@ -450,8 +455,15 @@ class Heap : public AllStatic {
   // failed.
   // Please note this does not perform a garbage collection.
   static Object* AllocateFixedArray(int length, PretenureFlag pretenure);
-  // Allocate uninitialized, non-tenured fixed array with length elements.
+  // Allocates a fixed array initialized with undefined values
   static Object* AllocateFixedArray(int length);
+
+  // Allocates an uninitialized fixed array. It must be filled by the caller.
+  //
+  // Returns Failure::RetryAfterGC(requested_bytes, space) if the allocation
+  // failed.
+  // Please note this does not perform a garbage collection.
+  static Object* AllocateUninitializedFixedArray(int length);
 
   // Make a copy of src and return it. Returns
   // Failure::RetryAfterGC(requested_bytes, space) if the allocation failed.
@@ -465,7 +477,8 @@ class Heap : public AllStatic {
 
   // AllocateHashTable is identical to AllocateFixedArray except
   // that the resulting object has hash_table_map as map.
-  static Object* AllocateHashTable(int length);
+  static Object* AllocateHashTable(int length,
+                                   PretenureFlag pretenure = NOT_TENURED);
 
   // Allocate a global (but otherwise uninitialized) context.
   static Object* AllocateGlobalContext();
@@ -487,9 +500,12 @@ class Heap : public AllStatic {
   // Please note this does not perform a garbage collection.
   static Object* AllocateFunction(Map* function_map,
                                   SharedFunctionInfo* shared,
-                                  Object* prototype);
+                                  Object* prototype,
+                                  PretenureFlag pretenure = TENURED);
 
   // Indicies for direct access into argument objects.
+  static const int kArgumentsObjectSize =
+      JSObject::kHeaderSize + 2 * kPointerSize;
   static const int arguments_callee_index = 0;
   static const int arguments_length_index = 1;
 
@@ -554,7 +570,8 @@ class Heap : public AllStatic {
   // Please note this does not perform a garbage collection.
   static Object* AllocateSubString(String* buffer,
                                    int start,
-                                   int end);
+                                   int end,
+                                   PretenureFlag pretenure = NOT_TENURED);
 
   // Allocate a new external string object, which is backed by a string
   // resource that resides outside the V8 heap.
@@ -565,6 +582,10 @@ class Heap : public AllStatic {
       ExternalAsciiString::Resource* resource);
   static Object* AllocateExternalStringFromTwoByte(
       ExternalTwoByteString::Resource* resource);
+
+  // Finalizes an external string by deleting the associated external
+  // data and clearing the resource pointer.
+  static inline void FinalizeExternalString(String* string);
 
   // Allocates an uninitialized object.  The memory is non-executable if the
   // hardware and OS allow.
@@ -591,6 +612,11 @@ class Heap : public AllStatic {
                             Handle<Object> self_reference);
 
   static Object* CopyCode(Code* code);
+
+  // Copy the code and scope info part of the code object, but insert
+  // the provided data as the relocation information.
+  static Object* CopyCode(Code* code, Vector<byte> reloc_info);
+
   // Finds the symbol for string in the symbol table.
   // If not found, a new symbol is added to the table and returned.
   // Returns Failure::RetryAfterGC(requested_bytes, space) if allocation
@@ -607,6 +633,15 @@ class Heap : public AllStatic {
   // Compute the matching symbol map for a string if possible.
   // NULL is returned if string is in new space or not flattened.
   static Map* SymbolMapForString(String* str);
+
+  // Tries to flatten a string before compare operation.
+  //
+  // Returns a failure in case it was decided that flattening was
+  // necessary and failed.  Note, if flattening is not necessary the
+  // string might stay non-flat even when not a failure is returned.
+  //
+  // Please note this function does not perform a garbage collection.
+  static inline Object* PrepareForCompare(String* str);
 
   // Converts the given boolean condition to JavaScript boolean value.
   static Object* ToBoolean(bool condition) {
@@ -626,12 +661,8 @@ class Heap : public AllStatic {
   // parameter is true.
   static void CollectAllGarbage(bool force_compaction);
 
-  // Performs a full garbage collection if a context has been disposed
-  // since the last time the check was performed.
-  static void CollectAllGarbageIfContextDisposed();
-
   // Notify the heap that a context has been disposed.
-  static void NotifyContextDisposed();
+  static int NotifyContextDisposed() { return ++contexts_disposed_; }
 
   // Utility to invoke the scavenger. This is needed in test code to
   // ensure correct callback for weak global handles.
@@ -683,6 +714,8 @@ class Heap : public AllStatic {
   static void IterateRoots(ObjectVisitor* v, VisitMode mode);
   // Iterates over all strong roots in the heap.
   static void IterateStrongRoots(ObjectVisitor* v, VisitMode mode);
+  // Iterates over all the other roots in the heap.
+  static void IterateWeakRoots(ObjectVisitor* v, VisitMode mode);
 
   // Iterates remembered set of an old space.
   static void IterateRSet(PagedSpace* space, ObjectSlotCallback callback);
@@ -761,6 +794,9 @@ class Heap : public AllStatic {
   // Write barrier support for address[offset] = o.
   static inline void RecordWrite(Address address, int offset);
 
+  // Write barrier support for address[start : start + len[ = o.
+  static inline void RecordWrites(Address address, int start, int len);
+
   // Given an address occupied by a live code object, return that object.
   static Object* FindCodeObject(Address a);
 
@@ -778,7 +814,7 @@ class Heap : public AllStatic {
     return disallow_allocation_failure_;
   }
 
-  static void TracePathToObject();
+  static void TracePathToObject(Object* target);
   static void TracePathToGlobal();
 #endif
 
@@ -797,8 +833,26 @@ class Heap : public AllStatic {
   // Rebuild remembered set in old and map spaces.
   static void RebuildRSets();
 
+  // Update an old object's remembered set
+  static int UpdateRSet(HeapObject* obj);
+
   // Commits from space if it is uncommitted.
   static void EnsureFromSpaceIsCommitted();
+
+  // Support for partial snapshots.  After calling this we can allocate a
+  // certain number of bytes using only linear allocation (with a
+  // LinearAllocationScope and an AlwaysAllocateScope) without using freelists
+  // or causing a GC.  It returns true of space was reserved or false if a GC is
+  // needed.  For paged spaces the space requested must include the space wasted
+  // at the end of each page when allocating linearly.
+  static void ReserveSpace(
+    int new_space_size,
+    int pointer_space_size,
+    int data_space_size,
+    int code_space_size,
+    int map_space_size,
+    int cell_space_size,
+    int large_object_size);
 
   //
   // Support for the API.
@@ -812,9 +866,6 @@ class Heap : public AllStatic {
 
   // Update the cache with a new number-string pair.
   static void SetNumberStringCache(Object* number, String* str);
-
-  // Entries in the cache.  Must be a power of 2.
-  static const int kNumberStringCacheSize = 64;
 
   // Adjusts the amount of registered external memory.
   // Returns the adjusted value.
@@ -830,11 +881,15 @@ class Heap : public AllStatic {
            > old_gen_promotion_limit_;
   }
 
+  static intptr_t OldGenerationSpaceAvailable() {
+    return old_gen_allocation_limit_ -
+           (PromotedSpaceSize() + PromotedExternalMemorySize());
+  }
+
   // True if we have reached the allocation limit in the old generation that
   // should artificially cause a GC right now.
   static bool OldGenerationAllocationLimitReached() {
-    return (PromotedSpaceSize() + PromotedExternalMemorySize())
-           > old_gen_allocation_limit_;
+    return OldGenerationSpaceAvailable() < 0;
   }
 
   // Can be called when the embedding application is idle.
@@ -881,12 +936,9 @@ class Heap : public AllStatic {
 
   static int always_allocate_scope_depth_;
   static int linear_allocation_scope_depth_;
-  static bool context_disposed_pending_;
 
-  // The number of MapSpace pages is limited by the way we pack
-  // Map pointers during GC.
-  static const int kMaxMapSpaceSize =
-      (1 << MapWord::kMapPageIndexBits) * Page::kPageSize;
+  // For keeping track of context disposals.
+  static int contexts_disposed_;
 
 #if defined(V8_TARGET_ARCH_X64)
   static const int kMaxObjectSizeInNewSpace = 512*KB;
@@ -911,6 +963,9 @@ class Heap : public AllStatic {
 
   static int mc_count_;  // how many mark-compact collections happened
   static int gc_count_;  // how many gc happened
+
+  // Total length of the strings we failed to flatten since the last GC.
+  static int unflattended_strings_length_;
 
 #define ROOT_ACCESSOR(type, name, camel_name)                                  \
   static inline void set_##name(type* value) {                                 \
@@ -1023,7 +1078,6 @@ class Heap : public AllStatic {
   // These four Create*EntryStub functions are here because of a gcc-4.4 bug
   // that assigns wrong vtable entries.
   static void CreateCEntryStub();
-  static void CreateCEntryDebugBreakStub();
   static void CreateJSEntryStub();
   static void CreateJSConstructEntryStub();
   static void CreateRegExpCEntryStub();
@@ -1039,6 +1093,9 @@ class Heap : public AllStatic {
 
   // Performs a minor collection in new generation.
   static void Scavenge();
+  static void ScavengeExternalStringTable();
+  static Address DoScavenge(ObjectVisitor* scavenge_visitor,
+                            Address new_space_front);
 
   // Performs a major collection in the whole heap.
   static void MarkCompact(GCTracer* tracer);
@@ -1050,9 +1107,9 @@ class Heap : public AllStatic {
   // Helper function used by CopyObject to copy a source object to an
   // allocated target object and update the forwarding pointer in the source
   // object.  Returns the target object.
-  static HeapObject* MigrateObject(HeapObject* source,
-                                   HeapObject* target,
-                                   int size);
+  static inline HeapObject* MigrateObject(HeapObject* source,
+                                          HeapObject* target,
+                                          int size);
 
   // Helper function that governs the promotion policy from new space to
   // old.  If the object's old address lies below the new space's age
@@ -1067,9 +1124,6 @@ class Heap : public AllStatic {
   static void ReportStatisticsBeforeGC();
   static void ReportStatisticsAfterGC();
 #endif
-
-  // Update an old object's remembered set
-  static int UpdateRSet(HeapObject* obj);
 
   // Rebuild remembered set in an old space.
   static void RebuildRSets(PagedSpace* space);
@@ -1092,6 +1146,12 @@ class Heap : public AllStatic {
   static inline Object* InitializeFunction(JSFunction* function,
                                            SharedFunctionInfo* shared,
                                            Object* prototype);
+
+
+  // Initializes the number to string cache based on the max semispace size.
+  static Object* InitializeNumberStringCache();
+  // Flush the number to string cache.
+  static void FlushNumberStringCache();
 
   static const int kInitialSymbolTableSize = 2048;
   static const int kInitialEvalCacheSize = 64;
@@ -1224,7 +1284,7 @@ class OldSpaces BASE_EMBEDDED {
 
 
 // Space iterator for iterating over all the paged spaces of the heap:
-// Map space, old pointer space, old data space and code space.
+// Map space, old pointer space, old data space, code space and cell space.
 // Returns each space in turn, and null when it is done.
 class PagedSpaces BASE_EMBEDDED {
  public:
@@ -1263,7 +1323,6 @@ class HeapIterator BASE_EMBEDDED {
   explicit HeapIterator();
   virtual ~HeapIterator();
 
-  bool has_next();
   HeapObject* next();
   void reset();
 
@@ -1293,17 +1352,33 @@ class KeyedLookupCache {
 
   // Clear the cache.
   static void Clear();
+
+  static const int kLength = 64;
+  static const int kCapacityMask = kLength - 1;
+  static const int kMapHashShift = 2;
+
  private:
   static inline int Hash(Map* map, String* name);
-  static const int kLength = 64;
+
+  // Get the address of the keys and field_offsets arrays.  Used in
+  // generated code to perform cache lookups.
+  static Address keys_address() {
+    return reinterpret_cast<Address>(&keys_);
+  }
+
+  static Address field_offsets_address() {
+    return reinterpret_cast<Address>(&field_offsets_);
+  }
+
   struct Key {
     Map* map;
     String* name;
   };
   static Key keys_[kLength];
   static int field_offsets_[kLength];
-};
 
+  friend class ExternalReference;
+};
 
 
 // Cache for mapping (array, property name) into descriptor index.
@@ -1341,9 +1416,9 @@ class DescriptorLookupCache {
  private:
   static int Hash(DescriptorArray* array, String* name) {
     // Uses only lower 32 bits if pointers are larger.
-    uintptr_t array_hash =
+    uint32_t array_hash =
         static_cast<uint32_t>(reinterpret_cast<uintptr_t>(array)) >> 2;
-    uintptr_t name_hash =
+    uint32_t name_hash =
         static_cast<uint32_t>(reinterpret_cast<uintptr_t>(name)) >> 2;
     return (array_hash ^ name_hash) % kLength;
   }
@@ -1478,8 +1553,23 @@ class DisableAssertNoAllocation {
 
 class GCTracer BASE_EMBEDDED {
  public:
-  GCTracer();
+  // Time spent while in the external scope counts towards the
+  // external time in the tracer and will be reported separately.
+  class ExternalScope BASE_EMBEDDED {
+   public:
+    explicit ExternalScope(GCTracer* tracer) : tracer_(tracer) {
+      start_time_ = OS::TimeCurrentMillis();
+    }
+    ~ExternalScope() {
+      tracer_->external_time_ += OS::TimeCurrentMillis() - start_time_;
+    }
 
+   private:
+    GCTracer* tracer_;
+    double start_time_;
+  };
+
+  GCTracer();
   ~GCTracer();
 
   // Sets the collector.
@@ -1512,6 +1602,9 @@ class GCTracer BASE_EMBEDDED {
   double start_time_;  // Timestamp set in the constructor.
   double start_size_;  // Size of objects in heap set in constructor.
   GarbageCollector collector_;  // Type of collector.
+
+  // Keep track of the amount of time spent in external callbacks.
+  double external_time_;
 
   // A count (including this one, eg, the first collection is 1) of the
   // number of garbage collections.
@@ -1568,6 +1661,7 @@ class TranscendentalCache {
     if (e.in[0] == c.integers[0] &&
         e.in[1] == c.integers[1]) {
       ASSERT(e.output != NULL);
+      Counters::transcendental_cache_hit.Increment();
       return e.output;
     }
     double answer = Calculate(input);
@@ -1577,6 +1671,7 @@ class TranscendentalCache {
       elements_[hash].in[1] = c.integers[1];
       elements_[hash].output = heap_number;
     }
+    Counters::transcendental_cache_miss.Increment();
     return heap_number;
   }
 
@@ -1617,11 +1712,55 @@ class TranscendentalCache {
     hash ^= hash >> 8;
     return (hash & (kCacheSize - 1));
   }
+
+  static Address cache_array_address() {
+    // Used to create an external reference.
+    return reinterpret_cast<Address>(caches_);
+  }
+
+  // Allow access to the caches_ array as an ExternalReference.
+  friend class ExternalReference;
+  // Inline implementation of the caching.
+  friend class TranscendentalCacheStub;
+
   static TranscendentalCache* caches_[kNumberOfCaches];
   Element elements_[kCacheSize];
   Type type_;
 };
 
+
+// External strings table is a place where all external strings are
+// registered.  We need to keep track of such strings to properly
+// finalize them.
+class ExternalStringTable : public AllStatic {
+ public:
+  // Registers an external string.
+  inline static void AddString(String* string);
+
+  inline static void Iterate(ObjectVisitor* v);
+
+  // Restores internal invariant and gets rid of collected strings.
+  // Must be called after each Iterate() that modified the strings.
+  static void CleanUp();
+
+  // Destroys all allocated memory.
+  static void TearDown();
+
+ private:
+  friend class Heap;
+
+  inline static void Verify();
+
+  inline static void AddOldString(String* string);
+
+  // Notifies the table that only a prefix of the new list is valid.
+  inline static void ShrinkNewStrings(int position);
+
+  // To speed up scavenge collections new space string are kept
+  // separate from old space strings.
+  static List<Object*> new_space_strings_;
+  static List<Object*> old_space_strings_;
+};
 
 } }  // namespace v8::internal
 

@@ -1,4 +1,4 @@
-// Copyright 2009 the V8 project authors. All rights reserved.
+// Copyright 2010 the V8 project authors. All rights reserved.
 // Redistribution and use in source and binary forms, with or without
 // modification, are permitted provided that the following conditions are
 // met:
@@ -28,252 +28,468 @@
 #include "v8.h"
 
 #include "codegen-inl.h"
-#include "compiler.h"
+#include "data-flow.h"
 #include "fast-codegen.h"
-#include "stub-cache.h"
-#include "debug.h"
+#include "scopes.h"
 
 namespace v8 {
 namespace internal {
 
-#define __ ACCESS_MASM(masm_)
+#define BAILOUT(reason)                         \
+  do {                                          \
+    if (FLAG_trace_bailout) {                   \
+      PrintF("%s\n", reason);                   \
+    }                                           \
+    has_supported_syntax_ = false;              \
+    return;                                     \
+  } while (false)
 
-Handle<Code> FastCodeGenerator::MakeCode(FunctionLiteral* fun,
-                                         Handle<Script> script,
-                                         bool is_eval) {
-  CodeGenerator::MakeCodePrologue(fun);
+
+#define CHECK_BAILOUT                           \
+  do {                                          \
+    if (!has_supported_syntax_) return;         \
+  } while (false)
+
+
+void FastCodeGenSyntaxChecker::Check(CompilationInfo* info) {
+  info_ = info;
+
+  // We do not specialize if we do not have a receiver or if it is not a
+  // JS object with fast mode properties.
+  if (!info->has_receiver()) BAILOUT("No receiver");
+  if (!info->receiver()->IsJSObject()) BAILOUT("Receiver is not an object");
+  Handle<JSObject> object = Handle<JSObject>::cast(info->receiver());
+  if (!object->HasFastProperties()) BAILOUT("Receiver is in dictionary mode");
+
+  // We do not support stack or heap slots (both of which require
+  // allocation).
+  Scope* scope = info->scope();
+  if (scope->num_stack_slots() > 0) {
+    BAILOUT("Function has stack-allocated locals");
+  }
+  if (scope->num_heap_slots() > 0) {
+    BAILOUT("Function has context-allocated locals");
+  }
+
+  VisitDeclarations(scope->declarations());
+  CHECK_BAILOUT;
+
+  // We do not support empty function bodies.
+  if (info->function()->body()->is_empty()) {
+    BAILOUT("Function has an empty body");
+  }
+  VisitStatements(info->function()->body());
+}
+
+
+void FastCodeGenSyntaxChecker::VisitDeclarations(
+    ZoneList<Declaration*>* decls) {
+  if (!decls->is_empty()) BAILOUT("Function has declarations");
+}
+
+
+void FastCodeGenSyntaxChecker::VisitStatements(ZoneList<Statement*>* stmts) {
+  if (stmts->length() != 1) {
+    BAILOUT("Function body is not a singleton statement.");
+  }
+  Visit(stmts->at(0));
+}
+
+
+void FastCodeGenSyntaxChecker::VisitDeclaration(Declaration* decl) {
+  UNREACHABLE();
+}
+
+
+void FastCodeGenSyntaxChecker::VisitBlock(Block* stmt) {
+  VisitStatements(stmt->statements());
+}
+
+
+void FastCodeGenSyntaxChecker::VisitExpressionStatement(
+    ExpressionStatement* stmt) {
+  Visit(stmt->expression());
+}
+
+
+void FastCodeGenSyntaxChecker::VisitEmptyStatement(EmptyStatement* stmt) {
+  // Supported.
+}
+
+
+void FastCodeGenSyntaxChecker::VisitIfStatement(IfStatement* stmt) {
+  BAILOUT("IfStatement");
+}
+
+
+void FastCodeGenSyntaxChecker::VisitContinueStatement(ContinueStatement* stmt) {
+  BAILOUT("Continuestatement");
+}
+
+
+void FastCodeGenSyntaxChecker::VisitBreakStatement(BreakStatement* stmt) {
+  BAILOUT("BreakStatement");
+}
+
+
+void FastCodeGenSyntaxChecker::VisitReturnStatement(ReturnStatement* stmt) {
+  BAILOUT("ReturnStatement");
+}
+
+
+void FastCodeGenSyntaxChecker::VisitWithEnterStatement(
+    WithEnterStatement* stmt) {
+  BAILOUT("WithEnterStatement");
+}
+
+
+void FastCodeGenSyntaxChecker::VisitWithExitStatement(WithExitStatement* stmt) {
+  BAILOUT("WithExitStatement");
+}
+
+
+void FastCodeGenSyntaxChecker::VisitSwitchStatement(SwitchStatement* stmt) {
+  BAILOUT("SwitchStatement");
+}
+
+
+void FastCodeGenSyntaxChecker::VisitDoWhileStatement(DoWhileStatement* stmt) {
+  BAILOUT("DoWhileStatement");
+}
+
+
+void FastCodeGenSyntaxChecker::VisitWhileStatement(WhileStatement* stmt) {
+  BAILOUT("WhileStatement");
+}
+
+
+void FastCodeGenSyntaxChecker::VisitForStatement(ForStatement* stmt) {
+  BAILOUT("ForStatement");
+}
+
+
+void FastCodeGenSyntaxChecker::VisitForInStatement(ForInStatement* stmt) {
+  BAILOUT("ForInStatement");
+}
+
+
+void FastCodeGenSyntaxChecker::VisitTryCatchStatement(TryCatchStatement* stmt) {
+  BAILOUT("TryCatchStatement");
+}
+
+
+void FastCodeGenSyntaxChecker::VisitTryFinallyStatement(
+    TryFinallyStatement* stmt) {
+  BAILOUT("TryFinallyStatement");
+}
+
+
+void FastCodeGenSyntaxChecker::VisitDebuggerStatement(
+    DebuggerStatement* stmt) {
+  BAILOUT("DebuggerStatement");
+}
+
+
+void FastCodeGenSyntaxChecker::VisitFunctionLiteral(FunctionLiteral* expr) {
+  BAILOUT("FunctionLiteral");
+}
+
+
+void FastCodeGenSyntaxChecker::VisitFunctionBoilerplateLiteral(
+    FunctionBoilerplateLiteral* expr) {
+  BAILOUT("FunctionBoilerplateLiteral");
+}
+
+
+void FastCodeGenSyntaxChecker::VisitConditional(Conditional* expr) {
+  BAILOUT("Conditional");
+}
+
+
+void FastCodeGenSyntaxChecker::VisitSlot(Slot* expr) {
+  UNREACHABLE();
+}
+
+
+void FastCodeGenSyntaxChecker::VisitVariableProxy(VariableProxy* expr) {
+  // Only global variable references are supported.
+  Variable* var = expr->var();
+  if (!var->is_global() || var->is_this()) BAILOUT("Non-global variable");
+
+  // Check if the global variable is existing and non-deletable.
+  if (info()->has_global_object()) {
+    LookupResult lookup;
+    info()->global_object()->Lookup(*expr->name(), &lookup);
+    if (!lookup.IsProperty()) {
+      BAILOUT("Non-existing global variable");
+    }
+    // We do not handle global variables with accessors or interceptors.
+    if (lookup.type() != NORMAL) {
+      BAILOUT("Global variable with accessors or interceptors.");
+    }
+    // We do not handle deletable global variables.
+    if (!lookup.IsDontDelete()) {
+      BAILOUT("Deletable global variable");
+    }
+  }
+}
+
+
+void FastCodeGenSyntaxChecker::VisitLiteral(Literal* expr) {
+  BAILOUT("Literal");
+}
+
+
+void FastCodeGenSyntaxChecker::VisitRegExpLiteral(RegExpLiteral* expr) {
+  BAILOUT("RegExpLiteral");
+}
+
+
+void FastCodeGenSyntaxChecker::VisitObjectLiteral(ObjectLiteral* expr) {
+  BAILOUT("ObjectLiteral");
+}
+
+
+void FastCodeGenSyntaxChecker::VisitArrayLiteral(ArrayLiteral* expr) {
+  BAILOUT("ArrayLiteral");
+}
+
+
+void FastCodeGenSyntaxChecker::VisitCatchExtensionObject(
+    CatchExtensionObject* expr) {
+  BAILOUT("CatchExtensionObject");
+}
+
+
+void FastCodeGenSyntaxChecker::VisitAssignment(Assignment* expr) {
+  // Simple assignments to (named) this properties are supported.
+  if (expr->op() != Token::ASSIGN) BAILOUT("Non-simple assignment");
+
+  Property* prop = expr->target()->AsProperty();
+  if (prop == NULL) BAILOUT("Non-property assignment");
+  VariableProxy* proxy = prop->obj()->AsVariableProxy();
+  if (proxy == NULL || !proxy->var()->is_this()) {
+    BAILOUT("Non-this-property assignment");
+  }
+  if (!prop->key()->IsPropertyName()) {
+    BAILOUT("Non-named-property assignment");
+  }
+
+  // We will only specialize for fields on the object itself.
+  // Expression::IsPropertyName implies that the name is a literal
+  // symbol but we do not assume that.
+  Literal* key = prop->key()->AsLiteral();
+  if (key != NULL && key->handle()->IsString()) {
+    Handle<Object> receiver = info()->receiver();
+    Handle<String> name = Handle<String>::cast(key->handle());
+    LookupResult lookup;
+    receiver->Lookup(*name, &lookup);
+    if (!lookup.IsProperty()) {
+      BAILOUT("Assigned property not found at compile time");
+    }
+    if (lookup.holder() != *receiver) BAILOUT("Non-own property assignment");
+    if (!lookup.type() == FIELD) BAILOUT("Non-field property assignment");
+  } else {
+    UNREACHABLE();
+    BAILOUT("Unexpected non-string-literal property key");
+  }
+
+  Visit(expr->value());
+}
+
+
+void FastCodeGenSyntaxChecker::VisitThrow(Throw* expr) {
+  BAILOUT("Throw");
+}
+
+
+void FastCodeGenSyntaxChecker::VisitProperty(Property* expr) {
+  // We support named this property references.
+  VariableProxy* proxy = expr->obj()->AsVariableProxy();
+  if (proxy == NULL || !proxy->var()->is_this()) {
+    BAILOUT("Non-this-property reference");
+  }
+  if (!expr->key()->IsPropertyName()) {
+    BAILOUT("Non-named-property reference");
+  }
+
+  // We will only specialize for fields on the object itself.
+  // Expression::IsPropertyName implies that the name is a literal
+  // symbol but we do not assume that.
+  Literal* key = expr->key()->AsLiteral();
+  if (key != NULL && key->handle()->IsString()) {
+    Handle<Object> receiver = info()->receiver();
+    Handle<String> name = Handle<String>::cast(key->handle());
+    LookupResult lookup;
+    receiver->Lookup(*name, &lookup);
+    if (!lookup.IsProperty()) {
+      BAILOUT("Referenced property not found at compile time");
+    }
+    if (lookup.holder() != *receiver) BAILOUT("Non-own property reference");
+    if (!lookup.type() == FIELD) BAILOUT("Non-field property reference");
+  } else {
+    UNREACHABLE();
+    BAILOUT("Unexpected non-string-literal property key");
+  }
+}
+
+
+void FastCodeGenSyntaxChecker::VisitCall(Call* expr) {
+  BAILOUT("Call");
+}
+
+
+void FastCodeGenSyntaxChecker::VisitCallNew(CallNew* expr) {
+  BAILOUT("CallNew");
+}
+
+
+void FastCodeGenSyntaxChecker::VisitCallRuntime(CallRuntime* expr) {
+  BAILOUT("CallRuntime");
+}
+
+
+void FastCodeGenSyntaxChecker::VisitUnaryOperation(UnaryOperation* expr) {
+  BAILOUT("UnaryOperation");
+}
+
+
+void FastCodeGenSyntaxChecker::VisitCountOperation(CountOperation* expr) {
+  BAILOUT("CountOperation");
+}
+
+
+void FastCodeGenSyntaxChecker::VisitBinaryOperation(BinaryOperation* expr) {
+  // We support bitwise OR.
+  switch (expr->op()) {
+    case Token::COMMA:
+      BAILOUT("BinaryOperation COMMA");
+    case Token::OR:
+      BAILOUT("BinaryOperation OR");
+    case Token::AND:
+      BAILOUT("BinaryOperation AND");
+
+    case Token::BIT_OR:
+      // We support expressions nested on the left because they only require
+      // a pair of registers to keep all intermediate values in registers
+      // (i.e., the expression stack has height no more than two).
+      if (!expr->right()->IsLeaf()) BAILOUT("expression nested on right");
+
+      // We do not allow subexpressions with side effects because we
+      // (currently) bail out to the beginning of the full function.  The
+      // only expressions with side effects that we would otherwise handle
+      // are assignments.
+      if (expr->left()->AsAssignment() != NULL ||
+          expr->right()->AsAssignment() != NULL) {
+        BAILOUT("subexpression of binary operation has side effects");
+      }
+
+      Visit(expr->left());
+      CHECK_BAILOUT;
+      Visit(expr->right());
+      break;
+
+    case Token::BIT_XOR:
+      BAILOUT("BinaryOperation BIT_XOR");
+    case Token::BIT_AND:
+      BAILOUT("BinaryOperation BIT_AND");
+    case Token::SHL:
+      BAILOUT("BinaryOperation SHL");
+    case Token::SAR:
+      BAILOUT("BinaryOperation SAR");
+    case Token::SHR:
+      BAILOUT("BinaryOperation SHR");
+    case Token::ADD:
+      BAILOUT("BinaryOperation ADD");
+    case Token::SUB:
+      BAILOUT("BinaryOperation SUB");
+    case Token::MUL:
+      BAILOUT("BinaryOperation MUL");
+    case Token::DIV:
+      BAILOUT("BinaryOperation DIV");
+    case Token::MOD:
+      BAILOUT("BinaryOperation MOD");
+    default:
+      UNREACHABLE();
+  }
+}
+
+
+void FastCodeGenSyntaxChecker::VisitCompareOperation(CompareOperation* expr) {
+  BAILOUT("CompareOperation");
+}
+
+
+void FastCodeGenSyntaxChecker::VisitThisFunction(ThisFunction* expr) {
+  BAILOUT("ThisFunction");
+}
+
+#undef BAILOUT
+#undef CHECK_BAILOUT
+
+
+#define __ ACCESS_MASM(masm())
+
+Handle<Code> FastCodeGenerator::MakeCode(CompilationInfo* info) {
+  // Label the AST before calling MakeCodePrologue, so AST node numbers are
+  // printed with the AST.
+  AstLabeler labeler;
+  labeler.Label(info);
+
+  LivenessAnalyzer analyzer;
+  analyzer.Analyze(info->function());
+
+  CodeGenerator::MakeCodePrologue(info);
+
   const int kInitialBufferSize = 4 * KB;
   MacroAssembler masm(NULL, kInitialBufferSize);
-  FastCodeGenerator cgen(&masm, script, is_eval);
-  cgen.Generate(fun);
+
+  // Generate the fast-path code.
+  FastCodeGenerator fast_cgen(&masm);
+  fast_cgen.Generate(info);
+  if (fast_cgen.HasStackOverflow()) {
+    ASSERT(!Top::has_pending_exception());
+    return Handle<Code>::null();
+  }
+
+  // Generate the full code for the function in bailout mode, using the same
+  // macro assembler.
+  CodeGenerator cgen(&masm);
+  CodeGeneratorScope scope(&cgen);
+  info->set_mode(CompilationInfo::SECONDARY);
+  cgen.Generate(info);
   if (cgen.HasStackOverflow()) {
     ASSERT(!Top::has_pending_exception());
     return Handle<Code>::null();
   }
+
   Code::Flags flags = Code::ComputeFlags(Code::FUNCTION, NOT_IN_LOOP);
-  return CodeGenerator::MakeCodeEpilogue(fun, &masm, flags, script);
+  return CodeGenerator::MakeCodeEpilogue(&masm, flags, info);
 }
 
 
-int FastCodeGenerator::SlotOffset(Slot* slot) {
-  ASSERT(slot != NULL);
-  // Offset is negative because higher indexes are at lower addresses.
-  int offset = -slot->index() * kPointerSize;
-  // Adjust by a (parameter or local) base offset.
-  switch (slot->type()) {
-    case Slot::PARAMETER:
-      offset += (function_->scope()->num_parameters() + 1) * kPointerSize;
-      break;
-    case Slot::LOCAL:
-      offset += JavaScriptFrameConstants::kLocal0Offset;
-      break;
-    default:
-      UNREACHABLE();
-  }
-  return offset;
-}
-
-
-void FastCodeGenerator::VisitDeclarations(
-    ZoneList<Declaration*>* declarations) {
-  int length = declarations->length();
-  int globals = 0;
-  for (int i = 0; i < length; i++) {
-    Declaration* decl = declarations->at(i);
-    Variable* var = decl->proxy()->var();
-    Slot* slot = var->slot();
-
-    // If it was not possible to allocate the variable at compile
-    // time, we need to "declare" it at runtime to make sure it
-    // actually exists in the local context.
-    if ((slot != NULL && slot->type() == Slot::LOOKUP) || !var->is_global()) {
-      VisitDeclaration(decl);
-    } else {
-      // Count global variables and functions for later processing
-      globals++;
-    }
-  }
-
-  // Compute array of global variable and function declarations.
-  // Do nothing in case of no declared global functions or variables.
-  if (globals > 0) {
-    Handle<FixedArray> array = Factory::NewFixedArray(2 * globals, TENURED);
-    for (int j = 0, i = 0; i < length; i++) {
-      Declaration* decl = declarations->at(i);
-      Variable* var = decl->proxy()->var();
-      Slot* slot = var->slot();
-
-      if ((slot == NULL || slot->type() != Slot::LOOKUP) && var->is_global()) {
-        array->set(j++, *(var->name()));
-        if (decl->fun() == NULL) {
-          if (var->mode() == Variable::CONST) {
-            // In case this is const property use the hole.
-            array->set_the_hole(j++);
-          } else {
-            array->set_undefined(j++);
-          }
-        } else {
-          Handle<JSFunction> function =
-              Compiler::BuildBoilerplate(decl->fun(), script_, this);
-          // Check for stack-overflow exception.
-          if (HasStackOverflow()) return;
-          array->set(j++, *function);
-        }
-      }
-    }
-    // Invoke the platform-dependent code generator to do the actual
-    // declaration the global variables and functions.
-    DeclareGlobals(array);
-  }
-}
-
-
-void FastCodeGenerator::SetFunctionPosition(FunctionLiteral* fun) {
-  if (FLAG_debug_info) {
-    CodeGenerator::RecordPositions(masm_, fun->start_position());
-  }
-}
-
-
-void FastCodeGenerator::SetReturnPosition(FunctionLiteral* fun) {
-  if (FLAG_debug_info) {
-    CodeGenerator::RecordPositions(masm_, fun->end_position());
-  }
-}
-
-
-void FastCodeGenerator::SetStatementPosition(Statement* stmt) {
-  if (FLAG_debug_info) {
-    CodeGenerator::RecordPositions(masm_, stmt->statement_pos());
-  }
-}
-
-
-void FastCodeGenerator::SetSourcePosition(int pos) {
-  if (FLAG_debug_info && pos != RelocInfo::kNoPosition) {
-    masm_->RecordPosition(pos);
-  }
-}
-
-
-void FastCodeGenerator::EmitLogicalOperation(BinaryOperation* expr) {
-#ifdef DEBUG
-  Expression::Context expected = Expression::kUninitialized;
-  switch (expr->context()) {
-    case Expression::kUninitialized:
-      UNREACHABLE();
-    case Expression::kEffect:  // Fall through.
-    case Expression::kTest:
-      // The value of the left subexpression is not needed.
-      expected = Expression::kTest;
-      break;
-    case Expression::kValue:
-      // The value of the left subexpression is needed and its specific
-      // context depends on the operator.
-      expected = (expr->op() == Token::OR)
-          ? Expression::kValueTest
-          : Expression::kTestValue;
-      break;
-    case Expression::kValueTest:
-      // The value of the left subexpression is needed for OR.
-      expected = (expr->op() == Token::OR)
-          ? Expression::kValueTest
-          : Expression::kTest;
-      break;
-    case Expression::kTestValue:
-      // The value of the left subexpression is needed for AND.
-      expected = (expr->op() == Token::OR)
-          ? Expression::kTest
-          : Expression::kTestValue;
-      break;
-  }
-  ASSERT_EQ(expected, expr->left()->context());
-  ASSERT_EQ(expr->context(), expr->right()->context());
-#endif
-
-  Label eval_right, done;
-  Label* saved_true = true_label_;
-  Label* saved_false = false_label_;
-
-  // Set up the appropriate context for the left subexpression based on the
-  // operation and our own context.
-  if (expr->op() == Token::OR) {
-    // If there is no usable true label in the OR expression's context, use
-    // the end of this expression, otherwise inherit the same true label.
-    if (expr->context() == Expression::kEffect ||
-        expr->context() == Expression::kValue) {
-      true_label_ = &done;
-    }
-    // The false label is the label of the second subexpression.
-    false_label_ = &eval_right;
-  } else {
-    ASSERT_EQ(Token::AND, expr->op());
-    // The true label is the label of the second subexpression.
-    true_label_ = &eval_right;
-    // If there is no usable false label in the AND expression's context,
-    // use the end of the expression, otherwise inherit the same false
-    // label.
-    if (expr->context() == Expression::kEffect ||
-        expr->context() == Expression::kValue) {
-      false_label_ = &done;
-    }
-  }
-
-  Visit(expr->left());
-  true_label_ = saved_true;
-  false_label_ = saved_false;
-
-  __ bind(&eval_right);
-  Visit(expr->right());
-
-  __ bind(&done);
+void FastCodeGenerator::VisitDeclaration(Declaration* decl) {
+  UNREACHABLE();
 }
 
 
 void FastCodeGenerator::VisitBlock(Block* stmt) {
-  Comment cmnt(masm_, "[ Block");
-  SetStatementPosition(stmt);
   VisitStatements(stmt->statements());
 }
 
 
 void FastCodeGenerator::VisitExpressionStatement(ExpressionStatement* stmt) {
-  Comment cmnt(masm_, "[ ExpressionStatement");
-  SetStatementPosition(stmt);
   Visit(stmt->expression());
 }
 
 
 void FastCodeGenerator::VisitEmptyStatement(EmptyStatement* stmt) {
-  Comment cmnt(masm_, "[ EmptyStatement");
-  SetStatementPosition(stmt);
+  // Nothing to do.
 }
 
 
 void FastCodeGenerator::VisitIfStatement(IfStatement* stmt) {
-  Comment cmnt(masm_, "[ IfStatement");
-  // Expressions cannot recursively enter statements, there are no labels in
-  // the state.
-  ASSERT_EQ(NULL, true_label_);
-  ASSERT_EQ(NULL, false_label_);
-  Label then_part, else_part, done;
-
-  // Do not worry about optimizing for empty then or else bodies.
-  true_label_ = &then_part;
-  false_label_ = &else_part;
-  ASSERT(stmt->condition()->context() == Expression::kTest);
-  Visit(stmt->condition());
-  true_label_ = NULL;
-  false_label_ = NULL;
-
-  __ bind(&then_part);
-  Visit(stmt->then_statement());
-  __ jmp(&done);
-
-  __ bind(&else_part);
-  Visit(stmt->else_statement());
-
-  __ bind(&done);
+  UNREACHABLE();
 }
 
 
@@ -283,6 +499,11 @@ void FastCodeGenerator::VisitContinueStatement(ContinueStatement* stmt) {
 
 
 void FastCodeGenerator::VisitBreakStatement(BreakStatement* stmt) {
+  UNREACHABLE();
+}
+
+
+void FastCodeGenerator::VisitReturnStatement(ReturnStatement* stmt) {
   UNREACHABLE();
 }
 
@@ -303,120 +524,17 @@ void FastCodeGenerator::VisitSwitchStatement(SwitchStatement* stmt) {
 
 
 void FastCodeGenerator::VisitDoWhileStatement(DoWhileStatement* stmt) {
-  Comment cmnt(masm_, "[ DoWhileStatement");
-  increment_loop_depth();
-  Label body, exit, stack_limit_hit, stack_check_success;
-
-  __ bind(&body);
-  Visit(stmt->body());
-
-  // Check stack before looping.
-  __ StackLimitCheck(&stack_limit_hit);
-  __ bind(&stack_check_success);
-
-  // We are not in an expression context because we have been compiling
-  // statements.  Set up a test expression context for the condition.
-  ASSERT_EQ(NULL, true_label_);
-  ASSERT_EQ(NULL, false_label_);
-  true_label_ = &body;
-  false_label_ = &exit;
-  ASSERT(stmt->cond()->context() == Expression::kTest);
-  Visit(stmt->cond());
-  true_label_ = NULL;
-  false_label_ = NULL;
-
-  __ bind(&stack_limit_hit);
-  StackCheckStub stack_stub;
-  __ CallStub(&stack_stub);
-  __ jmp(&stack_check_success);
-
-  __ bind(&exit);
-
-  decrement_loop_depth();
+  UNREACHABLE();
 }
 
 
 void FastCodeGenerator::VisitWhileStatement(WhileStatement* stmt) {
-  Comment cmnt(masm_, "[ WhileStatement");
-  increment_loop_depth();
-  Label test, body, exit, stack_limit_hit, stack_check_success;
-
-  // Emit the test at the bottom of the loop.
-  __ jmp(&test);
-
-  __ bind(&body);
-  Visit(stmt->body());
-
-  __ bind(&test);
-  // Check stack before looping.
-  __ StackLimitCheck(&stack_limit_hit);
-  __ bind(&stack_check_success);
-
-  // We are not in an expression context because we have been compiling
-  // statements.  Set up a test expression context for the condition.
-  ASSERT_EQ(NULL, true_label_);
-  ASSERT_EQ(NULL, false_label_);
-  true_label_ = &body;
-  false_label_ = &exit;
-  ASSERT(stmt->cond()->context() == Expression::kTest);
-  Visit(stmt->cond());
-  true_label_ = NULL;
-  false_label_ = NULL;
-
-  __ bind(&stack_limit_hit);
-  StackCheckStub stack_stub;
-  __ CallStub(&stack_stub);
-  __ jmp(&stack_check_success);
-
-  __ bind(&exit);
-
-  decrement_loop_depth();
+  UNREACHABLE();
 }
 
 
 void FastCodeGenerator::VisitForStatement(ForStatement* stmt) {
-  Comment cmnt(masm_, "[ ForStatement");
-  Label test, body, exit, stack_limit_hit, stack_check_success;
-  if (stmt->init() != NULL) Visit(stmt->init());
-
-  increment_loop_depth();
-  // Emit the test at the bottom of the loop (even if empty).
-  __ jmp(&test);
-  __ bind(&body);
-  Visit(stmt->body());
-
-  // Check stack before looping.
-  __ StackLimitCheck(&stack_limit_hit);
-  __ bind(&stack_check_success);
-
-  if (stmt->next() != NULL) Visit(stmt->next());
-
-  __ bind(&test);
-
-  if (stmt->cond() == NULL) {
-    // For an empty test jump to the top of the loop.
-    __ jmp(&body);
-  } else {
-    // We are not in an expression context because we have been compiling
-    // statements.  Set up a test expression context for the condition.
-    ASSERT_EQ(NULL, true_label_);
-    ASSERT_EQ(NULL, false_label_);
-
-    true_label_ = &body;
-    false_label_ = &exit;
-    ASSERT(stmt->cond()->context() == Expression::kTest);
-    Visit(stmt->cond());
-    true_label_ = NULL;
-    false_label_ = NULL;
-  }
-
-  __ bind(&stack_limit_hit);
-  StackCheckStub stack_stub;
-  __ CallStub(&stack_stub);
-  __ jmp(&stack_check_success);
-
-  __ bind(&exit);
-  decrement_loop_depth();
+  UNREACHABLE();
 }
 
 
@@ -436,12 +554,12 @@ void FastCodeGenerator::VisitTryFinallyStatement(TryFinallyStatement* stmt) {
 
 
 void FastCodeGenerator::VisitDebuggerStatement(DebuggerStatement* stmt) {
-#ifdef ENABLE_DEBUGGER_SUPPORT
-  Comment cmnt(masm_, "[ DebuggerStatement");
-  SetStatementPosition(stmt);
-  __ CallRuntime(Runtime::kDebugBreak, 0);
-  // Ignore the return value.
-#endif
+  UNREACHABLE();
+}
+
+
+void FastCodeGenerator::VisitFunctionLiteral(FunctionLiteral* expr) {
+  UNREACHABLE();
 }
 
 
@@ -452,89 +570,59 @@ void FastCodeGenerator::VisitFunctionBoilerplateLiteral(
 
 
 void FastCodeGenerator::VisitConditional(Conditional* expr) {
-  Comment cmnt(masm_, "[ Conditional");
-  ASSERT_EQ(Expression::kTest, expr->condition()->context());
-  ASSERT_EQ(expr->context(), expr->then_expression()->context());
-  ASSERT_EQ(expr->context(), expr->else_expression()->context());
-
-
-  Label true_case, false_case, done;
-  Label* saved_true = true_label_;
-  Label* saved_false = false_label_;
-
-  true_label_ = &true_case;
-  false_label_ = &false_case;
-  Visit(expr->condition());
-  true_label_ = saved_true;
-  false_label_ = saved_false;
-
-  __ bind(&true_case);
-  Visit(expr->then_expression());
-  // If control flow falls through Visit, jump to done.
-  if (expr->context() == Expression::kEffect ||
-      expr->context() == Expression::kValue) {
-    __ jmp(&done);
-  }
-
-  __ bind(&false_case);
-  Visit(expr->else_expression());
-  // If control flow falls through Visit, merge it with true case here.
-  if (expr->context() == Expression::kEffect ||
-      expr->context() == Expression::kValue) {
-    __ bind(&done);
-  }
-}
-
-
-void FastCodeGenerator::VisitSlot(Slot* expr) {
-  // Slots do not appear directly in the AST.
   UNREACHABLE();
 }
 
 
-void FastCodeGenerator::VisitLiteral(Literal* expr) {
-  Comment cmnt(masm_, "[ Literal");
-  Move(expr->context(), expr);
+void FastCodeGenerator::VisitSlot(Slot* expr) {
+  UNREACHABLE();
 }
 
 
-void FastCodeGenerator::VisitAssignment(Assignment* expr) {
-  Comment cmnt(masm_, "[ Assignment");
-  ASSERT(expr->op() == Token::ASSIGN || expr->op() == Token::INIT_VAR);
+void FastCodeGenerator::VisitVariableProxy(VariableProxy* expr) {
+  ASSERT(expr->var()->is_global() && !expr->var()->is_this());
+  // Check if we can compile a global variable load directly from the cell.
+  ASSERT(info()->has_global_object());
+  LookupResult lookup;
+  info()->global_object()->Lookup(*expr->name(), &lookup);
+  // We only support normal (non-accessor/interceptor) DontDelete properties
+  // for now.
+  ASSERT(lookup.IsProperty());
+  ASSERT_EQ(NORMAL, lookup.type());
+  ASSERT(lookup.IsDontDelete());
+  Handle<Object> cell(info()->global_object()->GetPropertyCell(&lookup));
 
-  // Record source code position of the (possible) IC call.
-  SetSourcePosition(expr->position());
-
-  Expression* rhs = expr->value();
-  // Left-hand side can only be a property, a global or a (parameter or
-  // local) slot.
-  Variable* var = expr->target()->AsVariableProxy()->AsVariable();
-  Property* prop = expr->target()->AsProperty();
-  if (var != NULL) {
-    Visit(rhs);
-    ASSERT_EQ(Expression::kValue, rhs->context());
-    EmitVariableAssignment(expr);
-  } else if (prop != NULL) {
-    // Assignment to a property.
-    Visit(prop->obj());
-    ASSERT_EQ(Expression::kValue, prop->obj()->context());
-    // Use the expression context of the key subexpression to detect whether
-    // we have decided to us a named or keyed IC.
-    if (prop->key()->context() == Expression::kUninitialized) {
-      ASSERT(prop->key()->AsLiteral() != NULL);
-      Visit(rhs);
-      ASSERT_EQ(Expression::kValue, rhs->context());
-      EmitNamedPropertyAssignment(expr);
-    } else {
-      Visit(prop->key());
-      ASSERT_EQ(Expression::kValue, prop->key()->context());
-      Visit(rhs);
-      ASSERT_EQ(Expression::kValue, rhs->context());
-      EmitKeyedPropertyAssignment(expr);
+  // Global variable lookups do not have side effects, so we do not need to
+  // emit code if we are in an effect context.
+  if (!destination().is(no_reg)) {
+    Comment cmnt(masm(), ";; Global");
+    if (FLAG_print_ir) {
+      SmartPointer<char> name = expr->name()->ToCString();
+      PrintF("%d: t%d = Global(%s)  // last_use = %d\n", expr->num(),
+             expr->num(), *name, expr->var_def()->last_use()->num());
     }
-  } else {
-    UNREACHABLE();
+    EmitGlobalVariableLoad(cell);
   }
+}
+
+
+void FastCodeGenerator::VisitLiteral(Literal* expr) {
+  UNREACHABLE();
+}
+
+
+void FastCodeGenerator::VisitRegExpLiteral(RegExpLiteral* expr) {
+  UNREACHABLE();
+}
+
+
+void FastCodeGenerator::VisitObjectLiteral(ObjectLiteral* expr) {
+  UNREACHABLE();
+}
+
+
+void FastCodeGenerator::VisitArrayLiteral(ArrayLiteral* expr) {
+  UNREACHABLE();
 }
 
 
@@ -543,7 +631,112 @@ void FastCodeGenerator::VisitCatchExtensionObject(CatchExtensionObject* expr) {
 }
 
 
+void FastCodeGenerator::VisitAssignment(Assignment* expr) {
+  // Known to be a simple this property assignment.  Effectively a unary
+  // operation.
+  { Register my_destination = destination();
+    set_destination(accumulator0());
+    Visit(expr->value());
+    set_destination(my_destination);
+  }
+
+  Property* prop = expr->target()->AsProperty();
+  ASSERT_NOT_NULL(prop);
+  ASSERT_NOT_NULL(prop->obj()->AsVariableProxy());
+  ASSERT(prop->obj()->AsVariableProxy()->var()->is_this());
+  ASSERT(prop->key()->IsPropertyName());
+  Handle<String> name =
+      Handle<String>::cast(prop->key()->AsLiteral()->handle());
+
+  Comment cmnt(masm(), ";; Store to this");
+  if (FLAG_print_ir) {
+    SmartPointer<char> name_string = name->ToCString();
+    PrintF("%d: ", expr->num());
+    if (!destination().is(no_reg)) PrintF("t%d = ", expr->num());
+    PrintF("Store(this, \"%s\", t%d)  // last_use(this) = %d\n", *name_string,
+           expr->value()->num(),
+           expr->var_def()->last_use()->num());
+  }
+
+  EmitThisPropertyStore(name);
+}
+
+
 void FastCodeGenerator::VisitThrow(Throw* expr) {
+  UNREACHABLE();
+}
+
+
+void FastCodeGenerator::VisitProperty(Property* expr) {
+  ASSERT_NOT_NULL(expr->obj()->AsVariableProxy());
+  ASSERT(expr->obj()->AsVariableProxy()->var()->is_this());
+  ASSERT(expr->key()->IsPropertyName());
+  if (!destination().is(no_reg)) {
+    Handle<String> name =
+        Handle<String>::cast(expr->key()->AsLiteral()->handle());
+
+    Comment cmnt(masm(), ";; Load from this");
+    if (FLAG_print_ir) {
+      SmartPointer<char> name_string = name->ToCString();
+      PrintF("%d: t%d = Load(this, \"%s\")  // last_use(this) = %d\n",
+             expr->num(), expr->num(), *name_string,
+             expr->var_def()->last_use()->num());
+    }
+    EmitThisPropertyLoad(name);
+  }
+}
+
+
+void FastCodeGenerator::VisitCall(Call* expr) {
+  UNREACHABLE();
+}
+
+
+void FastCodeGenerator::VisitCallNew(CallNew* expr) {
+  UNREACHABLE();
+}
+
+
+void FastCodeGenerator::VisitCallRuntime(CallRuntime* expr) {
+  UNREACHABLE();
+}
+
+
+void FastCodeGenerator::VisitUnaryOperation(UnaryOperation* expr) {
+  UNREACHABLE();
+}
+
+
+void FastCodeGenerator::VisitCountOperation(CountOperation* expr) {
+  UNREACHABLE();
+}
+
+
+void FastCodeGenerator::VisitBinaryOperation(BinaryOperation* expr) {
+  // We support limited binary operations: bitwise OR only allowed to be
+  // nested on the left.
+  ASSERT(expr->op() == Token::BIT_OR);
+  ASSERT(expr->right()->IsLeaf());
+
+  { Register my_destination = destination();
+    set_destination(accumulator1());
+    Visit(expr->left());
+    set_destination(accumulator0());
+    Visit(expr->right());
+    set_destination(my_destination);
+  }
+
+  Comment cmnt(masm(), ";; BIT_OR");
+  if (FLAG_print_ir) {
+    PrintF("%d: ", expr->num());
+    if (!destination().is(no_reg)) PrintF("t%d = ", expr->num());
+    PrintF("BIT_OR(t%d, t%d)\n", expr->left()->num(), expr->right()->num());
+  }
+  EmitBitOr();
+}
+
+
+void FastCodeGenerator::VisitCompareOperation(CompareOperation* expr) {
   UNREACHABLE();
 }
 
@@ -551,7 +744,6 @@ void FastCodeGenerator::VisitThrow(Throw* expr) {
 void FastCodeGenerator::VisitThisFunction(ThisFunction* expr) {
   UNREACHABLE();
 }
-
 
 #undef __
 

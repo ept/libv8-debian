@@ -31,6 +31,7 @@
 #include "frames-inl.h"
 #include "global-handles.h"
 #include "string-stream.h"
+#include "zone-inl.h"
 
 namespace v8 {
 namespace internal {
@@ -625,8 +626,7 @@ void HeapProfiler::WriteSample() {
   ConstructorHeapProfile js_cons_profile;
   RetainerHeapProfile js_retainer_profile;
   HeapIterator iterator;
-  while (iterator.has_next()) {
-    HeapObject* obj = iterator.next();
+  for (HeapObject* obj = iterator.next(); obj != NULL; obj = iterator.next()) {
     CollectStats(obj, info);
     js_cons_profile.CollectStats(obj);
     js_retainer_profile.CollectStats(obj);
@@ -667,8 +667,9 @@ void ProducerHeapProfile::Setup() {
   can_log_ = true;
 }
 
-void ProducerHeapProfile::RecordJSObjectAllocation(Object* obj) {
-  if (!can_log_ || !FLAG_log_producers) return;
+void ProducerHeapProfile::DoRecordJSObjectAllocation(Object* obj) {
+  ASSERT(FLAG_log_producers);
+  if (!can_log_) return;
   int framesCount = 0;
   for (JavaScriptFrameIterator it; !it.done(); it.Advance()) {
     ++framesCount;

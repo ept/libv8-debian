@@ -206,8 +206,13 @@ class Scope: public ZoneObject {
   // ---------------------------------------------------------------------------
   // Accessors.
 
-  // The variable corresponding to the (function) receiver.
-  VariableProxy* receiver() const  { return receiver_; }
+  // A new variable proxy corresponding to the (function) receiver.
+  VariableProxy* receiver() const {
+    VariableProxy* proxy =
+        new VariableProxy(Factory::this_symbol(), true, false);
+    proxy->BindTo(receiver_);
+    return proxy;
+  }
 
   // The variable holding the function literal for named function
   // literals, or NULL.
@@ -272,7 +277,6 @@ class Scope: public ZoneObject {
   // The number of contexts between this and scope; zero if this == scope.
   int ContextChainLength(Scope* scope);
 
-
   // ---------------------------------------------------------------------------
   // Debugging.
 
@@ -314,7 +318,7 @@ class Scope: public ZoneObject {
   // Declarations.
   ZoneList<Declaration*> decls_;
   // Convenience variable.
-  VariableProxy* receiver_;
+  Variable* receiver_;
   // Function variable, if any; function scopes only.
   Variable* function_;
   // Convenience variable; function scopes only.
