@@ -29,6 +29,7 @@ export CXXFLAGS
 
 include /usr/share/cdbs/1/rules/patchsys-quilt.mk
 include /usr/share/cdbs/1/rules/debhelper.mk
+include /usr/share/cdbs/1/class/scons.mk
 
 clean::
 	#if [ -f src/version.cc~ ] ; then mv src/version.cc~ src/version.cc ; fi
