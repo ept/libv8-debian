@@ -2,15 +2,15 @@ add the install target, it is missing from the shipped source
 
 --- a/SConstruct
 +++ b/SConstruct
-@@ -664,6 +664,7 @@
+@@ -740,6 +740,7 @@
    result = Options()
    result.Add('mode', 'compilation mode (debug, release)', 'release')
-   result.Add('sample', 'build sample (shell, process)', '')
+   result.Add('sample', 'build sample (shell, process, lineprocessor)', '')
 +  result.Add('install', 'install result files', '')
    result.Add('env', 'override environment settings (NAME0:value0,NAME1:value1,...)', '')
    result.Add('importenv', 'import environment settings (NAME0,NAME1,...)', '')
    for (name, option) in SIMPLE_OPTIONS.iteritems():
-@@ -989,12 +990,33 @@
+@@ -1082,12 +1083,33 @@
    env.Alias('sample', samples)
    env.Alias('d8', d8s)
  
