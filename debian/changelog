@@ -1,6 +1,12 @@
 libv8 (2.1.10-1) unstable; urgency=low
 
   * New upstream release
+    + debian/rules: SONAME updated
+    + debian/control: updated any reference to the old version
+    + debian/patches/0001-enable_soname.patch: SONAME updated
+    + debian/libv8-$VERSION.install renamed with the new version
+  * debian/README.source: added a procedure to update to a new version
+    once the correct version is imported
 
  -- Antonio Radici <antonio@dyne.org>  Sat, 27 Mar 2010 15:12:42 +0000
 

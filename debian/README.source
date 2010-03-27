@@ -1,3 +1,5 @@
+Patches management
+=====
 This package uses quilt to manage all modifications to the upstream
 source.  Changes are stored in the source package as diffs in
 debian/patches and applied during the build.  Please see:
@@ -5,3 +7,17 @@ debian/patches and applied during the build.  Please see:
 
 for more information on how to apply the patches, modify patches, or
 remove a patch.
+
+
+To update to a new version:
+=====
+
+1) edit debian/libv8-$VERSION.install and replace any occurrence of $VERSION
+with the new version; additionally rename the file with the new version
+
+2) edit debian/rules and replace the SONAME variables with the new version
+
+3) edit debian/patches/0001-enable_soname.patch and define the correct SONAME
+
+4) edit debian/control and remove any reference to the old version by updating
+it with the new vesrion
