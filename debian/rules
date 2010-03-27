@@ -37,8 +37,8 @@ clean::
 	rm -rf obj
 
 common-install-impl::
-	cd debian/tmp/usr/lib/; mv libv8.so $(shell objdump -x libv8.so | grep \ SONAME\ | sed -e 's/.*SONAME *//'); \
-	ln -s -T $(shell objdump -x libv8.so | grep \ SONAME\ | sed -e 's/.*SONAME *//') libv8.so
+	cd debian/tmp/usr/lib/; mv libv8-${SONAME}.so libv8.so.${SONAME}; \
+	ln -s -T libv8.so.${SONAME} libv8.so
 
 # Tarball (get-orig-source & get-current-source)
 V8_SVN_URL := http://v8.googlecode.com/svn/branches/$(DEBIAN_UPSTREAM_BRANCH)
