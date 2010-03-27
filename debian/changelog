@@ -1,3 +1,9 @@
+libv8 (2.1.10-1) unstable; urgency=low
+
+  * New upstream release
+
+ -- Antonio Radici <antonio@dyne.org>  Sat, 27 Mar 2010 15:12:42 +0000
+
 libv8 (2.1.6-1) unstable; urgency=low
 
   [ Antonio Radici ]
