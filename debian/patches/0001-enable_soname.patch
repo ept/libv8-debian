@@ -1,18 +1,5 @@
 patch to enable the soname that is not automatically shipped with SConstruct
 
---- a/SConstruct
-+++ b/SConstruct
-@@ -987,7 +987,9 @@
-   version = GetVersion()
-   if context.options['soname'] == 'on':
-     # When building shared object with SONAME version the library name.
--    library_name += '-' + version
-+    soname = GetSpecificSONAME()
-+    if soname == '':
-+      library_name += '-' + version
-   env['LIBRARY'] = library_name
- 
-   # Generate library SONAME if required by the build.
 --- a/src/version.cc
 +++ b/src/version.cc
 @@ -41,7 +41,7 @@
