@@ -71,32 +71,10 @@ function DoConstructRegExp(object, pattern, flags, isConstructorCall) {
     }
   }
 
-  if (isConstructorCall) {
-    // ECMA-262, section 15.10.7.1.
-    %SetProperty(object, 'source', pattern,
-                 DONT_DELETE |  READ_ONLY | DONT_ENUM);
-
-    // ECMA-262, section 15.10.7.2.
-    %SetProperty(object, 'global', global, DONT_DELETE | READ_ONLY | DONT_ENUM);
-
-    // ECMA-262, section 15.10.7.3.
-    %SetProperty(object, 'ignoreCase', ignoreCase,
-                 DONT_DELETE | READ_ONLY | DONT_ENUM);
-
-    // ECMA-262, section 15.10.7.4.
-    %SetProperty(object, 'multiline', multiline,
-                 DONT_DELETE | READ_ONLY | DONT_ENUM);
-
-    // ECMA-262, section 15.10.7.5.
-    %SetProperty(object, 'lastIndex', 0, DONT_DELETE | DONT_ENUM);
-  } else { // RegExp is being recompiled via RegExp.prototype.compile.
-    %IgnoreAttributesAndSetProperty(object, 'source', pattern);
-    %IgnoreAttributesAndSetProperty(object, 'global', global);
-    %IgnoreAttributesAndSetProperty(object, 'ignoreCase', ignoreCase);
-    %IgnoreAttributesAndSetProperty(object, 'multiline', multiline);
-    %IgnoreAttributesAndSetProperty(object, 'lastIndex', 0);
+  if (!isConstructorCall) {
     regExpCache.type = 'none';
   }
+  %RegExpInitializeObject(object, pattern, global, ignoreCase, multiline);
 
   // Call internal function to compile the pattern.
   %RegExpCompile(object, pattern, flags);
@@ -148,21 +126,58 @@ function RegExpCache() {
   this.replaceString = 0;
   this.lastIndex = 0;
   this.answer = 0;
+  // answerSaved marks whether the contents of answer is valid for a cache
+  // hit in RegExpExec, StringMatch and StringSplit.
+  this.answerSaved = false;
 }
 
 
 var regExpCache = new RegExpCache();
 
 
-function CloneRegexpAnswer(array) {
-  var len = array.length;
-  var answer = new $Array(len);
-  for (var i = 0; i < len; i++) {
+function CloneRegExpResult(array) {
+  if (array == null) return null; 
+  var length = array.length;
+  var answer = %_RegExpConstructResult(length, array.index, array.input);
+  for (var i = 0; i < length; i++) {
     answer[i] = array[i];
   }
-  answer.index = array.index;
-  answer.input = array.input;
   return answer;
+}
+
+
+function BuildResultFromMatchInfo(lastMatchInfo, s) {
+  var numResults = NUMBER_OF_CAPTURES(lastMatchInfo) >> 1;
+  var result = %_RegExpConstructResult(numResults, lastMatchInfo[CAPTURE0], s);
+  if (numResults === 1) {
+    var matchStart = lastMatchInfo[CAPTURE(0)];
+    var matchEnd = lastMatchInfo[CAPTURE(1)];
+    result[0] = SubString(s, matchStart, matchEnd);
+  } else {
+    for (var i = 0; i < numResults; i++) {
+      var matchStart = lastMatchInfo[CAPTURE(i << 1)];
+      var matchEnd = lastMatchInfo[CAPTURE((i << 1) + 1)];
+      if (matchStart != -1 && matchEnd != -1) {
+        result[i] = SubString(s, matchStart, matchEnd);
+      } else {
+        // Make sure the element is present. Avoid reading the undefined
+        // property from the global object since this may change.
+        result[i] = void 0;
+      }
+    }
+  }
+  return result;
+}
+
+
+function RegExpExecNoTests(regexp, string, start) {
+  // Must be called with RegExp, string and positive integer as arguments.
+  var matchInfo = DoRegExpExec(regexp, string, start);
+  var result = null;
+  if (matchInfo !== null) {
+    result = BuildResultFromMatchInfo(matchInfo, string);
+  }
+  return result;
 }
 
 
@@ -173,16 +188,16 @@ function RegExpExec(string) {
   }
 
   var cache = regExpCache;
+  var saveAnswer = false;
 
   if (%_ObjectEquals(cache.type, 'exec') &&
       %_ObjectEquals(cache.lastIndex, this.lastIndex) &&
       %_ObjectEquals(cache.regExp, this) &&
       %_ObjectEquals(cache.subject, string)) {
-    var last = cache.answer;
-    if (last == null) {
-      return last;
+    if (cache.answerSaved) {
+      return CloneRegExpResult(cache.answer);
     } else {
-      return CloneRegexpAnswer(last);
+      saveAnswer = true;
     }
   }
 
@@ -218,44 +233,25 @@ function RegExpExec(string) {
     cache.regExp = this;
     cache.subject = s;
     cache.answer = matchIndices;  // Null.
+    cache.answerSaved = true;     // Safe since no cloning is needed.
     cache.type = 'exec';
     return matchIndices;        // No match.
   }
 
-  var numResults = NUMBER_OF_CAPTURES(lastMatchInfo) >> 1;
-  var result;
-  if (numResults === 1) {
-    var matchStart = lastMatchInfo[CAPTURE(0)];
-    var matchEnd = lastMatchInfo[CAPTURE(1)];
-    result = [SubString(s, matchStart, matchEnd)];
-  } else {
-    result = new $Array(numResults);
-    for (var i = 0; i < numResults; i++) {
-      var matchStart = lastMatchInfo[CAPTURE(i << 1)];
-      var matchEnd = lastMatchInfo[CAPTURE((i << 1) + 1)];
-      if (matchStart != -1 && matchEnd != -1) {
-        result[i] = SubString(s, matchStart, matchEnd);
-      } else {
-        // Make sure the element is present. Avoid reading the undefined
-        // property from the global object since this may change.
-        result[i] = void 0;
-      }
-    }
-  }
+  var result = BuildResultFromMatchInfo(matchIndices, s);
 
-  result.index = lastMatchInfo[CAPTURE0];
-  result.input = s;
   if (this.global) {
     this.lastIndex = lastMatchInfo[CAPTURE1];
-    return result;
   } else {
     cache.regExp = this;
     cache.subject = s;
     cache.lastIndex = lastIndex;
-    cache.answer = result;
+    if (saveAnswer) cache.answer = CloneRegExpResult(result);
+    cache.answerSaved = saveAnswer;
     cache.type = 'exec';
-    return CloneRegexpAnswer(result);
   }
+  return result;
+
 }
 
 
@@ -355,7 +351,7 @@ function RegExpGetLastMatch() {
 function RegExpGetLastParen() {
   if (lastMatchInfoOverride) {
     var override = lastMatchInfoOverride;
-    if (override.length <= 3) return ''; 
+    if (override.length <= 3) return '';
     return override[override.length - 3];
   }
   var length = NUMBER_OF_CAPTURES(lastMatchInfo);
@@ -438,8 +434,8 @@ var lastMatchInfo = [
 
 // Override last match info with an array of actual substrings.
 // Used internally by replace regexp with function.
-// The array has the format of an "apply" argument for a replacement 
-// function. 
+// The array has the format of an "apply" argument for a replacement
+// function.
 var lastMatchInfoOverride = null;
 
 // -------------------------------------------------------------------
@@ -461,7 +457,7 @@ function SetupRegExp() {
   %FunctionSetLength($RegExp.prototype.compile, 1);
 
   // The properties input, $input, and $_ are aliases for each other.  When this
-  // value is set the value it is set to is coerced to a string. 
+  // value is set the value it is set to is coerced to a string.
   // Getter and setter for the input.
   function RegExpGetInput() {
     var regExpInput = LAST_INPUT(lastMatchInfo);

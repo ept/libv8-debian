@@ -1212,7 +1212,7 @@ static void Generate_JSEntryTrampolineHelper(MacroAssembler* masm,
   __ movq(rbx, Operand(kScratchRegister, EntryFrameConstants::kArgvOffset));
   // Load the function pointer into rdi.
   __ movq(rdi, rdx);
-#else  // !defined(_WIN64)
+#else  // _WIN64
   // GCC parameters in:
   // rdi : entry (ignored)
   // rsi : function
@@ -1240,7 +1240,7 @@ static void Generate_JSEntryTrampolineHelper(MacroAssembler* masm,
 
   // Set up the roots register.
   ExternalReference roots_address = ExternalReference::roots_address();
-  __ movq(r13, roots_address);
+  __ movq(kRootRegister, roots_address);
 
   // Current stack contents:
   // [rsp + 2 * kPointerSize ... ]: Internal frame

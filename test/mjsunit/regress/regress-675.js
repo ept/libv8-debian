@@ -25,31 +25,37 @@
 // (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
 // OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
-#ifndef V8_TYPE_INFO_INL_H_
-#define V8_TYPE_INFO_INL_H_
+// Regression test for http://code.google.com/p/v8/issues/detail?id=675.
+//
+// Test that load ICs for nonexistent properties check global
+// property cells.
 
-#include "type-info.h"
-#include "objects-inl.h"
+function f() { return this.x; }
 
-namespace v8 {
-namespace internal {
+// Initialize IC for nonexistent x property on global object.
+f();
+f();
 
+// Assign to global property cell for x.
+this.x = 23;
 
-TypeInfo TypeInfo::TypeFromValue(Handle<Object> value) {
-  TypeInfo info;
-  if (value->IsSmi()) {
-    info = TypeInfo::Smi();
-  } else if (value->IsHeapNumber()) {
-    info = TypeInfo::IsInt32Double(HeapNumber::cast(*value)->value())
-        ? TypeInfo::Integer32()
-        : TypeInfo::Double();
-  } else {
-    info = TypeInfo::Unknown();
-  }
-  return info;
-}
+// Check that we bail out from the IC.
+assertEquals(23, f());
 
 
-} }  // namespace v8::internal
+// Same test, but test that the global property cell is also checked
+// if the global object is the last object in the prototype chain for
+// the load.
+this.__proto__ = null;
+function g() { return this.y; }
 
-#endif  // V8_TYPE_INFO_INL_H_
+// Initialize IC.
+g();
+g();
+
+// Update global property cell.
+this.y = 42;
+
+// Check that IC bails out.
+assertEquals(42, g());
+

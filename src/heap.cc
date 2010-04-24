@@ -41,7 +41,7 @@
 #include "scopeinfo.h"
 #include "snapshot.h"
 #include "v8threads.h"
-#if V8_TARGET_ARCH_ARM && V8_NATIVE_REGEXP
+#if V8_TARGET_ARCH_ARM && !V8_INTERPRETED_REGEXP
 #include "regexp-macro-assembler.h"
 #include "arm/regexp-macro-assembler-arm.h"
 #endif
@@ -562,23 +562,18 @@ void Heap::PerformGarbageCollection(AllocationSpace space,
 
   EnsureFromSpaceIsCommitted();
 
-  // Perform mark-sweep with optional compaction.
   if (collector == MARK_COMPACTOR) {
+    // Perform mark-sweep with optional compaction.
     MarkCompact(tracer);
-  }
 
-  // Always perform a scavenge to make room in new space.
-  Scavenge();
-
-  // Update the old space promotion limits after the scavenge due to
-  // promotions during scavenge.
-  if (collector == MARK_COMPACTOR) {
     int old_gen_size = PromotedSpaceSize();
     old_gen_promotion_limit_ =
         old_gen_size + Max(kMinimumPromotionLimit, old_gen_size / 3);
     old_gen_allocation_limit_ =
         old_gen_size + Max(kMinimumAllocationLimit, old_gen_size / 2);
     old_gen_exhausted_ = false;
+  } else {
+    Scavenge();
   }
 
   Counters::objs_since_last_young.Set(0);
@@ -764,6 +759,17 @@ static void VerifyNonPointerSpacePointers() {
 #endif
 
 
+void Heap::CheckNewSpaceExpansionCriteria() {
+  if (new_space_.Capacity() < new_space_.MaximumCapacity() &&
+      survived_since_last_expansion_ > new_space_.Capacity()) {
+    // Grow the size of new space if there is room to grow and enough
+    // data has survived scavenge since the last expansion.
+    new_space_.Grow();
+    survived_since_last_expansion_ = 0;
+  }
+}
+
+
 void Heap::Scavenge() {
 #ifdef DEBUG
   if (FLAG_enable_slow_asserts) VerifyNonPointerSpacePointers();
@@ -780,13 +786,7 @@ void Heap::Scavenge() {
   // Used for updating survived_since_last_expansion_ at function end.
   int survived_watermark = PromotedSpaceSize();
 
-  if (new_space_.Capacity() < new_space_.MaximumCapacity() &&
-      survived_since_last_expansion_ > new_space_.Capacity()) {
-    // Grow the size of new space if there is room to grow and enough
-    // data has survived scavenge since the last expansion.
-    new_space_.Grow();
-    survived_since_last_expansion_ = 0;
-  }
+  CheckNewSpaceExpansionCriteria();
 
   // Flip the semispaces.  After flipping, to space is empty, from space has
   // live objects.
@@ -837,15 +837,17 @@ void Heap::Scavenge() {
 
   new_space_front = DoScavenge(&scavenge_visitor, new_space_front);
 
-  ScavengeExternalStringTable();
+  UpdateNewSpaceReferencesInExternalStringTable(
+      &UpdateNewSpaceReferenceInExternalStringTableEntry);
+
   ASSERT(new_space_front == new_space_.top());
 
   // Set age mark.
   new_space_.set_age_mark(new_space_.top());
 
   // Update how much has survived scavenge.
-  survived_since_last_expansion_ +=
-      (PromotedSpaceSize() - survived_watermark) + new_space_.Size();
+  IncrementYoungSurvivorsCounter(
+      (PromotedSpaceSize() - survived_watermark) + new_space_.Size());
 
   LOG(ResourceEvent("scavenge", "end"));
 
@@ -853,7 +855,22 @@ void Heap::Scavenge() {
 }
 
 
-void Heap::ScavengeExternalStringTable() {
+String* Heap::UpdateNewSpaceReferenceInExternalStringTableEntry(Object** p) {
+  MapWord first_word = HeapObject::cast(*p)->map_word();
+
+  if (!first_word.IsForwardingAddress()) {
+    // Unreachable external string can be finalized.
+    FinalizeExternalString(String::cast(*p));
+    return NULL;
+  }
+
+  // String is still reachable.
+  return String::cast(first_word.ToForwardingAddress());
+}
+
+
+void Heap::UpdateNewSpaceReferencesInExternalStringTable(
+    ExternalStringTableUpdaterCallback updater_func) {
   ExternalStringTable::Verify();
 
   if (ExternalStringTable::new_space_strings_.is_empty()) return;
@@ -864,16 +881,10 @@ void Heap::ScavengeExternalStringTable() {
 
   for (Object** p = start; p < end; ++p) {
     ASSERT(Heap::InFromSpace(*p));
-    MapWord first_word = HeapObject::cast(*p)->map_word();
+    String* target = updater_func(p);
 
-    if (!first_word.IsForwardingAddress()) {
-      // Unreachable external string can be finalized.
-      FinalizeExternalString(String::cast(*p));
-      continue;
-    }
+    if (target == NULL) continue;
 
-    // String is still reachable.
-    String* target = String::cast(first_word.ToForwardingAddress());
     ASSERT(target->IsExternalString());
 
     if (Heap::InNewSpace(target)) {
@@ -1433,10 +1444,6 @@ bool Heap::CreateInitialMaps() {
   if (obj->IsFailure()) return false;
   set_global_context_map(Map::cast(obj));
 
-  obj = AllocateMap(JS_FUNCTION_TYPE, JSFunction::kSize);
-  if (obj->IsFailure()) return false;
-  set_boilerplate_function_map(Map::cast(obj));
-
   obj = AllocateMap(SHARED_FUNCTION_INFO_TYPE,
                     SharedFunctionInfo::kAlignedSize);
   if (obj->IsFailure()) return false;
@@ -1487,10 +1494,9 @@ Object* Heap::AllocateJSGlobalPropertyCell(Object* value) {
 }
 
 
-Object* Heap::CreateOddball(Map* map,
-                            const char* to_string,
+Object* Heap::CreateOddball(const char* to_string,
                             Object* to_number) {
-  Object* result = Allocate(map, OLD_DATA_SPACE);
+  Object* result = Allocate(oddball_map(), OLD_DATA_SPACE);
   if (result->IsFailure()) return result;
   return Oddball::cast(result)->Initialize(to_string, to_number);
 }
@@ -1521,7 +1527,7 @@ void Heap::CreateCEntryStub() {
 }
 
 
-#if V8_TARGET_ARCH_ARM && V8_NATIVE_REGEXP
+#if V8_TARGET_ARCH_ARM && !V8_INTERPRETED_REGEXP
 void Heap::CreateRegExpCEntryStub() {
   RegExpCEntryStub stub;
   set_re_c_entry_code(*stub.GetCode());
@@ -1558,7 +1564,7 @@ void Heap::CreateFixedStubs() {
   Heap::CreateCEntryStub();
   Heap::CreateJSEntryStub();
   Heap::CreateJSConstructEntryStub();
-#if V8_TARGET_ARCH_ARM && V8_NATIVE_REGEXP
+#if V8_TARGET_ARCH_ARM && !V8_INTERPRETED_REGEXP
   Heap::CreateRegExpCEntryStub();
 #endif
 }
@@ -1594,34 +1600,27 @@ bool Heap::CreateInitialObjects() {
   Oddball::cast(undefined_value())->set_to_string(String::cast(symbol));
   Oddball::cast(undefined_value())->set_to_number(nan_value());
 
-  // Assign the print strings for oddballs after creating symboltable.
-  symbol = LookupAsciiSymbol("null");
-  if (symbol->IsFailure()) return false;
-  Oddball::cast(null_value())->set_to_string(String::cast(symbol));
-  Oddball::cast(null_value())->set_to_number(Smi::FromInt(0));
-
   // Allocate the null_value
   obj = Oddball::cast(null_value())->Initialize("null", Smi::FromInt(0));
   if (obj->IsFailure()) return false;
 
-  obj = CreateOddball(oddball_map(), "true", Smi::FromInt(1));
+  obj = CreateOddball("true", Smi::FromInt(1));
   if (obj->IsFailure()) return false;
   set_true_value(obj);
 
-  obj = CreateOddball(oddball_map(), "false", Smi::FromInt(0));
+  obj = CreateOddball("false", Smi::FromInt(0));
   if (obj->IsFailure()) return false;
   set_false_value(obj);
 
-  obj = CreateOddball(oddball_map(), "hole", Smi::FromInt(-1));
+  obj = CreateOddball("hole", Smi::FromInt(-1));
   if (obj->IsFailure()) return false;
   set_the_hole_value(obj);
 
-  obj = CreateOddball(
-      oddball_map(), "no_interceptor_result_sentinel", Smi::FromInt(-2));
+  obj = CreateOddball("no_interceptor_result_sentinel", Smi::FromInt(-2));
   if (obj->IsFailure()) return false;
   set_no_interceptor_result_sentinel(obj);
 
-  obj = CreateOddball(oddball_map(), "termination_exception", Smi::FromInt(-3));
+  obj = CreateOddball("termination_exception", Smi::FromInt(-3));
   if (obj->IsFailure()) return false;
   set_termination_exception(obj);
 
@@ -1667,8 +1666,8 @@ bool Heap::CreateInitialObjects() {
 
   if (InitializeNumberStringCache()->IsFailure()) return false;
 
-  // Allocate cache for single character strings.
-  obj = AllocateFixedArray(String::kMaxAsciiCharCode+1, TENURED);
+  // Allocate cache for single character ASCII strings.
+  obj = AllocateFixedArray(String::kMaxAsciiCharCode + 1, TENURED);
   if (obj->IsFailure()) return false;
   set_single_character_string_cache(FixedArray::cast(obj));
 
@@ -1797,11 +1796,13 @@ Object* Heap::SmiOrNumberFromDouble(double value,
 }
 
 
-Object* Heap::NumberToString(Object* number) {
+Object* Heap::NumberToString(Object* number, bool check_number_string_cache) {
   Counters::number_to_string_runtime.Increment();
-  Object* cached = GetNumberStringCache(number);
-  if (cached != undefined_value()) {
-    return cached;
+  if (check_number_string_cache) {
+    Object* cached = GetNumberStringCache(number);
+    if (cached != undefined_value()) {
+      return cached;
+    }
   }
 
   char arr[100];
@@ -1961,8 +1962,9 @@ Object* Heap::AllocateConsString(String* first, String* second) {
     return MakeOrFindTwoCharacterString(c1, c2);
   }
 
-  bool is_ascii = first->IsAsciiRepresentation()
-      && second->IsAsciiRepresentation();
+  bool first_is_ascii = first->IsAsciiRepresentation();
+  bool second_is_ascii = second->IsAsciiRepresentation();
+  bool is_ascii = first_is_ascii && second_is_ascii;
 
   // Make sure that an out of memory exception is thrown if the length
   // of the new cons string is too large.
@@ -1997,6 +1999,25 @@ Object* Heap::AllocateConsString(String* first, String* second) {
       for (int i = 0; i < second_length; i++) *dest++ = src[i];
       return result;
     } else {
+      // For short external two-byte strings we check whether they can
+      // be represented using ascii.
+      if (!first_is_ascii) {
+        first_is_ascii = first->IsExternalTwoByteStringWithAsciiChars();
+      }
+      if (first_is_ascii && !second_is_ascii) {
+        second_is_ascii = second->IsExternalTwoByteStringWithAsciiChars();
+      }
+      if (first_is_ascii && second_is_ascii) {
+        Object* result = AllocateRawAsciiString(length);
+        if (result->IsFailure()) return result;
+        // Copy the characters into the new object.
+        char* dest = SeqAsciiString::cast(result)->GetChars();
+        String::WriteToFlat(first, dest, 0, first_length);
+        String::WriteToFlat(second, dest + first_length, 0, second_length);
+        Counters::string_add_runtime_ext_to_ascii.Increment();
+        return result;
+      }
+
       Object* result = AllocateRawTwoByteString(length);
       if (result->IsFailure()) return result;
       // Copy the characters into the new object.
@@ -2293,7 +2314,8 @@ Object* Heap::CopyCode(Code* code, Vector<byte> reloc_info) {
 
   Address old_addr = code->address();
 
-  int relocation_offset = code->relocation_start() - old_addr;
+  size_t relocation_offset =
+      static_cast<size_t>(code->relocation_start() - old_addr);
 
   Object* result;
   if (new_obj_size > MaxObjectSizeInPagedSpace()) {
@@ -2987,13 +3009,10 @@ Object* Heap::AllocateFixedArray(int length) {
 }
 
 
-Object* Heap::AllocateFixedArray(int length, PretenureFlag pretenure) {
-  ASSERT(length >= 0);
-  ASSERT(empty_fixed_array()->IsFixedArray());
+Object* Heap::AllocateRawFixedArray(int length, PretenureFlag pretenure) {
   if (length < 0 || length > FixedArray::kMaxLength) {
     return Failure::OutOfMemoryException();
   }
-  if (length == 0) return empty_fixed_array();
 
   AllocationSpace space =
       (pretenure == TENURED) ? OLD_POINTER_SPACE : NEW_SPACE;
@@ -3027,15 +3046,36 @@ Object* Heap::AllocateFixedArray(int length, PretenureFlag pretenure) {
     ASSERT(space == LO_SPACE);
     result = lo_space_->AllocateRawFixedArray(size);
   }
+  return result;
+}
+
+
+static Object* AllocateFixedArrayWithFiller(int length,
+                                            PretenureFlag pretenure,
+                                            Object* filler) {
+  ASSERT(length >= 0);
+  ASSERT(Heap::empty_fixed_array()->IsFixedArray());
+  if (length == 0) return Heap::empty_fixed_array();
+
+  ASSERT(!Heap::InNewSpace(filler));
+  Object* result = Heap::AllocateRawFixedArray(length, pretenure);
   if (result->IsFailure()) return result;
 
-  // Initialize the object.
-  reinterpret_cast<Array*>(result)->set_map(fixed_array_map());
+  HeapObject::cast(result)->set_map(Heap::fixed_array_map());
   FixedArray* array = FixedArray::cast(result);
   array->set_length(length);
-  ASSERT(!Heap::InNewSpace(undefined_value()));
-  MemsetPointer(array->data_start(), undefined_value(), length);
+  MemsetPointer(array->data_start(), filler, length);
   return array;
+}
+
+
+Object* Heap::AllocateFixedArray(int length, PretenureFlag pretenure) {
+  return AllocateFixedArrayWithFiller(length, pretenure, undefined_value());
+}
+
+
+Object* Heap::AllocateFixedArrayWithHoles(int length, PretenureFlag pretenure) {
+  return AllocateFixedArrayWithFiller(length, pretenure, the_hole_value());
 }
 
 
@@ -3048,22 +3088,6 @@ Object* Heap::AllocateUninitializedFixedArray(int length) {
   reinterpret_cast<FixedArray*>(obj)->set_map(fixed_array_map());
   FixedArray::cast(obj)->set_length(length);
   return obj;
-}
-
-
-Object* Heap::AllocateFixedArrayWithHoles(int length) {
-  if (length == 0) return empty_fixed_array();
-  Object* result = AllocateRawFixedArray(length);
-  if (!result->IsFailure()) {
-    // Initialize header.
-    reinterpret_cast<Array*>(result)->set_map(fixed_array_map());
-    FixedArray* array = FixedArray::cast(result);
-    array->set_length(length);
-    // Initialize body.
-    ASSERT(!Heap::InNewSpace(the_hole_value()));
-    MemsetPointer(array->data_start(), the_hole_value(), length);
-  }
-  return result;
 }
 
 

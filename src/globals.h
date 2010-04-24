@@ -112,8 +112,9 @@ typedef byte* Address;
 #define V8PRIxPTR "lx"
 #endif
 
-#if defined(__APPLE__) && defined(__MACH__)
-#define USING_MAC_ABI
+#if (defined(__APPLE__) && defined(__MACH__)) || \
+    defined(__FreeBSD__) || defined(__OpenBSD__)
+#define USING_BSD_ABI
 #endif
 
 // Code-point values in Unicode 4.0 are 21 bits wide.
@@ -145,6 +146,9 @@ const intptr_t kIntptrSignBit = V8_INT64_C(0x8000000000000000);
 const int kPointerSizeLog2 = 2;
 const intptr_t kIntptrSignBit = 0x80000000;
 #endif
+
+// Mask for the sign bit in a smi.
+const intptr_t kSmiSignMask = kIntptrSignBit;
 
 const int kObjectAlignmentBits = kPointerSizeLog2;
 const intptr_t kObjectAlignment = 1 << kObjectAlignmentBits;
@@ -427,7 +431,11 @@ enum PropertyType {
   CONSTANT_TRANSITION = 6,  // only in fast mode
   NULL_DESCRIPTOR     = 7,  // only in fast mode
   // All properties before MAP_TRANSITION are real.
-  FIRST_PHANTOM_PROPERTY_TYPE = MAP_TRANSITION
+  FIRST_PHANTOM_PROPERTY_TYPE = MAP_TRANSITION,
+  // There are no IC stubs for NULL_DESCRIPTORS. Therefore,
+  // NULL_DESCRIPTOR can be used as the type flag for IC stubs for
+  // nonexistent properties.
+  NONEXISTENT = NULL_DESCRIPTOR
 };
 
 
@@ -457,7 +465,7 @@ struct AccessorDescriptor {
 
 // Logging and profiling.
 // A StateTag represents a possible state of the VM.  When compiled with
-// ENABLE_LOGGING_AND_PROFILING, the logger maintains a stack of these.
+// ENABLE_VMSTATE_TRACKING, the logger maintains a stack of these.
 // Creating a VMState object enters a state by pushing on the stack, and
 // destroying a VMState object leaves a state by popping the current state
 // from the stack.
