@@ -18,3 +18,4 @@ http://code.google.com/p/v8/issues/detail?id=429
 +    return 'mips'
    else:
      return None
+ 

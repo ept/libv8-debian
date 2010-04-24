@@ -2,7 +2,7 @@ adding -march=armv5t to build libv8 on armel
 
 --- a/SConstruct
 +++ b/SConstruct
-@@ -179,7 +179,8 @@
+@@ -200,7 +200,8 @@
        'LINKFLAGS':    ['-m32']
      },
      'arch:arm': {

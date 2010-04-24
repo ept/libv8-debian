@@ -1,5 +1,8 @@
 #!/usr/bin/make -f
 
+include /usr/share/cdbs/1/rules/debhelper.mk
+include /usr/share/cdbs/1/class/scons.mk
+
 # These are used for cross-compiling and for saving the configure script
 # from having to guess our platform (since we know it already)
 DEB_HOST_GNU_TYPE       ?= $(shell dpkg-architecture -qDEB_HOST_GNU_TYPE)
@@ -12,24 +15,20 @@ DEBIAN_UPSTREAM_VERSION	:= $(shell echo $(DEBIAN_VERSION) | sed 's/^\(.*\)-[^-]*
 DEBIAN_UPSTREAM_BRANCH	:= $(shell echo $(DEBIAN_UPSTREAM_VERSION) | sed 's/^\([^\.]*\.[^.+~]*\).*$$/\1/')
 DEBIAN_REVISION		:= $(shell echo $(DEBIAN_VERSION) | sed 's/^.*r\([^-]*\).*/\1/')
 
-SONAME			:= 2.1.10
+SONAME			:= 2.2.4
 
 SRC_DIR			:= $(CURDIR)
 DEB_BUILDDIR		:= $(SRC_DIR)
 
-DEB_SCONS_ARGS		:= library=shared soname=on shlibtype=hidden
-DEB_SCONS_INSTALL_ARGS	:= $(DEB_SCONS_ARGS)
-
-DEB_DH_MAKESHLIBS_ARGS += -c4
+DEB_DH_MAKESHLIBS_ARGS := -- -c4
 
 CXXFLAGS += -fno-strict-aliasing
 CFLAGS += -fno-strict-aliasing
 export CFLAGS
 export CXXFLAGS
 
-include /usr/share/cdbs/1/rules/patchsys-quilt.mk
-include /usr/share/cdbs/1/rules/debhelper.mk
-include $(CURDIR)/debian/cdbs/scons.mk
+DEB_SCONS_OPTIONS          := library=shared soname=on shlibtype=hidden
+DEB_SCONS_INSTALL_OPTIONS  := $(DEB_SCONS_OPTIONS) DESTDIR=$(DEB_DESTDIR)
 
 clean::
 	#if [ -f src/version.cc~ ] ; then mv src/version.cc~ src/version.cc ; fi
@@ -37,7 +36,8 @@ clean::
 	rm -rf obj
 
 common-install-impl::
-	cd debian/tmp/usr/lib/; mv libv8-${SONAME}.so libv8.so.${SONAME}; \
+	cd debian/tmp/usr/lib/ ; \
+	mv libv8-${SONAME}*.so libv8.so.${SONAME} ; \
 	ln -s -T libv8.so.${SONAME} libv8.so
 
 # Tarball (get-orig-source & get-current-source)
