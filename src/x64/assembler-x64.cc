@@ -119,8 +119,8 @@ void CpuFeatures::Probe()  {
   Object* code =
       Heap::CreateCode(desc, NULL, Code::ComputeFlags(Code::STUB), NULL);
   if (!code->IsCode()) return;
-  LOG(CodeCreateEvent(Logger::BUILTIN_TAG,
-                      Code::cast(code), "CpuFeatures::Probe"));
+  PROFILE(CodeCreateEvent(Logger::BUILTIN_TAG,
+                          Code::cast(code), "CpuFeatures::Probe"));
   typedef uint64_t (*F0)();
   F0 probe = FUNCTION_CAST<F0>(Code::cast(code)->entry());
   supported_ = probe();
@@ -1138,23 +1138,25 @@ void Assembler::j(Condition cc,
 void Assembler::jmp(Label* L) {
   EnsureSpace ensure_space(this);
   last_pc_ = pc_;
+  const int short_size = sizeof(int8_t);
+  const int long_size = sizeof(int32_t);
   if (L->is_bound()) {
     int offs = L->pos() - pc_offset() - 1;
     ASSERT(offs <= 0);
-    if (is_int8(offs - sizeof(int8_t))) {
+    if (is_int8(offs - short_size)) {
       // 1110 1011 #8-bit disp.
       emit(0xEB);
-      emit((offs - sizeof(int8_t)) & 0xFF);
+      emit((offs - short_size) & 0xFF);
     } else {
       // 1110 1001 #32-bit disp.
       emit(0xE9);
-      emitl(offs - sizeof(int32_t));
+      emitl(offs - long_size);
     }
   } else  if (L->is_linked()) {
     // 1110 1001 #32-bit disp.
     emit(0xE9);
     emitl(L->pos());
-    L->link_to(pc_offset() - sizeof(int32_t));
+    L->link_to(pc_offset() - long_size);
   } else {
     // 1110 1001 #32-bit disp.
     ASSERT(L->is_unused());
@@ -2385,6 +2387,17 @@ void Assembler::emit_farith(int b1, int b2, int i) {
 
 // SSE 2 operations.
 
+void Assembler::movd(XMMRegister dst, Register src) {
+  EnsureSpace ensure_space(this);
+  last_pc_ = pc_;
+  emit(0x66);
+  emit_optional_rex_32(dst, src);
+  emit(0x0F);
+  emit(0x6E);
+  emit_sse_operand(dst, src);
+}
+
+
 void Assembler::movsd(const Operand& dst, XMMRegister src) {
   EnsureSpace ensure_space(this);
   last_pc_ = pc_;
@@ -2469,6 +2482,17 @@ void Assembler::cvtqsi2sd(XMMRegister dst, Register src) {
   emit_rex_64(dst, src);
   emit(0x0F);
   emit(0x2A);
+  emit_sse_operand(dst, src);
+}
+
+
+void Assembler::cvtss2sd(XMMRegister dst, XMMRegister src) {
+  EnsureSpace ensure_space(this);
+  last_pc_ = pc_;
+  emit(0xF3);
+  emit_optional_rex_32(dst, src);
+  emit(0x0F);
+  emit(0x5A);
   emit_sse_operand(dst, src);
 }
 

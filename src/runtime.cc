@@ -1228,6 +1228,92 @@ static Object* Runtime_RegExpExec(Arguments args) {
 }
 
 
+static Object* Runtime_RegExpConstructResult(Arguments args) {
+  ASSERT(args.length() == 3);
+  CONVERT_SMI_CHECKED(elements_count, args[0]);
+  if (elements_count > JSArray::kMaxFastElementsLength) {
+    return Top::ThrowIllegalOperation();
+  }
+  Object* new_object = Heap::AllocateFixedArrayWithHoles(elements_count);
+  if (new_object->IsFailure()) return new_object;
+  FixedArray* elements = FixedArray::cast(new_object);
+  new_object = Heap::AllocateRaw(JSRegExpResult::kSize,
+                                 NEW_SPACE,
+                                 OLD_POINTER_SPACE);
+  if (new_object->IsFailure()) return new_object;
+  {
+    AssertNoAllocation no_gc;
+    HandleScope scope;
+    reinterpret_cast<HeapObject*>(new_object)->
+        set_map(Top::global_context()->regexp_result_map());
+  }
+  JSArray* array = JSArray::cast(new_object);
+  array->set_properties(Heap::empty_fixed_array());
+  array->set_elements(elements);
+  array->set_length(Smi::FromInt(elements_count));
+  // Write in-object properties after the length of the array.
+  array->InObjectPropertyAtPut(JSRegExpResult::kIndexIndex, args[1]);
+  array->InObjectPropertyAtPut(JSRegExpResult::kInputIndex, args[2]);
+  return array;
+}
+
+
+static Object* Runtime_RegExpInitializeObject(Arguments args) {
+  AssertNoAllocation no_alloc;
+  ASSERT(args.length() == 5);
+  CONVERT_CHECKED(JSRegExp, regexp, args[0]);
+  CONVERT_CHECKED(String, source, args[1]);
+
+  Object* global = args[2];
+  if (!global->IsTrue()) global = Heap::false_value();
+
+  Object* ignoreCase = args[3];
+  if (!ignoreCase->IsTrue()) ignoreCase = Heap::false_value();
+
+  Object* multiline = args[4];
+  if (!multiline->IsTrue()) multiline = Heap::false_value();
+
+  Map* map = regexp->map();
+  Object* constructor = map->constructor();
+  if (constructor->IsJSFunction() &&
+      JSFunction::cast(constructor)->initial_map() == map) {
+    // If we still have the original map, set in-object properties directly.
+    regexp->InObjectPropertyAtPut(JSRegExp::kSourceFieldIndex, source);
+    // TODO(lrn): Consider skipping write barrier on booleans as well.
+    // Both true and false should be in oldspace at all times.
+    regexp->InObjectPropertyAtPut(JSRegExp::kGlobalFieldIndex, global);
+    regexp->InObjectPropertyAtPut(JSRegExp::kIgnoreCaseFieldIndex, ignoreCase);
+    regexp->InObjectPropertyAtPut(JSRegExp::kMultilineFieldIndex, multiline);
+    regexp->InObjectPropertyAtPut(JSRegExp::kLastIndexFieldIndex,
+                                  Smi::FromInt(0),
+                                  SKIP_WRITE_BARRIER);
+    return regexp;
+  }
+
+  // Map has changed, so use generic, but slower, method.
+  PropertyAttributes final =
+      static_cast<PropertyAttributes>(READ_ONLY | DONT_ENUM | DONT_DELETE);
+  PropertyAttributes writable =
+      static_cast<PropertyAttributes>(DONT_ENUM | DONT_DELETE);
+  regexp->IgnoreAttributesAndSetLocalProperty(Heap::source_symbol(),
+                                              source,
+                                              final);
+  regexp->IgnoreAttributesAndSetLocalProperty(Heap::global_symbol(),
+                                              global,
+                                              final);
+  regexp->IgnoreAttributesAndSetLocalProperty(Heap::ignore_case_symbol(),
+                                              ignoreCase,
+                                              final);
+  regexp->IgnoreAttributesAndSetLocalProperty(Heap::multiline_symbol(),
+                                              multiline,
+                                              final);
+  regexp->IgnoreAttributesAndSetLocalProperty(Heap::last_index_symbol(),
+                                              Smi::FromInt(0),
+                                              writable);
+  return regexp;
+}
+
+
 static Object* Runtime_FinishArrayPrototypeSetup(Arguments args) {
   HandleScope scope;
   ASSERT(args.length() == 1);
@@ -1304,6 +1390,13 @@ static Object* Runtime_SpecialArrayFunctions(Arguments args) {
   InstallBuiltin(holder, "concat", Builtins::ArrayConcat);
 
   return *holder;
+}
+
+
+static Object* Runtime_GetGlobalReceiver(Arguments args) {
+  // Returns a real global receiver, not one of builtins object.
+  Context* global_context = Top::context()->global()->global_context();
+  return global_context->global()->global_receiver();
 }
 
 
@@ -1705,8 +1798,6 @@ class ReplacementStringBuilder {
 
   void AddSubjectSlice(int from, int to) {
     AddSubjectSlice(&array_builder_, from, to);
-    // Can we encode the slice in 11 bits for length and 19 bits for
-    // start position - as used by StringBuilderConcatHelper?
     IncrementCharacterCount(to - from);
   }
 
@@ -2449,7 +2540,7 @@ static inline int SingleCharIndexOf(Vector<const schar> string,
                pattern_char,
                string.length() - start_index));
     if (pos == NULL) return -1;
-    return pos - string.start();
+    return static_cast<int>(pos - string.start());
   }
   for (int i = start_index, n = string.length(); i < n; i++) {
     if (pattern_char == string[i]) {
@@ -2507,7 +2598,7 @@ static int SimpleIndexOf(Vector<const schar> subject,
         *complete = true;
         return -1;
       }
-      i = pos - subject.start();
+      i = static_cast<int>(pos - subject.start());
     } else {
       if (subject[i] != pattern_first_char) continue;
     }
@@ -2541,7 +2632,7 @@ static int SimpleIndexOf(Vector<const schar> subject,
                  pattern_first_char,
                  n - i + 1));
       if (pos == NULL) return -1;
-      i = pos - subject.start();
+      i = static_cast<int>(pos - subject.start());
     } else {
       if (subject[i] != pattern_first_char) continue;
     }
@@ -3301,11 +3392,18 @@ static RegExpImpl::IrregexpResult SearchRegExpMultiple(
                                                 match_start,
                                                 match_end));
         for (int i = 1; i <= capture_count; i++) {
-          Handle<String> substring =
-              Factory::NewSubString(subject,
-                                    register_vector[i * 2],
-                                    register_vector[i * 2 + 1]);
-          elements->set(i, *substring);
+          int start = register_vector[i * 2];
+          if (start >= 0) {
+            int end = register_vector[i * 2 + 1];
+            ASSERT(start <= end);
+            Handle<String> substring = Factory::NewSubString(subject,
+                                                             start,
+                                                             end);
+            elements->set(i, *substring);
+          } else {
+            ASSERT(register_vector[i * 2 + 1] < 0);
+            elements->set(i, Heap::undefined_value());
+          }
         }
         elements->set(capture_count + 1, Smi::FromInt(match_start));
         elements->set(capture_count + 2, *subject);
@@ -4382,11 +4480,66 @@ static Object* Runtime_Typeof(Arguments args) {
 }
 
 
+static bool AreDigits(const char*s, int from, int to) {
+  for (int i = from; i < to; i++) {
+    if (s[i] < '0' || s[i] > '9') return false;
+  }
+
+  return true;
+}
+
+
+static int ParseDecimalInteger(const char*s, int from, int to) {
+  ASSERT(to - from < 10);  // Overflow is not possible.
+  ASSERT(from < to);
+  int d = s[from] - '0';
+
+  for (int i = from + 1; i < to; i++) {
+    d = 10 * d + (s[i] - '0');
+  }
+
+  return d;
+}
+
+
 static Object* Runtime_StringToNumber(Arguments args) {
   NoHandleAllocation ha;
   ASSERT(args.length() == 1);
   CONVERT_CHECKED(String, subject, args[0]);
   subject->TryFlatten();
+
+  // Fast case: short integer or some sorts of junk values.
+  int len = subject->length();
+  if (subject->IsSeqAsciiString()) {
+    if (len == 0) return Smi::FromInt(0);
+
+    char const* data = SeqAsciiString::cast(subject)->GetChars();
+    bool minus = (data[0] == '-');
+    int start_pos = (minus ? 1 : 0);
+
+    if (start_pos == len) {
+      return Heap::nan_value();
+    } else if (data[start_pos] > '9') {
+      // Fast check for a junk value. A valid string may start from a
+      // whitespace, a sign ('+' or '-'), the decimal point, a decimal digit or
+      // the 'I' character ('Infinity'). All of that have codes not greater than
+      // '9' except 'I'.
+      if (data[start_pos] != 'I') {
+        return Heap::nan_value();
+      }
+    } else if (len - start_pos < 10 && AreDigits(data, start_pos, len)) {
+      // The maximal/minimal smi has 10 digits. If the string has less digits we
+      // know it will fit into the smi-data type.
+      int d = ParseDecimalInteger(data, start_pos, len);
+      if (minus) {
+        if (d == 0) return Heap::minus_zero_value();
+        d = -d;
+      }
+      return Smi::FromInt(d);
+    }
+  }
+
+  // Slower case.
   return Heap::NumberFromDouble(StringToDouble(subject, ALLOW_HEX));
 }
 
@@ -4623,49 +4776,9 @@ static Object* Runtime_StringParseInt(Arguments args) {
 
   s->TryFlatten();
 
-  int len = s->length();
-  int i;
-
-  // Skip leading white space.
-  for (i = 0; i < len && Scanner::kIsWhiteSpace.get(s->Get(i)); i++) ;
-  if (i == len) return Heap::nan_value();
-
-  // Compute the sign (default to +).
-  int sign = 1;
-  if (s->Get(i) == '-') {
-    sign = -1;
-    i++;
-  } else if (s->Get(i) == '+') {
-    i++;
-  }
-
-  // Compute the radix if 0.
-  if (radix == 0) {
-    radix = 10;
-    if (i < len && s->Get(i) == '0') {
-      radix = 8;
-      if (i + 1 < len) {
-        int c = s->Get(i + 1);
-        if (c == 'x' || c == 'X') {
-          radix = 16;
-          i += 2;
-        }
-      }
-    }
-  } else if (radix == 16) {
-    // Allow 0x or 0X prefix if radix is 16.
-    if (i + 1 < len && s->Get(i) == '0') {
-      int c = s->Get(i + 1);
-      if (c == 'x' || c == 'X') i += 2;
-    }
-  }
-
-  RUNTIME_ASSERT(2 <= radix && radix <= 36);
-  double value;
-  int end_index = StringToInt(s, i, radix, &value);
-  if (end_index != i) {
-    return Heap::NumberFromDouble(sign * value);
-  }
+  RUNTIME_ASSERT(radix == 0 || (2 <= radix && radix <= 36));
+  double value = StringToInt(s, radix);
+  return Heap::NumberFromDouble(value);
   return Heap::nan_value();
 }
 
@@ -5171,6 +5284,17 @@ static Object* Runtime_NumberToString(Arguments args) {
 }
 
 
+static Object* Runtime_NumberToStringSkipCache(Arguments args) {
+  NoHandleAllocation ha;
+  ASSERT(args.length() == 1);
+
+  Object* number = args[0];
+  RUNTIME_ASSERT(number->IsNumber());
+
+  return Heap::NumberToString(number, false);
+}
+
+
 static Object* Runtime_NumberToInteger(Arguments args) {
   NoHandleAllocation ha;
   ASSERT(args.length() == 1);
@@ -5301,7 +5425,7 @@ static Object* Runtime_StringAdd(Arguments args) {
 }
 
 
-template<typename sinkchar>
+template <typename sinkchar>
 static inline void StringBuilderConcatHelper(String* special,
                                              sinkchar* sink,
                                              FixedArray* fixed_array,
@@ -5372,33 +5496,41 @@ static Object* Runtime_StringBuilderConcat(Arguments args) {
 
   bool ascii = special->IsAsciiRepresentation();
   int position = 0;
-  int increment = 0;
   for (int i = 0; i < array_length; i++) {
+    int increment = 0;
     Object* elt = fixed_array->get(i);
     if (elt->IsSmi()) {
       // Smi encoding of position and length.
-      int len = Smi::cast(elt)->value();
-      if (len > 0) {
+      int smi_value = Smi::cast(elt)->value();
+      int pos;
+      int len;
+      if (smi_value > 0) {
         // Position and length encoded in one smi.
-        int pos = len >> 11;
-        len &= 0x7ff;
-        if (pos + len > special_length) {
-          return Top::Throw(Heap::illegal_argument_symbol());
-        }
-        increment = len;
+        pos = StringBuilderSubstringPosition::decode(smi_value);
+        len = StringBuilderSubstringLength::decode(smi_value);
       } else {
         // Position and length encoded in two smis.
-        increment = (-len);
-        // Get the position and check that it is also a smi.
+        len = -smi_value;
+        // Get the position and check that it is a positive smi.
         i++;
         if (i >= array_length) {
           return Top::Throw(Heap::illegal_argument_symbol());
         }
-        Object* pos = fixed_array->get(i);
-        if (!pos->IsSmi()) {
+        Object* next_smi = fixed_array->get(i);
+        if (!next_smi->IsSmi()) {
+          return Top::Throw(Heap::illegal_argument_symbol());
+        }
+        pos = Smi::cast(next_smi)->value();
+        if (pos < 0) {
           return Top::Throw(Heap::illegal_argument_symbol());
         }
       }
+      ASSERT(pos >= 0);
+      ASSERT(len >= 0);
+      if (pos > special_length || len > special_length - pos) {
+        return Top::Throw(Heap::illegal_argument_symbol());
+      }
+      increment = len;
     } else if (elt->IsString()) {
       String* element = String::cast(elt);
       int element_length = element->length();
@@ -6240,7 +6372,7 @@ static const char kMonthInYear[] = {
 static inline void DateYMDFromTimeAfter1970(int date,
                                             int& year, int& month, int& day) {
 #ifdef DEBUG
-  int save_date = date;  // Need this for ASSERT in the end.
+  int save_date = date;  // Need this for ASSERT in the end.
 #endif
 
   year = 1970 + (4 * date + 2) / kDaysIn4Years;
@@ -6256,7 +6388,7 @@ static inline void DateYMDFromTimeAfter1970(int date,
 static inline void DateYMDFromTimeSlow(int date,
                                        int& year, int& month, int& day) {
 #ifdef DEBUG
-  int save_date = date;  // Need this for ASSERT in the end.
+  int save_date = date;  // Need this for ASSERT in the end.
 #endif
 
   date += kDaysOffset;
@@ -7019,21 +7151,6 @@ static Object* Runtime_DateDaylightSavingsOffset(Arguments args) {
 
   CONVERT_DOUBLE_CHECKED(x, args[0]);
   return Heap::NumberFromDouble(OS::DaylightSavingsOffset(x));
-}
-
-
-static Object* Runtime_NumberIsFinite(Arguments args) {
-  NoHandleAllocation ha;
-  ASSERT(args.length() == 1);
-
-  CONVERT_DOUBLE_CHECKED(value, args[0]);
-  Object* result;
-  if (isnan(value) || (fpclassify(value) == FP_INFINITE)) {
-    result = Heap::false_value();
-  } else {
-    result = Heap::true_value();
-  }
-  return result;
 }
 
 
@@ -9582,6 +9699,8 @@ static Object* Runtime_LiveEditReplaceScript(Arguments args) {
   old_script->set_eval_from_instructions_offset(
       original_script->eval_from_instructions_offset());
 
+  // Drop line ends so that they will be recalculated.
+  original_script->set_line_ends(Heap::undefined_value());
 
   Debugger::OnAfterCompile(old_script, Debugger::SEND_WHEN_DEBUGGING);
 
@@ -9618,54 +9737,45 @@ static Object* Runtime_LiveEditRelinkFunctionToScript(Arguments args) {
 // array of groups of 3 numbers:
 // (change_begin, change_end, change_end_new_position).
 // Each group describes a change in text; groups are sorted by change_begin.
+// Returns an array of pairs (new source position, breakpoint_object/array)
+// so that JS side could update positions in breakpoint objects.
 static Object* Runtime_LiveEditPatchFunctionPositions(Arguments args) {
   ASSERT(args.length() == 2);
   HandleScope scope;
   CONVERT_ARG_CHECKED(JSArray, shared_array, 0);
   CONVERT_ARG_CHECKED(JSArray, position_change_array, 1);
 
-  LiveEdit::PatchFunctionPositions(shared_array, position_change_array);
+  Handle<Object> result =
+      LiveEdit::PatchFunctionPositions(shared_array, position_change_array);
 
-  return Heap::undefined_value();
+  return *result;
 }
 
-
-static LiveEdit::FunctionPatchabilityStatus FindFunctionCodeOnStacks(
-    Handle<SharedFunctionInfo> shared) {
-  // TODO(635): check all threads, not only the current one.
-  for (StackFrameIterator it; !it.done(); it.Advance()) {
-    StackFrame* frame = it.frame();
-    if (frame->code() == shared->code()) {
-      return LiveEdit::FUNCTION_BLOCKED_ON_STACK;
-    }
-  }
-  return LiveEdit::FUNCTION_AVAILABLE_FOR_PATCH;
-}
 
 // For array of SharedFunctionInfo's (each wrapped in JSValue)
 // checks that none of them have activations on stacks (of any thread).
 // Returns array of the same length with corresponding results of
 // LiveEdit::FunctionPatchabilityStatus type.
-static Object* Runtime_LiveEditCheckStackActivations(Arguments args) {
-  ASSERT(args.length() == 1);
+static Object* Runtime_LiveEditCheckAndDropActivations(Arguments args) {
+  ASSERT(args.length() == 2);
   HandleScope scope;
   CONVERT_ARG_CHECKED(JSArray, shared_array, 0);
+  CONVERT_BOOLEAN_CHECKED(do_drop, args[1]);
 
-
-  int len = Smi::cast(shared_array->length())->value();
-  Handle<JSArray> result = Factory::NewJSArray(len);
-
-  for (int i = 0; i < len; i++) {
-    JSValue* wrapper = JSValue::cast(shared_array->GetElement(i));
-    Handle<SharedFunctionInfo> shared(
-        SharedFunctionInfo::cast(wrapper->value()));
-    LiveEdit::FunctionPatchabilityStatus check_res =
-        FindFunctionCodeOnStacks(shared);
-    SetElement(result, i, Handle<Smi>(Smi::FromInt(check_res)));
-  }
-
-  return *result;
+  return *LiveEdit::CheckAndDropActivations(shared_array, do_drop);
 }
+
+// Compares 2 strings line-by-line and returns diff in form of JSArray of
+// triplets (pos1, len1, len2) describing list of diff chunks.
+static Object* Runtime_LiveEditCompareStringsLinewise(Arguments args) {
+  ASSERT(args.length() == 2);
+  HandleScope scope;
+  CONVERT_ARG_CHECKED(String, s1, 0);
+  CONVERT_ARG_CHECKED(String, s2, 1);
+
+  return *LiveEdit::CompareStringsLinewise(s1, s2);
+}
+
 
 
 // A testing entry. Returns statement position which is the closest to
@@ -9686,7 +9796,8 @@ static Object* Runtime_GetFunctionCodePositionFromSource(Arguments args) {
     // Check if this break point is closer that what was previously found.
     if (source_position <= statement_position &&
         statement_position - source_position < distance) {
-      closest_pc = it.rinfo()->pc() - code->instruction_start();
+      closest_pc =
+          static_cast<int>(it.rinfo()->pc() - code->instruction_start());
       distance = statement_position - source_position;
       // Check whether we can't get any closer.
       if (distance == 0) break;
@@ -9695,6 +9806,35 @@ static Object* Runtime_GetFunctionCodePositionFromSource(Arguments args) {
   }
 
   return Smi::FromInt(closest_pc);
+}
+
+
+// Calls specified function with or without entering the debugger.
+// This is used in unit tests to run code as if debugger is entered or simply
+// to have a stack with C++ frame in the middle.
+static Object* Runtime_ExecuteInDebugContext(Arguments args) {
+  ASSERT(args.length() == 2);
+  HandleScope scope;
+  CONVERT_ARG_CHECKED(JSFunction, function, 0);
+  CONVERT_BOOLEAN_CHECKED(without_debugger, args[1]);
+
+  Handle<Object> result;
+  bool pending_exception;
+  {
+    if (without_debugger) {
+      result = Execution::Call(function, Top::global(), 0, NULL,
+                               &pending_exception);
+    } else {
+      EnterDebugger enter_debugger;
+      result = Execution::Call(function, Top::global(), 0, NULL,
+                               &pending_exception);
+    }
+  }
+  if (!pending_exception) {
+    return *result;
+  } else {
+    return Failure::Exception();
+  }
 }
 
 
@@ -9883,6 +10023,91 @@ static Object* Runtime_DeleteHandleScopeExtensions(Arguments args) {
   return Heap::undefined_value();
 }
 
+
+static Object* CacheMiss(FixedArray* cache_obj, int index, Object* key_obj) {
+  ASSERT(index % 2 == 0);  // index of the key
+  ASSERT(index >= JSFunctionResultCache::kEntriesIndex);
+  ASSERT(index < cache_obj->length());
+
+  HandleScope scope;
+
+  Handle<FixedArray> cache(cache_obj);
+  Handle<Object> key(key_obj);
+  Handle<JSFunction> factory(JSFunction::cast(
+        cache->get(JSFunctionResultCache::kFactoryIndex)));
+  // TODO(antonm): consider passing a receiver when constructing a cache.
+  Handle<Object> receiver(Top::global_context()->global());
+
+  Handle<Object> value;
+  {
+    // This handle is nor shared, nor used later, so it's safe.
+    Object** argv[] = { key.location() };
+    bool pending_exception = false;
+    value = Execution::Call(factory,
+                            receiver,
+                            1,
+                            argv,
+                            &pending_exception);
+    if (pending_exception) return Failure::Exception();
+  }
+
+  cache->set(index, *key);
+  cache->set(index + 1, *value);
+  cache->set(JSFunctionResultCache::kFingerIndex, Smi::FromInt(index));
+
+  return *value;
+}
+
+
+static Object* Runtime_GetFromCache(Arguments args) {
+  // This is only called from codegen, so checks might be more lax.
+  CONVERT_CHECKED(FixedArray, cache, args[0]);
+  Object* key = args[1];
+
+  const int finger_index =
+      Smi::cast(cache->get(JSFunctionResultCache::kFingerIndex))->value();
+
+  Object* o = cache->get(finger_index);
+  if (o == key) {
+    // The fastest case: hit the same place again.
+    return cache->get(finger_index + 1);
+  }
+
+  for (int i = finger_index - 2;
+       i >= JSFunctionResultCache::kEntriesIndex;
+       i -= 2) {
+    o = cache->get(i);
+    if (o == key) {
+      cache->set(JSFunctionResultCache::kFingerIndex, Smi::FromInt(i));
+      return cache->get(i + 1);
+    }
+  }
+
+  const int size =
+      Smi::cast(cache->get(JSFunctionResultCache::kCacheSizeIndex))->value();
+  ASSERT(size <= cache->length());
+
+  for (int i = size - 2; i > finger_index; i -= 2) {
+    o = cache->get(i);
+    if (o == key) {
+      cache->set(JSFunctionResultCache::kFingerIndex, Smi::FromInt(i));
+      return cache->get(i + 1);
+    }
+  }
+
+  // Cache miss.  If we have spare room, put new data into it, otherwise
+  // evict post finger entry which must be least recently used.
+  if (size < cache->length()) {
+    cache->set(JSFunctionResultCache::kCacheSizeIndex, Smi::FromInt(size + 2));
+    return CacheMiss(cache, size, key);
+  } else {
+    int target_index = finger_index + JSFunctionResultCache::kEntrySize;
+    if (target_index == cache->length()) {
+      target_index = JSFunctionResultCache::kEntriesIndex;
+    }
+    return CacheMiss(cache, target_index, key);
+  }
+}
 
 #ifdef DEBUG
 // ListNatives is ONLY used by the fuzz-natives.js in debug mode

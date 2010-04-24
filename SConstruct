@@ -1,4 +1,4 @@
-# Copyright 2008 the V8 project authors. All rights reserved.
+# Copyright 2010 the V8 project authors. All rights reserved.
 # Redistribution and use in source and binary forms, with or without
 # modification, are permitted provided that the following conditions are
 # met:
@@ -42,6 +42,18 @@ ANDROID_TOP = os.environ.get('TOP')
 if ANDROID_TOP is None:
   ANDROID_TOP=""
 
+# ARM_TARGET_LIB is the path to the dynamic library to use on the target
+# machine if cross-compiling to an arm machine. You will also need to set 
+# the additional cross-compiling environment variables to the cross compiler.
+ARM_TARGET_LIB = os.environ.get('ARM_TARGET_LIB')
+if ARM_TARGET_LIB:
+  ARM_LINK_FLAGS = ['-Wl,-rpath=' + ARM_TARGET_LIB + '/lib:' +
+                     ARM_TARGET_LIB + '/usr/lib',
+                    '-Wl,--dynamic-linker=' + ARM_TARGET_LIB +
+                    '/lib/ld-linux.so.3']
+else:
+  ARM_LINK_FLAGS = []
+
 # TODO: Sort these issues out properly but as a temporary solution for gcc 4.4
 # on linux we need these compiler flags to avoid crashes in the v8 test suite
 # and avoid dtoa.c strict aliasing issues
@@ -52,9 +64,10 @@ else:
     GCC_EXTRA_CCFLAGS = []
     GCC_DTOA_EXTRA_CCFLAGS = []
 
-ANDROID_FLAGS = ['-march=armv5te',
-                 '-mtune=xscale',
-                 '-msoft-float',
+ANDROID_FLAGS = ['-march=armv7-a',
+                 '-mtune=cortex-a8',
+                 '-mfloat-abi=softfp',
+                 '-mfpu=vfp',
                  '-fpic',
                  '-mthumb-interwork',
                  '-funwind-tables',
@@ -69,6 +82,8 @@ ANDROID_FLAGS = ['-march=armv5te',
                  '-fomit-frame-pointer',
                  '-fno-strict-aliasing',
                  '-finline-limit=64',
+                 '-DCAN_USE_VFP_INSTRUCTIONS=1',
+                 '-DCAN_USE_ARMV7_INSTRUCTIONS=1',
                  '-MD']
 
 ANDROID_INCLUDES = [ANDROID_TOP + '/bionic/libc/arch-arm/include',
@@ -96,14 +111,20 @@ ANDROID_LINKFLAGS = ['-nostdlib',
 LIBRARY_FLAGS = {
   'all': {
     'CPPPATH': [join(root_dir, 'src')],
-    'regexp:native': {
-        'CPPDEFINES': ['V8_NATIVE_REGEXP']
+    'regexp:interpreted': {
+      'CPPDEFINES': ['V8_INTERPRETED_REGEXP']
     },
     'mode:debug': {
       'CPPDEFINES': ['V8_ENABLE_CHECKS']
     },
+    'vmstate:on': {
+      'CPPDEFINES':   ['ENABLE_VMSTATE_TRACKING'],
+    },
+    'protectheap:on': {
+      'CPPDEFINES':   ['ENABLE_VMSTATE_TRACKING', 'ENABLE_HEAP_PROTECTION'],
+    },
     'profilingsupport:on': {
-      'CPPDEFINES':   ['ENABLE_LOGGING_AND_PROFILING'],
+      'CPPDEFINES':   ['ENABLE_VMSTATE_TRACKING', 'ENABLE_LOGGING_AND_PROFILING'],
     },
     'debuggersupport:on': {
       'CPPDEFINES':   ['ENABLE_DEBUGGER_SUPPORT'],
@@ -408,6 +429,9 @@ CCTEST_EXTRA_FLAGS = {
         'CPPDEFINES': ['SK_RELEASE', 'NDEBUG']
       }
     },
+    'arch:arm': {
+      'LINKFLAGS':   ARM_LINK_FLAGS
+    },
   },
   'msvc': {
     'all': {
@@ -471,6 +495,9 @@ SAMPLE_FLAGS = {
       'mode:release': {
         'CPPDEFINES': ['SK_RELEASE', 'NDEBUG']
       }
+    },
+    'arch:arm': {
+      'LINKFLAGS':   ARM_LINK_FLAGS
     },
     'arch:ia32': {
       'CCFLAGS':      ['-m32'],
@@ -668,6 +695,16 @@ SIMPLE_OPTIONS = {
     'values': ['static', 'shared'],
     'default': 'static',
     'help': 'the type of library to produce'
+  },
+  'vmstate': {
+    'values': ['on', 'off'],
+    'default': 'off',
+    'help': 'enable VM state tracking'
+  },
+  'protectheap': {
+    'values': ['on', 'off'],
+    'default': 'off',
+    'help': 'enable heap protection'
   },
   'profilingsupport': {
     'values': ['on', 'off'],

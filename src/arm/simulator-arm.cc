@@ -150,7 +150,11 @@ bool Debugger::GetValue(const char* desc, int32_t* value) {
     *value = GetRegisterValue(regnum);
     return true;
   } else {
-    return SScanF(desc, "%i", value) == 1;
+    if (strncmp(desc, "0x", 2) == 0) {
+      return SScanF(desc + 2, "%x", reinterpret_cast<uint32_t*>(value)) == 1;
+    } else {
+      return SScanF(desc, "%u", reinterpret_cast<uint32_t*>(value)) == 1;
+    }
   }
   return false;
 }
@@ -231,6 +235,7 @@ void Debugger::Debug() {
   char cmd[COMMAND_SIZE + 1];
   char arg1[ARG_SIZE + 1];
   char arg2[ARG_SIZE + 1];
+  char* argv[3] = { cmd, arg1, arg2 };
 
   // make sure to have a proper terminating character if reaching the limit
   cmd[COMMAND_SIZE] = 0;
@@ -258,7 +263,7 @@ void Debugger::Debug() {
     } else {
       // Use sscanf to parse the individual parts of the command line. At the
       // moment no command expects more than two parameters.
-      int args = SScanF(line,
+      int argc = SScanF(line,
                         "%" XSTR(COMMAND_SIZE) "s "
                         "%" XSTR(ARG_SIZE) "s "
                         "%" XSTR(ARG_SIZE) "s",
@@ -271,7 +276,7 @@ void Debugger::Debug() {
         // Leave the debugger shell.
         done = true;
       } else if ((strcmp(cmd, "p") == 0) || (strcmp(cmd, "print") == 0)) {
-        if (args == 2) {
+        if (argc == 2) {
           int32_t value;
           float svalue;
           double dvalue;
@@ -296,7 +301,7 @@ void Debugger::Debug() {
         }
       } else if ((strcmp(cmd, "po") == 0)
                  || (strcmp(cmd, "printobject") == 0)) {
-        if (args == 2) {
+        if (argc == 2) {
           int32_t value;
           if (GetValue(arg1, &value)) {
             Object* obj = reinterpret_cast<Object*>(value);
@@ -313,6 +318,37 @@ void Debugger::Debug() {
         } else {
           PrintF("printobject <value>\n");
         }
+      } else if (strcmp(cmd, "stack") == 0 || strcmp(cmd, "mem") == 0) {
+        int32_t* cur = NULL;
+        int32_t* end = NULL;
+        int next_arg = 1;
+
+        if (strcmp(cmd, "stack") == 0) {
+          cur = reinterpret_cast<int32_t*>(sim_->get_register(Simulator::sp));
+        } else {  // "mem"
+          int32_t value;
+          if (!GetValue(arg1, &value)) {
+            PrintF("%s unrecognized\n", arg1);
+            continue;
+          }
+          cur = reinterpret_cast<int32_t*>(value);
+          next_arg++;
+        }
+
+        int32_t words;
+        if (argc == next_arg) {
+          words = 10;
+        } else if (argc == next_arg + 1) {
+          if (!GetValue(argv[next_arg], &words)) {
+            words = 10;
+          }
+        }
+        end = cur + words;
+
+        while (cur < end) {
+          PrintF("  0x%08x:  0x%08x %10d\n", cur, *cur, *cur);
+          cur++;
+        }
       } else if (strcmp(cmd, "disasm") == 0) {
         disasm::NameConverter converter;
         disasm::Disassembler dasm(converter);
@@ -322,10 +358,10 @@ void Debugger::Debug() {
         byte* cur = NULL;
         byte* end = NULL;
 
-        if (args == 1) {
+        if (argc == 1) {
           cur = reinterpret_cast<byte*>(sim_->get_pc());
           end = cur + (10 * Instr::kInstrSize);
-        } else if (args == 2) {
+        } else if (argc == 2) {
           int32_t value;
           if (GetValue(arg1, &value)) {
             cur = reinterpret_cast<byte*>(value);
@@ -351,7 +387,7 @@ void Debugger::Debug() {
         v8::internal::OS::DebugBreak();
         PrintF("regaining control from gdb\n");
       } else if (strcmp(cmd, "break") == 0) {
-        if (args == 2) {
+        if (argc == 2) {
           int32_t value;
           if (GetValue(arg1, &value)) {
             if (!SetBreakpoint(reinterpret_cast<Instr*>(value))) {
@@ -401,6 +437,10 @@ void Debugger::Debug() {
         PrintF("  print an object from a register (alias 'po')\n");
         PrintF("flags\n");
         PrintF("  print flags\n");
+        PrintF("stack [<words>]\n");
+        PrintF("  dump stack content, default dump 10 words)\n");
+        PrintF("mem <address> [<words>]\n");
+        PrintF("  dump memory content, default dump 10 words)\n");
         PrintF("disasm [<instructions>]\n");
         PrintF("disasm [[<address>] <instructions>]\n");
         PrintF("  disassemble code, default is 10 instructions from pc\n");
@@ -414,7 +454,7 @@ void Debugger::Debug() {
         PrintF("  ignore the stop instruction at the current location");
         PrintF("  from now on\n");
         PrintF("trace (alias 't')\n");
-        PrintF("  toogle the tracing of all executed statements");
+        PrintF("  toogle the tracing of all executed statements\n");
       } else {
         PrintF("Unknown command: %s\n", cmd);
       }
@@ -1209,6 +1249,11 @@ void Simulator::SoftwareInterrupt(Instr* instr) {
   int swi = instr->SwiField();
   switch (swi) {
     case call_rt_redirected: {
+      // Check if stack is aligned. Error if not aligned is reported below to
+      // include information on the function called.
+      bool stack_aligned =
+          (get_register(sp)
+           & (::v8::internal::FLAG_sim_stack_alignment - 1)) == 0;
       Redirection* redirection = Redirection::FromSwiInstruction(instr);
       int32_t arg0 = get_register(r0);
       int32_t arg1 = get_register(r1);
@@ -1222,12 +1267,17 @@ void Simulator::SoftwareInterrupt(Instr* instr) {
             reinterpret_cast<intptr_t>(redirection->external_function());
         SimulatorRuntimeFPCall target =
             reinterpret_cast<SimulatorRuntimeFPCall>(external);
-        if (::v8::internal::FLAG_trace_sim) {
+        if (::v8::internal::FLAG_trace_sim || !stack_aligned) {
           double x, y;
           GetFpArgs(&x, &y);
-          PrintF("Call to host function at %p with args %f, %f\n",
+          PrintF("Call to host function at %p with args %f, %f",
                  FUNCTION_ADDR(target), x, y);
+          if (!stack_aligned) {
+            PrintF(" with unaligned stack %08x\n", get_register(sp));
+          }
+          PrintF("\n");
         }
+        CHECK(stack_aligned);
         double result = target(arg0, arg1, arg2, arg3);
         SetFpResult(result);
       } else {
@@ -1235,15 +1285,20 @@ void Simulator::SoftwareInterrupt(Instr* instr) {
             reinterpret_cast<int32_t>(redirection->external_function());
         SimulatorRuntimeCall target =
             reinterpret_cast<SimulatorRuntimeCall>(external);
-        if (::v8::internal::FLAG_trace_sim) {
+        if (::v8::internal::FLAG_trace_sim || !stack_aligned) {
           PrintF(
-              "Call to host function at %p with args %08x, %08x, %08x, %08x\n",
+              "Call to host function at %p with args %08x, %08x, %08x, %08x",
               FUNCTION_ADDR(target),
               arg0,
               arg1,
               arg2,
               arg3);
+          if (!stack_aligned) {
+            PrintF(" with unaligned stack %08x\n", get_register(sp));
+          }
+          PrintF("\n");
         }
+        CHECK(stack_aligned);
         int64_t result = target(arg0, arg1, arg2, arg3);
         int32_t lo_res = static_cast<int32_t>(result);
         int32_t hi_res = static_cast<int32_t>(result >> 32);
@@ -1465,6 +1520,50 @@ void Simulator::DecodeType01(Instr* instr) {
       }
       return;
     }
+  } else if ((type == 0) && instr->IsMiscType0()) {
+    if (instr->Bits(22, 21) == 1) {
+      int rm = instr->RmField();
+      switch (instr->Bits(7, 4)) {
+        case BX:
+          set_pc(get_register(rm));
+          break;
+        case BLX: {
+          uint32_t old_pc = get_pc();
+          set_pc(get_register(rm));
+          set_register(lr, old_pc + Instr::kInstrSize);
+          break;
+        }
+        case BKPT:
+          v8::internal::OS::DebugBreak();
+          break;
+        default:
+          UNIMPLEMENTED();
+      }
+    } else if (instr->Bits(22, 21) == 3) {
+      int rm = instr->RmField();
+      int rd = instr->RdField();
+      switch (instr->Bits(7, 4)) {
+        case CLZ: {
+          uint32_t bits = get_register(rm);
+          int leading_zeros = 0;
+          if (bits == 0) {
+            leading_zeros = 32;
+          } else {
+            while ((bits & 0x80000000u) == 0) {
+              bits <<= 1;
+              leading_zeros++;
+            }
+          }
+          set_register(rd, leading_zeros);
+          break;
+        }
+        default:
+          UNIMPLEMENTED();
+      }
+    } else {
+      PrintF("%08x\n", instr->InstructionBits());
+      UNIMPLEMENTED();
+    }
   } else {
     int rd = instr->RdField();
     int rn = instr->RnField();
@@ -1582,21 +1681,9 @@ void Simulator::DecodeType01(Instr* instr) {
           SetNZFlags(alu_out);
           SetCFlag(shifter_carry_out);
         } else {
-          ASSERT(type == 0);
-          int rm = instr->RmField();
-          switch (instr->Bits(7, 4)) {
-            case BX:
-              set_pc(get_register(rm));
-              break;
-            case BLX: {
-              uint32_t old_pc = get_pc();
-              set_pc(get_register(rm));
-              set_register(lr, old_pc + Instr::kInstrSize);
-              break;
-            }
-            default:
-              UNIMPLEMENTED();
-          }
+          // Other instructions matching this pattern are handled in the
+          // miscellaneous instructions part above.
+          UNREACHABLE();
         }
         break;
       }
@@ -1624,27 +1711,9 @@ void Simulator::DecodeType01(Instr* instr) {
           SetCFlag(!CarryFrom(rn_val, shifter_operand));
           SetVFlag(OverflowFrom(alu_out, rn_val, shifter_operand, true));
         } else {
-          ASSERT(type == 0);
-          int rm = instr->RmField();
-          int rd = instr->RdField();
-          switch (instr->Bits(7, 4)) {
-            case CLZ: {
-              uint32_t bits = get_register(rm);
-              int leading_zeros = 0;
-              if (bits == 0) {
-                leading_zeros = 32;
-              } else {
-                while ((bits & 0x80000000u) == 0) {
-                  bits <<= 1;
-                  leading_zeros++;
-                }
-              }
-              set_register(rd, leading_zeros);
-              break;
-            }
-            default:
-              UNIMPLEMENTED();
-          }
+          // Other instructions matching this pattern are handled in the
+          // miscellaneous instructions part above.
+          UNREACHABLE();
         }
         break;
       }
@@ -1798,6 +1867,7 @@ void Simulator::DecodeType3(Instr* instr) {
       break;
     }
     case 3: {
+      // UBFX.
       if (instr->HasW() && (instr->Bits(6, 4) == 0x5)) {
         uint32_t widthminus1 = static_cast<uint32_t>(instr->Bits(20, 16));
         uint32_t lsbit = static_cast<uint32_t>(instr->ShiftAmountField());
@@ -2469,4 +2539,4 @@ uintptr_t Simulator::PopAddress() {
 
 } }  // namespace assembler::arm
 
-#endif  // !defined(__arm__)
+#endif  // __arm__

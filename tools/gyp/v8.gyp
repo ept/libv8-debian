@@ -31,12 +31,12 @@
     'gcc_version%': 'unknown',
     'target_arch%': 'ia32',
     'v8_use_snapshot%': 'true',
-    'v8_regexp%': 'native',
   },
   'target_defaults': {
     'defines': [
       'ENABLE_LOGGING_AND_PROFILING',
       'ENABLE_DEBUGGER_SUPPORT',
+      'ENABLE_VMSTATE_TRACKING',
     ],
     'conditions': [
       ['target_arch=="arm"', {
@@ -47,13 +47,11 @@
       ['target_arch=="ia32"', {
         'defines': [
           'V8_TARGET_ARCH_IA32',
-          'V8_NATIVE_REGEXP',
         ],
       }],
       ['target_arch=="x64"', {
         'defines': [
           'V8_TARGET_ARCH_X64',
-          'V8_NATIVE_REGEXP',
         ],
       }],
     ],
@@ -74,10 +72,15 @@
             'LinkIncremental': '2',
           },
         },
+        'conditions': [
+         ['OS=="freebsd" or OS=="openbsd"', {
+           'cflags': [ '-I/usr/local/include' ],
+         }],
+       ],
       },
       'Release': {
         'conditions': [
-          ['OS=="linux"', {
+          ['OS=="linux" or OS=="freebsd" or OS=="openbsd"', {
             'cflags!': [
               '-O2',
               '-Os',
@@ -97,6 +100,9 @@
               }],
             ],
           }],
+         ['OS=="freebsd" or OS=="openbsd"', {
+           'cflags': [ '-I/usr/local/include' ],
+         }],
           ['OS=="mac"', {
             'xcode_settings': {
               'GCC_OPTIMIZATION_LEVEL': '3',  # -O3
@@ -234,7 +240,9 @@
         '../../src/char-predicates.h',
         '../../src/checks.cc',
         '../../src/checks.h',
+        '../../src/circular-queue-inl.h',
         '../../src/circular-queue.cc',
+        '../../src/circular-queue.h',
         '../../src/code-stubs.cc',
         '../../src/code-stubs.h',
         '../../src/code.h',
@@ -388,7 +396,7 @@
         '../../src/token.h',
         '../../src/top.cc',
         '../../src/top.h',
-	'../../src/type-info-inl.h',
+	'../../src/type-info.cc',
 	'../../src/type-info.h',
         '../../src/unicode-inl.h',
         '../../src/unicode.cc',
@@ -408,6 +416,9 @@
         '../../src/virtual-frame-inl.h',
         '../../src/virtual-frame.cc',
         '../../src/virtual-frame.h',
+        '../../src/vm-state-inl.h',
+        '../../src/vm-state.cc',
+        '../../src/vm-state.h',
         '../../src/zone-inl.h',
         '../../src/zone.cc',
         '../../src/zone.h',
@@ -537,6 +548,17 @@
             ]},
             'sources': [
               '../../src/platform-linux.cc',
+              '../../src/platform-posix.cc'
+            ],
+          }
+        ],
+        ['OS=="freebsd"', {
+            'link_settings': {
+              'libraries': [
+                '-L/usr/local/lib -lexecinfo',
+            ]},
+            'sources': [
+              '../../src/platform-freebsd.cc',
               '../../src/platform-posix.cc'
             ],
           }

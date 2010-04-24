@@ -855,12 +855,29 @@ class V8EXPORT String : public Primitive {
    * \param start The starting position within the string at which
    * copying begins.
    * \param length The number of bytes to copy from the string.
-   * \return The number of characters copied to the buffer
+   * \param nchars_ref The number of characters written, can be NULL.
+   * \param hints Various hints that might affect performance of this or
+   *    subsequent operations.
+   * \return The number of bytes copied to the buffer
    * excluding the NULL terminator.
    */
-  int Write(uint16_t* buffer, int start = 0, int length = -1) const;  // UTF-16
-  int WriteAscii(char* buffer, int start = 0, int length = -1) const;  // ASCII
-  int WriteUtf8(char* buffer, int length = -1) const; // UTF-8
+  enum WriteHints {
+    NO_HINTS = 0,
+    HINT_MANY_WRITES_EXPECTED = 1
+  };
+
+  int Write(uint16_t* buffer,
+            int start = 0,
+            int length = -1,
+            WriteHints hints = NO_HINTS) const;  // UTF-16
+  int WriteAscii(char* buffer,
+                 int start = 0,
+                 int length = -1,
+                 WriteHints hints = NO_HINTS) const;  // ASCII
+  int WriteUtf8(char* buffer,
+                int length = -1,
+                int* nchars_ref = NULL,
+                WriteHints hints = NO_HINTS) const; // UTF-8
 
   /**
    * A zero length string.

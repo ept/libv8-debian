@@ -2,6 +2,8 @@
 //
 // Tests of profiles generator and utilities.
 
+#ifdef ENABLE_LOGGING_AND_PROFILING
+
 #include "v8.h"
 #include "profile-generator-inl.h"
 #include "cctest.h"
@@ -10,27 +12,29 @@ namespace i = v8::internal;
 
 using i::CodeEntry;
 using i::CodeMap;
+using i::CpuProfile;
 using i::CpuProfilesCollection;
 using i::ProfileNode;
 using i::ProfileTree;
 using i::ProfileGenerator;
+using i::SampleRateCalculator;
 using i::TickSample;
 using i::Vector;
 
 
 TEST(ProfileNodeFindOrAddChild) {
-  ProfileNode node(NULL);
-  CodeEntry entry1(i::Logger::FUNCTION_TAG, "aaa", "", 0);
+  ProfileNode node(NULL, NULL);
+  CodeEntry entry1(i::Logger::FUNCTION_TAG, "", "aaa", "", 0);
   ProfileNode* childNode1 = node.FindOrAddChild(&entry1);
   CHECK_NE(NULL, childNode1);
   CHECK_EQ(childNode1, node.FindOrAddChild(&entry1));
-  CodeEntry entry2(i::Logger::FUNCTION_TAG, "bbb", "", 0);
+  CodeEntry entry2(i::Logger::FUNCTION_TAG, "", "bbb", "", 0);
   ProfileNode* childNode2 = node.FindOrAddChild(&entry2);
   CHECK_NE(NULL, childNode2);
   CHECK_NE(childNode1, childNode2);
   CHECK_EQ(childNode1, node.FindOrAddChild(&entry1));
   CHECK_EQ(childNode2, node.FindOrAddChild(&entry2));
-  CodeEntry entry3(i::Logger::FUNCTION_TAG, "ccc", "", 0);
+  CodeEntry entry3(i::Logger::FUNCTION_TAG, "", "ccc", "", 0);
   ProfileNode* childNode3 = node.FindOrAddChild(&entry3);
   CHECK_NE(NULL, childNode3);
   CHECK_NE(childNode1, childNode3);
@@ -45,7 +49,7 @@ namespace {
 
 class ProfileTreeTestHelper {
  public:
-  explicit ProfileTreeTestHelper(ProfileTree* tree)
+  explicit ProfileTreeTestHelper(const ProfileTree* tree)
       : tree_(tree) { }
 
   ProfileNode* Walk(CodeEntry* entry1,
@@ -65,15 +69,15 @@ class ProfileTreeTestHelper {
   }
 
  private:
-  ProfileTree* tree_;
+  const ProfileTree* tree_;
 };
 
 }  // namespace
 
 TEST(ProfileTreeAddPathFromStart) {
-  CodeEntry entry1(i::Logger::FUNCTION_TAG, "aaa", "", 0);
-  CodeEntry entry2(i::Logger::FUNCTION_TAG, "bbb", "", 0);
-  CodeEntry entry3(i::Logger::FUNCTION_TAG, "ccc", "", 0);
+  CodeEntry entry1(i::Logger::FUNCTION_TAG, "", "aaa", "", 0);
+  CodeEntry entry2(i::Logger::FUNCTION_TAG, "", "bbb", "", 0);
+  CodeEntry entry3(i::Logger::FUNCTION_TAG, "", "ccc", "", 0);
   ProfileTree tree;
   ProfileTreeTestHelper helper(&tree);
   CHECK_EQ(NULL, helper.Walk(&entry1));
@@ -138,9 +142,9 @@ TEST(ProfileTreeAddPathFromStart) {
 
 
 TEST(ProfileTreeAddPathFromEnd) {
-  CodeEntry entry1(i::Logger::FUNCTION_TAG, "aaa", "", 0);
-  CodeEntry entry2(i::Logger::FUNCTION_TAG, "bbb", "", 0);
-  CodeEntry entry3(i::Logger::FUNCTION_TAG, "ccc", "", 0);
+  CodeEntry entry1(i::Logger::FUNCTION_TAG, "", "aaa", "", 0);
+  CodeEntry entry2(i::Logger::FUNCTION_TAG, "", "bbb", "", 0);
+  CodeEntry entry3(i::Logger::FUNCTION_TAG, "", "ccc", "", 0);
   ProfileTree tree;
   ProfileTreeTestHelper helper(&tree);
   CHECK_EQ(NULL, helper.Walk(&entry1));
@@ -218,8 +222,8 @@ TEST(ProfileTreeCalculateTotalTicks) {
   CHECK_EQ(1, empty_tree.root()->total_ticks());
   CHECK_EQ(1, empty_tree.root()->self_ticks());
 
-  CodeEntry entry1(i::Logger::FUNCTION_TAG, "aaa", "", 0);
-  CodeEntry entry2(i::Logger::FUNCTION_TAG, "bbb", "", 0);
+  CodeEntry entry1(i::Logger::FUNCTION_TAG, "", "aaa", "", 0);
+  CodeEntry entry2(i::Logger::FUNCTION_TAG, "", "bbb", "", 0);
   CodeEntry* e1_path[] = {&entry1};
   Vector<CodeEntry*> e1_path_vec(
       e1_path, sizeof(e1_path) / sizeof(e1_path[0]));
@@ -257,7 +261,7 @@ TEST(ProfileTreeCalculateTotalTicks) {
   CodeEntry* e2_path[] = {&entry2};
   Vector<CodeEntry*> e2_path_vec(
       e2_path, sizeof(e2_path) / sizeof(e2_path[0]));
-  CodeEntry entry3(i::Logger::FUNCTION_TAG, "ccc", "", 0);
+  CodeEntry entry3(i::Logger::FUNCTION_TAG, "", "ccc", "", 0);
   CodeEntry* e3_path[] = {&entry3};
   Vector<CodeEntry*> e3_path_vec(
       e3_path, sizeof(e3_path) / sizeof(e3_path[0]));
@@ -318,10 +322,10 @@ static inline i::Address ToAddress(int n) {
 
 TEST(CodeMapAddCode) {
   CodeMap code_map;
-  CodeEntry entry1(i::Logger::FUNCTION_TAG, "aaa", "", 0);
-  CodeEntry entry2(i::Logger::FUNCTION_TAG, "bbb", "", 0);
-  CodeEntry entry3(i::Logger::FUNCTION_TAG, "ccc", "", 0);
-  CodeEntry entry4(i::Logger::FUNCTION_TAG, "ddd", "", 0);
+  CodeEntry entry1(i::Logger::FUNCTION_TAG, "", "aaa", "", 0);
+  CodeEntry entry2(i::Logger::FUNCTION_TAG, "", "bbb", "", 0);
+  CodeEntry entry3(i::Logger::FUNCTION_TAG, "", "ccc", "", 0);
+  CodeEntry entry4(i::Logger::FUNCTION_TAG, "", "ddd", "", 0);
   code_map.AddCode(ToAddress(0x1500), &entry1, 0x200);
   code_map.AddCode(ToAddress(0x1700), &entry2, 0x100);
   code_map.AddCode(ToAddress(0x1900), &entry3, 0x50);
@@ -348,8 +352,8 @@ TEST(CodeMapAddCode) {
 
 TEST(CodeMapMoveAndDeleteCode) {
   CodeMap code_map;
-  CodeEntry entry1(i::Logger::FUNCTION_TAG, "aaa", "", 0);
-  CodeEntry entry2(i::Logger::FUNCTION_TAG, "bbb", "", 0);
+  CodeEntry entry1(i::Logger::FUNCTION_TAG, "", "aaa", "", 0);
+  CodeEntry entry2(i::Logger::FUNCTION_TAG, "", "bbb", "", 0);
   code_map.AddCode(ToAddress(0x1500), &entry1, 0x200);
   code_map.AddCode(ToAddress(0x1700), &entry2, 0x100);
   CHECK_EQ(&entry1, code_map.FindEntry(ToAddress(0x1500)));
@@ -364,9 +368,29 @@ TEST(CodeMapMoveAndDeleteCode) {
 }
 
 
+namespace {
+
+class TestSetup {
+ public:
+  TestSetup()
+      : old_flag_prof_browser_mode_(i::FLAG_prof_browser_mode) {
+    i::FLAG_prof_browser_mode = false;
+  }
+
+  ~TestSetup() {
+    i::FLAG_prof_browser_mode = old_flag_prof_browser_mode_;
+  }
+
+ private:
+  bool old_flag_prof_browser_mode_;
+};
+
+}  // namespace
+
 TEST(RecordTickSample) {
+  TestSetup test_setup;
   CpuProfilesCollection profiles;
-  profiles.AddProfile(0);
+  profiles.StartProfiling("", 1);
   ProfileGenerator generator(&profiles);
   CodeEntry* entry1 = generator.NewCodeEntry(i::Logger::FUNCTION_TAG, "aaa");
   CodeEntry* entry2 = generator.NewCodeEntry(i::Logger::FUNCTION_TAG, "bbb");
@@ -374,11 +398,6 @@ TEST(RecordTickSample) {
   generator.code_map()->AddCode(ToAddress(0x1500), entry1, 0x200);
   generator.code_map()->AddCode(ToAddress(0x1700), entry2, 0x100);
   generator.code_map()->AddCode(ToAddress(0x1900), entry3, 0x50);
-
-  ProfileTreeTestHelper top_down_test_helper(profiles.profile()->top_down());
-  CHECK_EQ(NULL, top_down_test_helper.Walk(entry1));
-  CHECK_EQ(NULL, top_down_test_helper.Walk(entry2));
-  CHECK_EQ(NULL, top_down_test_helper.Walk(entry3));
 
   // We are building the following calls tree:
   //      -> aaa         - sample1
@@ -406,6 +425,11 @@ TEST(RecordTickSample) {
   sample3.frames_count = 2;
   generator.RecordTickSample(sample3);
 
+  CpuProfile* profile = profiles.StopProfiling("", 1);
+  CHECK_NE(NULL, profile);
+  ProfileTreeTestHelper top_down_test_helper(profile->top_down());
+  CHECK_EQ(NULL, top_down_test_helper.Walk(entry2));
+  CHECK_EQ(NULL, top_down_test_helper.Walk(entry3));
   ProfileNode* node1 = top_down_test_helper.Walk(entry1);
   CHECK_NE(NULL, node1);
   CHECK_EQ(entry1, node1->entry());
@@ -419,3 +443,55 @@ TEST(RecordTickSample) {
   CHECK_NE(NULL, node4);
   CHECK_EQ(entry1, node4->entry());
 }
+
+
+TEST(SampleRateCalculator) {
+  const double kSamplingIntervalMs = i::Logger::kSamplingIntervalMs;
+
+  // Verify that ticking exactly in query intervals results in the
+  // initial sampling interval.
+  double time = 0.0;
+  SampleRateCalculator calc1;
+  CHECK_EQ(kSamplingIntervalMs, calc1.ticks_per_ms());
+  calc1.UpdateMeasurements(time);
+  CHECK_EQ(kSamplingIntervalMs, calc1.ticks_per_ms());
+  time += SampleRateCalculator::kWallTimeQueryIntervalMs;
+  calc1.UpdateMeasurements(time);
+  CHECK_EQ(kSamplingIntervalMs, calc1.ticks_per_ms());
+  time += SampleRateCalculator::kWallTimeQueryIntervalMs;
+  calc1.UpdateMeasurements(time);
+  CHECK_EQ(kSamplingIntervalMs, calc1.ticks_per_ms());
+  time += SampleRateCalculator::kWallTimeQueryIntervalMs;
+  calc1.UpdateMeasurements(time);
+  CHECK_EQ(kSamplingIntervalMs, calc1.ticks_per_ms());
+
+  SampleRateCalculator calc2;
+  time = 0.0;
+  CHECK_EQ(kSamplingIntervalMs, calc2.ticks_per_ms());
+  calc2.UpdateMeasurements(time);
+  CHECK_EQ(kSamplingIntervalMs, calc2.ticks_per_ms());
+  time += SampleRateCalculator::kWallTimeQueryIntervalMs * 0.5;
+  calc2.UpdateMeasurements(time);
+  // (1.0 + 2.0) / 2
+  CHECK_EQ(kSamplingIntervalMs * 1.5, calc2.ticks_per_ms());
+  time += SampleRateCalculator::kWallTimeQueryIntervalMs * 0.75;
+  calc2.UpdateMeasurements(time);
+  // (1.0 + 2.0 + 2.0) / 3
+  CHECK_EQ(kSamplingIntervalMs * 1.66666, calc2.ticks_per_ms());
+
+  SampleRateCalculator calc3;
+  time = 0.0;
+  CHECK_EQ(kSamplingIntervalMs, calc3.ticks_per_ms());
+  calc3.UpdateMeasurements(time);
+  CHECK_EQ(kSamplingIntervalMs, calc3.ticks_per_ms());
+  time += SampleRateCalculator::kWallTimeQueryIntervalMs * 2;
+  calc3.UpdateMeasurements(time);
+  // (1.0 + 0.5) / 2
+  CHECK_EQ(kSamplingIntervalMs * 0.75, calc3.ticks_per_ms());
+  time += SampleRateCalculator::kWallTimeQueryIntervalMs * 1.5;
+  calc3.UpdateMeasurements(time);
+  // (1.0 + 0.5 + 0.5) / 3
+  CHECK_EQ(kSamplingIntervalMs * 0.66666, calc3.ticks_per_ms());
+}
+
+#endif  // ENABLE_LOGGING_AND_PROFILING

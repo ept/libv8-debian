@@ -224,7 +224,8 @@ void IC::Clear(Address address) {
     case Code::STORE_IC: return StoreIC::Clear(address, target);
     case Code::KEYED_STORE_IC: return KeyedStoreIC::Clear(address, target);
     case Code::CALL_IC: return CallIC::Clear(address, target);
-    case Code::BINARY_OP_IC: return BinaryOpIC::Clear(address, target);
+    case Code::BINARY_OP_IC: return;  // Clearing these is tricky and does not
+                                      // make any performance difference.
     default: UNREACHABLE();
   }
 }
@@ -693,8 +694,8 @@ void LoadIC::UpdateCaches(LookupResult* lookup,
                           State state,
                           Handle<Object> object,
                           Handle<String> name) {
-  // Bail out if we didn't find a result.
-  if (!lookup->IsProperty() || !lookup->IsCacheable()) return;
+  // Bail out if the result is not cacheable.
+  if (!lookup->IsCacheable()) return;
 
   // Loading properties from values is not common, so don't try to
   // deal with non-JS objects here.
@@ -708,6 +709,9 @@ void LoadIC::UpdateCaches(LookupResult* lookup,
     // Set the target to the pre monomorphic stub to delay
     // setting the monomorphic state.
     code = pre_monomorphic_stub();
+  } else if (!lookup->IsProperty()) {
+    // Nonexistent property. The result is undefined.
+    code = StubCache::ComputeLoadNonexistent(*name, *receiver);
   } else {
     // Compute monomorphic stub.
     switch (lookup->type()) {
@@ -1404,25 +1408,6 @@ void BinaryOpIC::patch(Code* code) {
 }
 
 
-void BinaryOpIC::Clear(Address address, Code* target) {
-  if (target->ic_state() == UNINITIALIZED) return;
-
-  // At the end of a fast case stub there should be a reference to
-  // a corresponding UNINITIALIZED stub, so look for the last reloc info item.
-  RelocInfo* rinfo = NULL;
-  for (RelocIterator it(target, RelocInfo::kCodeTargetMask);
-       !it.done(); it.next()) {
-    rinfo = it.rinfo();
-  }
-
-  ASSERT(rinfo != NULL);
-  Code* uninit_stub = Code::GetCodeFromTargetAddress(rinfo->target_address());
-  ASSERT(uninit_stub->ic_state() == UNINITIALIZED &&
-         uninit_stub->kind() == Code::BINARY_OP_IC);
-  SetTargetAtAddress(address, uninit_stub);
-}
-
-
 const char* BinaryOpIC::GetName(TypeInfo type_info) {
   switch (type_info) {
     case DEFAULT: return "Default";
@@ -1451,8 +1436,9 @@ BinaryOpIC::State BinaryOpIC::ToState(TypeInfo type_info) {
 
 BinaryOpIC::TypeInfo BinaryOpIC::GetTypeInfo(Object* left,
                                              Object* right) {
-  // Patching is never requested for the two smis.
-  ASSERT(!left->IsSmi() || !right->IsSmi());
+  if (left->IsSmi() && right->IsSmi()) {
+    return GENERIC;
+  }
 
   if (left->IsNumber() && right->IsNumber()) {
     return HEAP_NUMBERS;

@@ -104,6 +104,7 @@ namespace internal {
   F(IsNonNegativeSmi, 1, 1)                                                  \
   F(IsArray, 1, 1)                                                           \
   F(IsRegExp, 1, 1)                                                          \
+  F(CallFunction, -1 /* receiver + n args + function */, 1)                  \
   F(IsConstructCall, 0, 1)                                                   \
   F(ArgumentsLength, 0, 1)                                                   \
   F(Arguments, 1, 1)                                                         \
@@ -114,7 +115,7 @@ namespace internal {
   F(CharFromCode, 1, 1)                                                      \
   F(ObjectEquals, 2, 1)                                                      \
   F(Log, 3, 1)                                                               \
-  F(RandomPositiveSmi, 0, 1)                                                 \
+  F(RandomHeapNumber, 0, 1)                                          \
   F(IsObject, 1, 1)                                                          \
   F(IsFunction, 1, 1)                                                        \
   F(IsUndetectableObject, 1, 1)                                              \
@@ -122,6 +123,8 @@ namespace internal {
   F(SubString, 3, 1)                                                         \
   F(StringCompare, 2, 1)                                                     \
   F(RegExpExec, 4, 1)                                                        \
+  F(RegExpConstructResult, 3, 1)                                             \
+  F(GetFromCache, 2, 1)                                                      \
   F(NumberToString, 1, 1)                                                    \
   F(MathPow, 2, 1)                                                           \
   F(MathSin, 1, 1)                                                           \
@@ -229,7 +232,12 @@ class DeferredCode: public ZoneObject {
   Label entry_label_;
   Label exit_label_;
 
-  int registers_[RegisterAllocator::kNumRegisters];
+  // C++ doesn't allow zero length arrays, so we make the array length 1 even
+  // if we don't need it.
+  static const int kRegistersArrayLength =
+      (RegisterAllocator::kNumRegisters == 0) ?
+          1 : RegisterAllocator::kNumRegisters;
+  int registers_[kRegistersArrayLength];
 
 #ifdef DEBUG
   const char* comment_;
@@ -417,7 +425,8 @@ class CEntryStub : public CodeStub {
                     Label* throw_termination_exception,
                     Label* throw_out_of_memory_exception,
                     bool do_gc,
-                    bool always_allocate_scope);
+                    bool always_allocate_scope,
+                    int alignment_skew = 0);
   void GenerateThrowTOS(MacroAssembler* masm);
   void GenerateThrowUncatchable(MacroAssembler* masm,
                                 UncatchableExceptionType type);
@@ -498,7 +507,6 @@ class JSConstructEntryStub : public JSEntryStub {
 class ArgumentsAccessStub: public CodeStub {
  public:
   enum Type {
-    READ_LENGTH,
     READ_ELEMENT,
     NEW_OBJECT
   };
@@ -512,7 +520,6 @@ class ArgumentsAccessStub: public CodeStub {
   int MinorKey() { return type_; }
 
   void Generate(MacroAssembler* masm);
-  void GenerateReadLength(MacroAssembler* masm);
   void GenerateReadElement(MacroAssembler* masm);
   void GenerateNewObject(MacroAssembler* masm);
 

@@ -329,10 +329,15 @@ void ExternalReferenceTable::PopulateTable() {
       RUNTIME_ENTRY,
       1,
       "Runtime::PerformGC");
-  Add(ExternalReference::random_positive_smi_function().address(),
+  Add(ExternalReference::fill_heap_number_with_random_function().address(),
       RUNTIME_ENTRY,
       2,
-      "V8::RandomPositiveSmi");
+      "V8::FillHeapNumberWithRandom");
+
+  Add(ExternalReference::random_uint32_function().address(),
+      RUNTIME_ENTRY,
+      3,
+      "V8::Random");
 
   // Miscellaneous
   Add(ExternalReference::the_hole_value_location().address(),
@@ -417,7 +422,7 @@ void ExternalReferenceTable::PopulateTable() {
       UNCLASSIFIED,
       21,
       "compile_array_push");
-#ifdef V8_NATIVE_REGEXP
+#ifndef V8_INTERPRETED_REGEXP
   Add(ExternalReference::re_case_insensitive_compare_uc16().address(),
       UNCLASSIFIED,
       22,
@@ -434,7 +439,7 @@ void ExternalReferenceTable::PopulateTable() {
       UNCLASSIFIED,
       25,
       "NativeRegExpMacroAssembler::word_character_map");
-#endif
+#endif  // V8_INTERPRETED_REGEXP
   // Keyed lookup cache.
   Add(ExternalReference::keyed_lookup_cache_keys().address(),
       UNCLASSIFIED,

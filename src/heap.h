@@ -89,7 +89,6 @@ class ZoneScopeInfo;
   V(Map, code_map, CodeMap)                                                    \
   V(Map, oddball_map, OddballMap)                                              \
   V(Map, global_property_cell_map, GlobalPropertyCellMap)                      \
-  V(Map, boilerplate_function_map, BoilerplateFunctionMap)                     \
   V(Map, shared_function_info_map, SharedFunctionInfoMap)                      \
   V(Map, proxy_map, ProxyMap)                                                  \
   V(Object, nan_value, NanValue)                                               \
@@ -111,7 +110,7 @@ class ZoneScopeInfo;
   V(Script, empty_script, EmptyScript)                                         \
   V(Smi, real_stack_limit, RealStackLimit)                                     \
 
-#if V8_TARGET_ARCH_ARM && V8_NATIVE_REGEXP
+#if V8_TARGET_ARCH_ARM && !V8_INTERPRETED_REGEXP
 #define STRONG_ROOT_LIST(V)                                                    \
   UNCONDITIONAL_STRONG_ROOT_LIST(V)                                            \
   V(Code, re_c_entry_code, RegExpCEntryCode)
@@ -149,6 +148,13 @@ class ZoneScopeInfo;
   V(number_symbol, "number")                                             \
   V(Number_symbol, "Number")                                             \
   V(RegExp_symbol, "RegExp")                                             \
+  V(source_symbol, "source")                                             \
+  V(global_symbol, "global")                                             \
+  V(ignore_case_symbol, "ignoreCase")                                    \
+  V(multiline_symbol, "multiline")                                       \
+  V(input_symbol, "input")                                               \
+  V(index_symbol, "index")                                               \
+  V(last_index_symbol, "lastIndex")                                      \
   V(object_symbol, "object")                                             \
   V(prototype_symbol, "prototype")                                       \
   V(string_symbol, "string")                                             \
@@ -193,6 +199,9 @@ class ZoneScopeInfo;
 // Forward declaration of the GCTracer class.
 class GCTracer;
 class HeapStats;
+
+
+typedef String* (*ExternalStringTableUpdaterCallback)(Object** pointer);
 
 
 // The all static Heap captures the interface to the global object heap.
@@ -474,7 +483,9 @@ class Heap : public AllStatic {
   // Returns Failure::RetryAfterGC(requested_bytes, space) if the allocation
   // failed.
   // Please note this does not perform a garbage collection.
-  static Object* AllocateFixedArrayWithHoles(int length);
+  static Object* AllocateFixedArrayWithHoles(
+      int length,
+      PretenureFlag pretenure = NOT_TENURED);
 
   // AllocateHashTable is identical to AllocateFixedArray except
   // that the resulting object has hash_table_map as map.
@@ -886,8 +897,10 @@ class Heap : public AllStatic {
   // Returns the adjusted value.
   static inline int AdjustAmountOfExternalAllocatedMemory(int change_in_bytes);
 
-  // Allocate unitialized fixed array (pretenure == NON_TENURE).
+  // Allocate uninitialized fixed array.
   static Object* AllocateRawFixedArray(int length);
+  static Object* AllocateRawFixedArray(int length,
+                                       PretenureFlag pretenure);
 
   // True if we have reached the allocation limit in the old generation that
   // should force the next GC (caused normally) to be a full one.
@@ -930,13 +943,38 @@ class Heap : public AllStatic {
     kRootListLength
   };
 
-  static Object* NumberToString(Object* number);
+  static Object* NumberToString(Object* number,
+                                bool check_number_string_cache = true);
 
   static Map* MapForExternalArrayType(ExternalArrayType array_type);
   static RootListIndex RootIndexForExternalArrayType(
       ExternalArrayType array_type);
 
   static void RecordStats(HeapStats* stats);
+
+  // Copy block of memory from src to dst. Size of block should be aligned
+  // by pointer size.
+  static inline void CopyBlock(Object** dst, Object** src, int byte_size);
+
+  // Optimized version of memmove for blocks with pointer size aligned sizes and
+  // pointer size aligned addresses.
+  static inline void MoveBlock(Object** dst, Object** src, int byte_size);
+
+  // Check new space expansion criteria and expand semispaces if it was hit.
+  static void CheckNewSpaceExpansionCriteria();
+
+  static inline void IncrementYoungSurvivorsCounter(int survived) {
+    survived_since_last_expansion_ += survived;
+  }
+
+  static void UpdateNewSpaceReferencesInExternalStringTable(
+      ExternalStringTableUpdaterCallback updater_func);
+
+  // Helper function that governs the promotion policy from new space to
+  // old.  If the object's old address lies below the new space's age
+  // mark or if we've already filled the bottom 1/16th of the to space,
+  // we try to promote this object.
+  static inline bool ShouldBePromoted(Address old_address, int object_size);
 
   static int MaxObjectSizeInNewSpace() { return kMaxObjectSizeInNewSpace; }
 
@@ -1125,16 +1163,17 @@ class Heap : public AllStatic {
 
   static void CreateFixedStubs();
 
-  static Object* CreateOddball(Map* map,
-                               const char* to_string,
-                               Object* to_number);
+  static Object* CreateOddball(const char* to_string, Object* to_number);
 
   // Allocate empty fixed array.
   static Object* AllocateEmptyFixedArray();
 
   // Performs a minor collection in new generation.
   static void Scavenge();
-  static void ScavengeExternalStringTable();
+
+  static String* UpdateNewSpaceReferenceInExternalStringTableEntry(
+      Object** pointer);
+
   static Address DoScavenge(ObjectVisitor* scavenge_visitor,
                             Address new_space_front);
 
@@ -1152,11 +1191,6 @@ class Heap : public AllStatic {
                                           HeapObject* target,
                                           int size);
 
-  // Helper function that governs the promotion policy from new space to
-  // old.  If the object's old address lies below the new space's age
-  // mark or if we've already filled the bottom 1/16th of the to space,
-  // we try to promote this object.
-  static inline bool ShouldBePromoted(Address old_address, int object_size);
 #if defined(DEBUG) || defined(ENABLE_LOGGING_AND_PROFILING)
   // Record the copy of an object in the NewSpace's statistics.
   static void RecordCopiedObject(HeapObject* obj);
@@ -1174,9 +1208,6 @@ class Heap : public AllStatic {
 
   // Slow part of scavenge object.
   static void ScavengeObjectSlow(HeapObject** p, HeapObject* object);
-
-  // Copy memory from src to dst.
-  static inline void CopyBlock(Object** dst, Object** src, int byte_size);
 
   // Initializes a function with a shared part and prototype.
   // Returns the function.
