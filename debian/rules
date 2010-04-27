@@ -15,7 +15,7 @@ DEBIAN_UPSTREAM_VERSION	:= $(shell echo $(DEBIAN_VERSION) | sed 's/^\(.*\)-[^-]*
 DEBIAN_UPSTREAM_BRANCH	:= $(shell echo $(DEBIAN_UPSTREAM_VERSION) | sed 's/^\([^\.]*\.[^.+~]*\).*$$/\1/')
 DEBIAN_REVISION		:= $(shell echo $(DEBIAN_VERSION) | sed 's/^.*r\([^-]*\).*/\1/')
 
-SONAME			:= 2.2.4
+SONAME			:= 2.2.5
 
 SRC_DIR			:= $(CURDIR)
 DEB_BUILDDIR		:= $(SRC_DIR)
