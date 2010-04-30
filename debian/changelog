@@ -1,4 +1,4 @@
-libv8 (2.2.5-1) unstable; urgency=low
+libv8 (2.2.6-1) unstable; urgency=low
 
   * New upstream release, previous procedure followed.
   * Switch to dpkg-source 3.0 (quilt) format.
