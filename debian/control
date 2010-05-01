@@ -1,6 +1,7 @@
 Source: libv8
 Priority: extra
 Maintainer: Antonio Radici <antonio@dyne.org>
+Uploaders: Jérémy Lal <kapouer@melix.org>
 Build-Depends: debhelper (>= 7), pkg-config, scons, cdbs (>= 0.4.73)
 Standards-Version: 3.8.4
 Section: libs

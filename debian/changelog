@@ -1,10 +1,16 @@
 libv8 (2.2.6-1) unstable; urgency=low
 
+  [ Jérémy Lal ]
   * New upstream release, previous procedure followed.
   * Switch to dpkg-source 3.0 (quilt) format.
   * Uses scons.mk from cdbs.
 
- -- Jérémy Lal <kapouer@melix.org>  Tue, 27 Apr 2010 13:03:45 +0200
+  [ Antonio Radici ]
+  * debian/control: added Jérémy to the Uploaders
+  * debian/patches: 
+    + added mips64 to 0003-platform-detection-x86_64-and-mips.patch
+
+ -- Antonio Radici <antonio@dyne.org>  Sat, 01 May 2010 20:04:11 +0100
 
 libv8 (2.1.10-1) unstable; urgency=low
 

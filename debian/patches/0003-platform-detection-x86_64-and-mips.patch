@@ -3,14 +3,22 @@ http://code.google.com/p/v8/issues/detail?id=429
 
 --- a/tools/utils.py
 +++ b/tools/utils.py
-@@ -73,6 +73,10 @@
+@@ -67,12 +67,16 @@
+   id = platform.machine()
+   if id.startswith('arm'):
+     return 'arm'
+-  elif (not id) or (not re.match('(x|i[3-6])86', id) is None):
+-    return 'ia32'
+   elif id == 'i86pc':
      return 'ia32'
    elif id == 'amd64':
      return 'ia32'
 +  elif id == 'x86_64':
 +    return 'x64'
-+  elif id == 'mips':
++  elif id == 'mips64':
 +    return 'mips'
++  elif (not id) or (not re.match('(x|i[3-6])86', id) is None):
++    return 'ia32'
    else:
      return None
  
