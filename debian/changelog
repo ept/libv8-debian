@@ -1,3 +1,9 @@
+libv8 (2.2.7-1) unstable; urgency=low
+
+  *  New upstream release, followed the procedure of README.source to update
+
+ -- Antonio Radici <antonio@dyne.org>  Sun, 09 May 2010 21:29:33 +0100
+
 libv8 (2.2.6-1) unstable; urgency=low
 
   [ Jérémy Lal ]
