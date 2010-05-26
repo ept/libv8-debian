@@ -225,7 +225,7 @@ function ObjectHasOwnProperty(V) {
 
 // ECMA-262 - 15.2.4.6
 function ObjectIsPrototypeOf(V) {
-  if (!IS_OBJECT(V) && !IS_FUNCTION(V) && !IS_UNDETECTABLE(V)) return false;
+  if (!IS_SPEC_OBJECT_OR_NULL(V) && !IS_UNDETECTABLE(V)) return false;
   return %IsInPrototypeChain(this, V);
 }
 
@@ -233,7 +233,7 @@ function ObjectIsPrototypeOf(V) {
 // ECMA-262 - 15.2.4.6
 function ObjectPropertyIsEnumerable(V) {
   if (this == null) return false;
-  if (!IS_OBJECT(this) && !IS_FUNCTION(this)) return false;
+  if (!IS_SPEC_OBJECT_OR_NULL(this)) return false;
   return %IsPropertyEnumerable(this, ToString(V));
 }
 
@@ -279,7 +279,7 @@ function ObjectLookupSetter(name) {
 
 
 function ObjectKeys(obj) {
-  if ((!IS_OBJECT(obj) || IS_NULL_OR_UNDEFINED(obj)) && !IS_FUNCTION(obj) &&
+  if ((!IS_SPEC_OBJECT_OR_NULL(obj) || IS_NULL_OR_UNDEFINED(obj)) &&
       !IS_UNDETECTABLE(obj))
     throw MakeTypeError("obj_ctor_property_non_object", ["keys"]);
   return %LocalKeys(obj);
@@ -329,7 +329,7 @@ function FromPropertyDescriptor(desc) {
 
 // ES5 8.10.5.
 function ToPropertyDescriptor(obj) {
-  if (!IS_OBJECT(obj)) {
+  if (!IS_SPEC_OBJECT_OR_NULL(obj)) {
     throw MakeTypeError("property_desc_object", [obj]);
   }
   var desc = new PropertyDescriptor();
@@ -431,6 +431,11 @@ PropertyDescriptor.prototype.setWritable = function(writable) {
 
 PropertyDescriptor.prototype.isWritable = function() {
   return this.writable_;
+}
+
+
+PropertyDescriptor.prototype.hasWritable = function() {
+  return this.hasWritable_;
 }
 
 
@@ -537,6 +542,22 @@ function DefineOwnProperty(obj, p, desc, should_throw) {
     throw MakeTypeError("define_disallowed", ["defineProperty"]);
 
   if (!IS_UNDEFINED(current) && !current.isConfigurable()) {
+      // Step 5 and 6
+     if ((!desc.hasEnumerable() || 
+          SameValue(desc.isEnumerable() && current.isEnumerable())) &&
+         (!desc.hasConfigurable() || 
+          SameValue(desc.isConfigurable(), current.isConfigurable())) &&
+         (!desc.hasWritable() || 
+          SameValue(desc.isWritable(), current.isWritable())) &&
+         (!desc.hasValue() ||
+          SameValue(desc.getValue(), current.getValue())) &&
+         (!desc.hasGetter() ||
+          SameValue(desc.getGet(), current.getGet())) &&
+         (!desc.hasSetter() ||
+          SameValue(desc.getSet(), current.getSet()))) {
+       return true;
+     }
+
     // Step 7
     if (desc.isConfigurable() ||  desc.isEnumerable() != current.isEnumerable())
       throw MakeTypeError("redefine_disallowed", ["defineProperty"]);
@@ -583,7 +604,13 @@ function DefineOwnProperty(obj, p, desc, should_throw) {
     flag |= DONT_DELETE;
 
   if (IsDataDescriptor(desc) || IsGenericDescriptor(desc)) {
-    flag |= desc.isWritable() ? 0 : READ_ONLY;
+    if (desc.hasWritable()) {
+      flag |= desc.isWritable() ? 0 : READ_ONLY;
+    } else if (!IS_UNDEFINED(current)) {
+      flag |= current.isWritable() ? 0 : READ_ONLY;
+    } else {
+      flag |= READ_ONLY;
+    }
     %DefineOrRedefineDataProperty(obj, p, desc.getValue(), flag);
   } else {
     if (desc.hasGetter() && IS_FUNCTION(desc.getGet())) {
@@ -599,7 +626,7 @@ function DefineOwnProperty(obj, p, desc, should_throw) {
 
 // ES5 section 15.2.3.2.
 function ObjectGetPrototypeOf(obj) {
-  if ((!IS_OBJECT(obj) || IS_NULL_OR_UNDEFINED(obj)) && !IS_FUNCTION(obj) &&
+  if ((!IS_SPEC_OBJECT_OR_NULL(obj) || IS_NULL_OR_UNDEFINED(obj)) &&
       !IS_UNDETECTABLE(obj))
     throw MakeTypeError("obj_ctor_property_non_object", ["getPrototypeOf"]);
   return obj.__proto__;
@@ -608,7 +635,7 @@ function ObjectGetPrototypeOf(obj) {
 
 // ES5 section 15.2.3.3
 function ObjectGetOwnPropertyDescriptor(obj, p) {
-  if ((!IS_OBJECT(obj) || IS_NULL_OR_UNDEFINED(obj)) && !IS_FUNCTION(obj) &&
+  if ((!IS_SPEC_OBJECT_OR_NULL(obj) || IS_NULL_OR_UNDEFINED(obj)) &&
       !IS_UNDETECTABLE(obj))
     throw MakeTypeError("obj_ctor_property_non_object", ["getOwnPropertyDescriptor"]);
   var desc = GetOwnProperty(obj, p);
@@ -618,7 +645,7 @@ function ObjectGetOwnPropertyDescriptor(obj, p) {
 
 // ES5 section 15.2.3.4.
 function ObjectGetOwnPropertyNames(obj) {
-  if ((!IS_OBJECT(obj) || IS_NULL_OR_UNDEFINED(obj)) && !IS_FUNCTION(obj) &&
+  if ((!IS_SPEC_OBJECT_OR_NULL(obj) || IS_NULL_OR_UNDEFINED(obj)) &&
       !IS_UNDETECTABLE(obj))
     throw MakeTypeError("obj_ctor_property_non_object", ["getOwnPropertyNames"]);
 
@@ -660,7 +687,7 @@ function ObjectGetOwnPropertyNames(obj) {
 
 // ES5 section 15.2.3.5.
 function ObjectCreate(proto, properties) {
-  if (!IS_OBJECT(proto) && !IS_NULL(proto)) {
+  if (!IS_SPEC_OBJECT_OR_NULL(proto)) {
     throw MakeTypeError("proto_object_or_null", [proto]);
   }
   var obj = new $Object();
@@ -672,9 +699,10 @@ function ObjectCreate(proto, properties) {
 
 // ES5 section 15.2.3.6.
 function ObjectDefineProperty(obj, p, attributes) {
-  if ((!IS_OBJECT(obj) || IS_NULL_OR_UNDEFINED(obj)) && !IS_FUNCTION(obj) &&
-      !IS_UNDETECTABLE(obj))
+  if ((!IS_SPEC_OBJECT_OR_NULL(obj) || IS_NULL_OR_UNDEFINED(obj)) &&
+      !IS_UNDETECTABLE(obj)) {
     throw MakeTypeError("obj_ctor_property_non_object", ["defineProperty"]);
+  }
   var name = ToString(p);
   var desc = ToPropertyDescriptor(attributes);
   DefineOwnProperty(obj, name, desc, true);
@@ -684,7 +712,7 @@ function ObjectDefineProperty(obj, p, attributes) {
 
 // ES5 section 15.2.3.7.
 function ObjectDefineProperties(obj, properties) {
- if ((!IS_OBJECT(obj) || IS_NULL_OR_UNDEFINED(obj)) && !IS_FUNCTION(obj) &&
+ if ((!IS_SPEC_OBJECT_OR_NULL(obj) || IS_NULL_OR_UNDEFINED(obj)) &&
      !IS_UNDETECTABLE(obj))
     throw MakeTypeError("obj_ctor_property_non_object", ["defineProperties"]);
   var props = ToObject(properties);

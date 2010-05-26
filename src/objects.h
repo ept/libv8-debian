@@ -606,6 +606,7 @@ class Object BASE_EMBEDDED {
   inline bool IsHashTable();
   inline bool IsDictionary();
   inline bool IsSymbolTable();
+  inline bool IsJSFunctionResultCache();
   inline bool IsCompilationCacheTable();
   inline bool IsCodeCacheHashTable();
   inline bool IsMapCache();
@@ -1116,6 +1117,8 @@ class HeapNumber: public HeapObject {
   static const uint32_t kSignMask = 0x80000000u;
   static const uint32_t kExponentMask = 0x7ff00000u;
   static const uint32_t kMantissaMask = 0xfffffu;
+  static const int kMantissaBits = 52;
+  static const int KExponentBits = 11;
   static const int kExponentBias = 1023;
   static const int kExponentShift = 20;
   static const int kMantissaBitsInTopWord = 20;
@@ -1245,6 +1248,8 @@ class JSObject: public HeapObject {
                          PropertyAttributes attributes);
   Object* LookupAccessor(String* name, bool is_getter);
 
+  Object* DefineAccessor(AccessorInfo* info);
+
   // Used from Object::GetProperty().
   Object* GetPropertyWithFailedAccessCheck(Object* receiver,
                                            LookupResult* result,
@@ -1367,7 +1372,7 @@ class JSObject: public HeapObject {
   void LookupRealNamedProperty(String* name, LookupResult* result);
   void LookupRealNamedPropertyInPrototypes(String* name, LookupResult* result);
   void LookupCallbackSetterInPrototypes(String* name, LookupResult* result);
-  Object* LookupCallbackSetterInPrototypes(uint32_t index);
+  bool SetElementWithCallbackSetterInPrototypes(uint32_t index, Object* value);
   void LookupCallback(String* name, LookupResult* result);
 
   // Returns the number of properties on this object filtering out properties
@@ -1536,6 +1541,14 @@ class JSObject: public HeapObject {
   Object* GetElementWithInterceptor(JSObject* receiver, uint32_t index);
 
  private:
+  Object* GetElementWithCallback(Object* receiver,
+                                 Object* structure,
+                                 uint32_t index,
+                                 Object* holder);
+  Object* SetElementWithCallback(Object* structure,
+                                 uint32_t index,
+                                 Object* value,
+                                 JSObject* holder);
   Object* SetElementWithInterceptor(uint32_t index, Object* value);
   Object* SetElementWithoutInterceptor(uint32_t index, Object* value);
 
@@ -1566,6 +1579,13 @@ class JSObject: public HeapObject {
   // Returns true if most of the elements backing storage is used.
   bool HasDenseElements();
 
+  bool CanSetCallback(String* name);
+  Object* SetElementCallback(uint32_t index,
+                             Object* structure,
+                             PropertyAttributes attributes);
+  Object* SetPropertyCallback(String* name,
+                              Object* structure,
+                              PropertyAttributes attributes);
   Object* DefineGetterSetter(String* name, PropertyAttributes attributes);
 
   void LookupInDescriptor(String* name, LookupResult* result);
@@ -2324,6 +2344,20 @@ class JSFunctionResultCache: public FixedArray {
   static const int kEntriesIndex = kDummyIndex + 1;
 
   static const int kEntrySize = 2;  // key + value
+
+  static const int kFactoryOffset = kHeaderSize;
+  static const int kFingerOffset = kFactoryOffset + kPointerSize;
+  static const int kCacheSizeOffset = kFingerOffset + kPointerSize;
+
+  inline void MakeZeroSize();
+  inline void Clear();
+
+  // Casting
+  static inline JSFunctionResultCache* cast(Object* obj);
+
+#ifdef DEBUG
+  void JSFunctionResultCacheVerify();
+#endif
 };
 
 
@@ -3187,7 +3221,7 @@ class SharedFunctionInfo: public HeapObject {
 
   // [function data]: This field holds some additional data for function.
   // Currently it either has FunctionTemplateInfo to make benefit the API
-  // or Proxy wrapping CustomCallGenerator.
+  // or Smi identifying a custom call generator.
   // In the long run we don't want all functions to have this field but
   // we can fix that when we have a better model for storing hidden data
   // on objects.
@@ -3196,6 +3230,7 @@ class SharedFunctionInfo: public HeapObject {
   inline bool IsApiFunction();
   inline FunctionTemplateInfo* get_api_func_data();
   inline bool HasCustomCallGenerator();
+  inline int custom_call_generator_id();
 
   // [script info]: Script from which the function originates.
   DECL_ACCESSORS(script, Object)
@@ -3983,16 +4018,27 @@ class String: public HeapObject {
   // to this method are not efficient unless the string is flat.
   inline uint16_t Get(int index);
 
-  // Try to flatten the top level ConsString that is hiding behind this
-  // string.  This is a no-op unless the string is a ConsString.  Flatten
-  // mutates the ConsString and might return a failure.
-  Object* SlowTryFlatten(PretenureFlag pretenure);
-
-  // Try to flatten the string.  Checks first inline to see if it is necessary.
-  // Do not handle allocation failures.  After calling TryFlatten, the
-  // string could still be a ConsString, in which case a failure is returned.
-  // Use FlattenString from Handles.cc to be sure to flatten.
+  // Try to flatten the string.  Checks first inline to see if it is
+  // necessary.  Does nothing if the string is not a cons string.
+  // Flattening allocates a sequential string with the same data as
+  // the given string and mutates the cons string to a degenerate
+  // form, where the first component is the new sequential string and
+  // the second component is the empty string.  If allocation fails,
+  // this function returns a failure.  If flattening succeeds, this
+  // function returns the sequential string that is now the first
+  // component of the cons string.
+  //
+  // Degenerate cons strings are handled specially by the garbage
+  // collector (see IsShortcutCandidate).
+  //
+  // Use FlattenString from Handles.cc to flatten even in case an
+  // allocation failure happens.
   inline Object* TryFlatten(PretenureFlag pretenure = NOT_TENURED);
+
+  // Convenience function.  Has exactly the same behavior as
+  // TryFlatten(), except in the case of failure returns the original
+  // string.
+  inline String* TryFlattenGetString(PretenureFlag pretenure = NOT_TENURED);
 
   Vector<const char> ToAsciiVector();
   Vector<const uc16> ToUC16Vector();
@@ -4075,7 +4121,7 @@ class String: public HeapObject {
 
   // Layout description.
   static const int kLengthOffset = HeapObject::kHeaderSize;
-  static const int kHashFieldOffset = kLengthOffset + kIntSize;
+  static const int kHashFieldOffset = kLengthOffset + kPointerSize;
   static const int kSize = kHashFieldOffset + kIntSize;
   // Notice: kSize is not pointer-size aligned if pointers are 64-bit.
 
@@ -4179,6 +4225,11 @@ class String: public HeapObject {
                                   unsigned max_chars);
 
  private:
+  // Try to flatten the top level ConsString that is hiding behind this
+  // string.  This is a no-op unless the string is a ConsString.  Flatten
+  // mutates the ConsString and might return a failure.
+  Object* SlowTryFlatten(PretenureFlag pretenure);
+
   // Slow case of String::Equals.  This implementation works on any strings
   // but it is most efficient on strings that are almost flat.
   bool SlowEquals(String* other);

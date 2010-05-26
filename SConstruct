@@ -84,6 +84,7 @@ ANDROID_FLAGS = ['-march=armv7-a',
                  '-finline-limit=64',
                  '-DCAN_USE_VFP_INSTRUCTIONS=1',
                  '-DCAN_USE_ARMV7_INSTRUCTIONS=1',
+                 '-DCAN_USE_UNALIGNED_ACCESSES=1',
                  '-MD']
 
 ANDROID_INCLUDES = [ANDROID_TOP + '/bionic/libc/arch-arm/include',
@@ -178,6 +179,9 @@ LIBRARY_FLAGS = {
       'CCFLAGS':      ['-ansi'],
     },
     'os:solaris': {
+      # On Solaris, to get isinf, INFINITY, fpclassify and other macros one
+      # needs to define __C99FEATURES__.
+      'CPPDEFINES': ['__C99FEATURES__'],
       'CPPPATH' : ['/usr/local/include'],
       'LIBPATH' : ['/usr/local/lib'],
       'CCFLAGS':      ['-ansi'],
@@ -203,14 +207,8 @@ LIBRARY_FLAGS = {
       'CPPDEFINES':   ['V8_TARGET_ARCH_ARM']
     },
     'simulator:arm': {
-      'CCFLAGS':      ['-m32'],
+      'CCFLAGS':      ['-m32', '-DCAN_USE_UNALIGNED_ACCESSES=1'],
       'LINKFLAGS':    ['-m32']
-    },
-    'armvariant:thumb2': {
-      'CPPDEFINES':   ['V8_ARM_VARIANT_THUMB']
-    },
-    'armvariant:arm': {
-      'CPPDEFINES':   ['V8_ARM_VARIANT_ARM']
     },
     'arch:mips': {
       'CPPDEFINES':   ['V8_TARGET_ARCH_MIPS'],
@@ -761,11 +759,6 @@ SIMPLE_OPTIONS = {
     'default': 'hidden',
     'help': 'shared library symbol visibility'
   },
-  'armvariant': {
-    'values': ['arm', 'thumb2', 'none'],
-    'default': 'none',
-    'help': 'generate thumb2 instructions instead of arm instructions (default)'
-  },
   'pgo': {
     'values': ['off', 'instrument', 'optimize'],
     'default': 'off',
@@ -959,10 +952,6 @@ def PostprocessOptions(options, os):
     if 'msvcltcg' in ARGUMENTS:
       print "Warning: forcing msvcltcg on as it is required for pgo (%s)" % options['pgo']
     options['msvcltcg'] = 'on'
-  if (options['armvariant'] == 'none' and options['arch'] == 'arm'):
-    options['armvariant'] = 'arm'
-  if (options['armvariant'] != 'none' and options['arch'] != 'arm'):
-    options['armvariant'] = 'none'
   if options['arch'] == 'mips':
     if ('regexp' in ARGUMENTS) and options['regexp'] == 'native':
       # Print a warning if native regexp is specified for mips

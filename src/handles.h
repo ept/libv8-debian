@@ -42,7 +42,7 @@ namespace internal {
 template<class T>
 class Handle {
  public:
-  INLINE(Handle(T** location)) { location_ = location; }
+  INLINE(explicit Handle(T** location)) { location_ = location; }
   INLINE(explicit Handle(T* obj));
 
   INLINE(Handle()) : location_(NULL) {}
@@ -261,6 +261,8 @@ Handle<Object> DeleteProperty(Handle<JSObject> obj, Handle<String> prop);
 Handle<Object> LookupSingleCharacterStringFromCode(uint32_t index);
 
 Handle<JSObject> Copy(Handle<JSObject> obj);
+
+Handle<Object> SetAccessor(Handle<JSObject> obj, Handle<AccessorInfo> info);
 
 Handle<FixedArray> AddKeysFromJSArray(Handle<FixedArray>,
                                       Handle<JSArray> array);

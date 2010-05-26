@@ -52,6 +52,21 @@ enum InvokeJSFlags {
 };
 
 
+// Flags used for the AllocateInNewSpace functions.
+enum AllocationFlags {
+  // No special flags.
+  NO_ALLOCATION_FLAGS = 0,
+  // Return the pointer to the allocated already tagged as a heap object.
+  TAG_OBJECT = 1 << 0,
+  // The content of the result register already contains the allocation top in
+  // new space.
+  RESULT_CONTAINS_TOP = 1 << 1,
+  // Specify that the requested size of the space to allocate is specified in
+  // words instead of bytes.
+  SIZE_IN_WORDS = 1 << 2
+};
+
+
 // MacroAssembler implements a collection of frequently used macros.
 class MacroAssembler: public Assembler {
  public:
@@ -85,6 +100,24 @@ class MacroAssembler: public Assembler {
   void LoadRoot(Register destination,
                 Heap::RootListIndex index,
                 Condition cond = al);
+  // Store an object to the root table.
+  void StoreRoot(Register source,
+                 Heap::RootListIndex index,
+                 Condition cond = al);
+
+
+  // Check if object is in new space.
+  // scratch can be object itself, but it will be clobbered.
+  void InNewSpace(Register object,
+                  Register scratch,
+                  Condition cc,  // eq for new space, ne otherwise
+                  Label* branch);
+
+
+  // Set the remebered set bit for an offset into an
+  // object. RecordWriteHelper only works if the object is not in new
+  // space.
+  void RecordWriteHelper(Register object, Register offset, Register scracth);
 
   // Sets the remembered set bit for [address+offset], where address is the
   // address of the heap object 'object'.  The address must be in the first 8K
@@ -151,6 +184,18 @@ class MacroAssembler: public Assembler {
       Push(src2, src3, src4, cond);
     }
   }
+
+  // Load two consecutive registers with two consecutive memory locations.
+  void Ldrd(Register dst1,
+            Register dst2,
+            const MemOperand& src,
+            Condition cond = al);
+
+  // Store two consecutive registers to two consecutive memory locations.
+  void Strd(Register src1,
+            Register src2,
+            const MemOperand& dst,
+            Condition cond = al);
 
   // ---------------------------------------------------------------------------
   // Stack limit support
@@ -266,7 +311,9 @@ class MacroAssembler: public Assembler {
   // Allocate an object in new space. The object_size is specified in words (not
   // bytes). If the new space is exhausted control continues at the gc_required
   // label. The allocated object is returned in result. If the flag
-  // tag_allocated_object is true the result is tagged as as a heap object.
+  // tag_allocated_object is true the result is tagged as as a heap object. All
+  // registers are clobbered also when control continues at the gc_required
+  // label.
   void AllocateInNewSpace(int object_size,
                           Register result,
                           Register scratch1,
@@ -310,8 +357,9 @@ class MacroAssembler: public Assembler {
                                Register scratch2,
                                Label* gc_required);
 
-  // Allocates a heap number or jumps to the need_gc label if the young space
-  // is full and a scavenge is needed.
+  // Allocates a heap number or jumps to the gc_required label if the young
+  // space is full and a scavenge is needed. All registers are clobbered also
+  // when control continues at the gc_required label.
   void AllocateHeapNumber(Register result,
                           Register scratch1,
                           Register scratch2,
@@ -557,6 +605,12 @@ class MacroAssembler: public Assembler {
   // Activation support.
   void EnterFrame(StackFrame::Type type);
   void LeaveFrame(StackFrame::Type type);
+
+  void InitializeNewString(Register string,
+                           Register length,
+                           Heap::RootListIndex map_index,
+                           Register scratch1,
+                           Register scratch2);
 
   bool generating_stub_;
   bool allow_stub_calls_;
