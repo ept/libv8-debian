@@ -2,7 +2,7 @@ adding -march=armv5t to build libv8 on armel
 
 --- a/SConstruct
 +++ b/SConstruct
-@@ -200,7 +200,8 @@
+@@ -204,7 +204,8 @@
        'LINKFLAGS':    ['-m32']
      },
      'arch:arm': {
@@ -11,4 +11,4 @@ adding -march=armv5t to build libv8 on armel
 +      'CCFLAGS':      ['-march=armv5t']
      },
      'simulator:arm': {
-       'CCFLAGS':      ['-m32'],
+       'CCFLAGS':      ['-m32', '-DCAN_USE_UNALIGNED_ACCESSES=1'],
