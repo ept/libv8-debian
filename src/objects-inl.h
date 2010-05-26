@@ -569,6 +569,22 @@ bool Object::IsSymbolTable() {
 }
 
 
+bool Object::IsJSFunctionResultCache() {
+  if (!IsFixedArray()) return false;
+  FixedArray* self = FixedArray::cast(this);
+  int length = self->length();
+  if (length < JSFunctionResultCache::kEntriesIndex) return false;
+  if ((length - JSFunctionResultCache::kEntriesIndex)
+      % JSFunctionResultCache::kEntrySize != 0) {
+    return false;
+  }
+#ifdef DEBUG
+  reinterpret_cast<JSFunctionResultCache*>(this)->JSFunctionResultCacheVerify();
+#endif
+  return true;
+}
+
+
 bool Object::IsCompilationCacheTable() {
   return IsHashTable();
 }
@@ -1594,6 +1610,7 @@ void NumberDictionary::set_requires_slow_elements() {
 CAST_ACCESSOR(FixedArray)
 CAST_ACCESSOR(DescriptorArray)
 CAST_ACCESSOR(SymbolTable)
+CAST_ACCESSOR(JSFunctionResultCache)
 CAST_ACCESSOR(CompilationCacheTable)
 CAST_ACCESSOR(CodeCacheHashTable)
 CAST_ACCESSOR(MapCache)
@@ -1651,7 +1668,7 @@ HashTable<Shape, Key>* HashTable<Shape, Key>::cast(Object* obj) {
 INT_ACCESSORS(Array, length, kLengthOffset)
 
 
-INT_ACCESSORS(String, length, kLengthOffset)
+SMI_ACCESSORS(String, length, kLengthOffset)
 
 
 uint32_t String::hash_field() {
@@ -1674,10 +1691,16 @@ bool String::Equals(String* other) {
 
 
 Object* String::TryFlatten(PretenureFlag pretenure) {
-  // We don't need to flatten strings that are already flat.  Since this code
-  // is inlined, it can be helpful in the flat case to not call out to Flatten.
-  if (IsFlat()) return this;
+  if (!StringShape(this).IsCons()) return this;
+  ConsString* cons = ConsString::cast(this);
+  if (cons->second()->length() == 0) return cons->first();
   return SlowTryFlatten(pretenure);
+}
+
+
+String* String::TryFlattenGetString(PretenureFlag pretenure) {
+  Object* flat = TryFlatten(pretenure);
+  return flat->IsFailure() ? this : String::cast(flat);
 }
 
 
@@ -1773,14 +1796,12 @@ void SeqTwoByteString::SeqTwoByteStringSet(int index, uint16_t value) {
 
 
 int SeqTwoByteString::SeqTwoByteStringSize(InstanceType instance_type) {
-  uint32_t length = READ_INT_FIELD(this, kLengthOffset);
-  return SizeFor(length);
+  return SizeFor(length());
 }
 
 
 int SeqAsciiString::SeqAsciiStringSize(InstanceType instance_type) {
-  uint32_t length = READ_INT_FIELD(this, kLengthOffset);
-  return SizeFor(length);
+  return SizeFor(length());
 }
 
 
@@ -1835,6 +1856,20 @@ ExternalTwoByteString::Resource* ExternalTwoByteString::resource() {
 void ExternalTwoByteString::set_resource(
     ExternalTwoByteString::Resource* resource) {
   *reinterpret_cast<Resource**>(FIELD_ADDR(this, kResourceOffset)) = resource;
+}
+
+
+void JSFunctionResultCache::MakeZeroSize() {
+  set(kFingerIndex, Smi::FromInt(kEntriesIndex));
+  set(kCacheSizeIndex, Smi::FromInt(kEntriesIndex));
+}
+
+
+void JSFunctionResultCache::Clear() {
+  int cache_size = Smi::cast(get(kCacheSizeIndex))->value();
+  Object** entries_start = RawField(this, OffsetOfElementAt(kEntriesIndex));
+  MemsetPointer(entries_start, Heap::the_hole_value(), cache_size);
+  MakeZeroSize();
 }
 
 
@@ -2501,7 +2536,13 @@ FunctionTemplateInfo* SharedFunctionInfo::get_api_func_data() {
 
 
 bool SharedFunctionInfo::HasCustomCallGenerator() {
-  return function_data()->IsProxy();
+  return function_data()->IsSmi();
+}
+
+
+int SharedFunctionInfo::custom_call_generator_id() {
+  ASSERT(HasCustomCallGenerator());
+  return Smi::cast(function_data())->value();
 }
 
 

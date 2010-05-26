@@ -1325,18 +1325,9 @@ static Object* Runtime_FinishArrayPrototypeSetup(Arguments args) {
 }
 
 
-static void SetCustomCallGenerator(Handle<JSFunction> function,
-                                   ExternalReference* generator) {
-  if (function->shared()->function_data()->IsUndefined()) {
-    function->shared()->set_function_data(*FromCData(generator->address()));
-  }
-}
-
-
 static Handle<JSFunction> InstallBuiltin(Handle<JSObject> holder,
                                          const char* name,
-                                         Builtins::Name builtin_name,
-                                         ExternalReference* generator = NULL) {
+                                         Builtins::Name builtin_name) {
   Handle<String> key = Factory::LookupAsciiSymbol(name);
   Handle<Code> code(Builtins::builtin(builtin_name));
   Handle<JSFunction> optimized = Factory::NewFunction(key,
@@ -1345,31 +1336,8 @@ static Handle<JSFunction> InstallBuiltin(Handle<JSObject> holder,
                                                       code,
                                                       false);
   optimized->shared()->DontAdaptArguments();
-  if (generator != NULL) {
-    SetCustomCallGenerator(optimized, generator);
-  }
   SetProperty(holder, key, optimized, NONE);
   return optimized;
-}
-
-
-Object* CompileArrayPushCall(CallStubCompiler* compiler,
-                             Object* object,
-                             JSObject* holder,
-                             JSFunction* function,
-                             String* name,
-                             StubCompiler::CheckType check) {
-  return compiler->CompileArrayPushCall(object, holder, function, name, check);
-}
-
-
-Object* CompileArrayPopCall(CallStubCompiler* compiler,
-                            Object* object,
-                            JSObject* holder,
-                            JSFunction* function,
-                            String* name,
-                            StubCompiler::CheckType check) {
-  return compiler->CompileArrayPopCall(object, holder, function, name, check);
 }
 
 
@@ -1378,11 +1346,8 @@ static Object* Runtime_SpecialArrayFunctions(Arguments args) {
   ASSERT(args.length() == 1);
   CONVERT_ARG_CHECKED(JSObject, holder, 0);
 
-  ExternalReference pop = ExternalReference::compile_array_pop_call();
-  ExternalReference push = ExternalReference::compile_array_push_call();
-
-  InstallBuiltin(holder, "pop", Builtins::ArrayPop, &pop);
-  InstallBuiltin(holder, "push", Builtins::ArrayPush, &push);
+  InstallBuiltin(holder, "pop", Builtins::ArrayPop);
+  InstallBuiltin(holder, "push", Builtins::ArrayPush);
   InstallBuiltin(holder, "shift", Builtins::ArrayShift);
   InstallBuiltin(holder, "unshift", Builtins::ArrayUnshift);
   InstallBuiltin(holder, "slice", Builtins::ArraySlice);
@@ -7777,28 +7742,22 @@ static Object* Runtime_SwapElements(Arguments args) {
 
   ASSERT_EQ(3, args.length());
 
-  Handle<Object> object = args.at<Object>(0);
+  CONVERT_ARG_CHECKED(JSObject, object, 0);
   Handle<Object> key1 = args.at<Object>(1);
   Handle<Object> key2 = args.at<Object>(2);
 
   uint32_t index1, index2;
-  // That must be the most common case.
-  if (object->IsJSObject()
-      && Array::IndexFromObject(*key1, &index1)
-      && Array::IndexFromObject(*key2, &index2)) {
-    Handle<JSObject> jsobject = Handle<JSObject>::cast(object);
-    Handle<Object> tmp1 = GetElement(jsobject, index1);
-    Handle<Object> tmp2 = GetElement(jsobject, index2);
-
-    SetElement(jsobject, index1, tmp2);
-    SetElement(jsobject, index2, tmp1);
-  } else {
-    Handle<Object> tmp1 = GetProperty(object, key1);
-    Handle<Object> tmp2 = GetProperty(object, key2);
-
-    SetProperty(object, key1, tmp2, NONE);
-    SetProperty(object, key2, tmp1, NONE);
+  if (!Array::IndexFromObject(*key1, &index1)
+      || !Array::IndexFromObject(*key2, &index2)) {
+    return Top::ThrowIllegalOperation();
   }
+
+  Handle<JSObject> jsobject = Handle<JSObject>::cast(object);
+  Handle<Object> tmp1 = GetElement(jsobject, index1);
+  Handle<Object> tmp2 = GetElement(jsobject, index2);
+
+  SetElement(jsobject, index1, tmp2);
+  SetElement(jsobject, index2, tmp1);
 
   return Heap::undefined_value();
 }
@@ -9762,9 +9721,7 @@ static Object* Runtime_LiveEditReplaceFunctionCode(Arguments args) {
   CONVERT_ARG_CHECKED(JSArray, new_compile_info, 0);
   CONVERT_ARG_CHECKED(JSArray, shared_info, 1);
 
-  LiveEdit::ReplaceFunctionCode(new_compile_info, shared_info);
-
-  return Heap::undefined_value();
+  return LiveEdit::ReplaceFunctionCode(new_compile_info, shared_info);
 }
 
 // Connects SharedFunctionInfo to another script.
@@ -9819,9 +9776,7 @@ static Object* Runtime_LiveEditPatchFunctionPositions(Arguments args) {
   CONVERT_ARG_CHECKED(JSArray, shared_array, 0);
   CONVERT_ARG_CHECKED(JSArray, position_change_array, 1);
 
-  LiveEdit::PatchFunctionPositions(shared_array, position_change_array);
-
-  return Heap::undefined_value();
+  return LiveEdit::PatchFunctionPositions(shared_array, position_change_array);
 }
 
 

@@ -28,7 +28,9 @@
 #ifndef V8_IA32_CODEGEN_IA32_H_
 #define V8_IA32_CODEGEN_IA32_H_
 
+#include "ast.h"
 #include "ic-inl.h"
+#include "jump-target-heavy.h"
 
 namespace v8 {
 namespace internal {
@@ -48,7 +50,7 @@ enum TypeofState { INSIDE_TYPEOF, NOT_INSIDE_TYPEOF };
 
 // A reference is a C++ stack-allocated object that puts a
 // reference on the virtual frame.  The reference may be consumed
-// by GetValue, TakeValue, SetValue, and Codegen::UnloadReference.
+// by GetValue, TakeValue and SetValue.
 // When the lifetime (scope) of a valid reference ends, it must have
 // been consumed, and be in state UNLOADED.
 class Reference BASE_EMBEDDED {
@@ -343,6 +345,15 @@ class CodeGenerator: public AstVisitor {
   // expected arguments. Otherwise return -1.
   static int InlineRuntimeCallArgumentsCount(Handle<String> name);
 
+  // Return a position of the element at |index_as_smi| + |additional_offset|
+  // in FixedArray pointer to which is held in |array|.  |index_as_smi| is Smi.
+  static Operand FixedArrayElementOperand(Register array,
+                                          Register index_as_smi,
+                                          int additional_offset = 0) {
+    int offset = FixedArray::kHeaderSize + additional_offset * kPointerSize;
+    return FieldOperand(array, index_as_smi, times_half_pointer_size, offset);
+  }
+
  private:
   // Construction/Destruction
   explicit CodeGenerator(MacroAssembler* masm);
@@ -414,7 +425,6 @@ class CodeGenerator: public AstVisitor {
 
   // The following are used by class Reference.
   void LoadReference(Reference* ref);
-  void UnloadReference(Reference* ref);
 
   static Operand ContextOperand(Register context, int index) {
     return Operand(context, Context::SlotOffset(index));
@@ -449,11 +459,21 @@ class CodeGenerator: public AstVisitor {
   void LoadWithSafeInt32ModeDisabled(Expression* expr);
 
   // Read a value from a slot and leave it on top of the expression stack.
-  Result LoadFromSlot(Slot* slot, TypeofState typeof_state);
-  Result LoadFromSlotCheckForArguments(Slot* slot, TypeofState typeof_state);
+  void LoadFromSlot(Slot* slot, TypeofState typeof_state);
+  void LoadFromSlotCheckForArguments(Slot* slot, TypeofState typeof_state);
   Result LoadFromGlobalSlotCheckExtensions(Slot* slot,
                                            TypeofState typeof_state,
                                            JumpTarget* slow);
+
+  // Support for loading from local/global variables and arguments
+  // whose location is known unless they are shadowed by
+  // eval-introduced bindings. Generates no code for unsupported slot
+  // types and therefore expects to fall through to the slow jump target.
+  void EmitDynamicLoadFromSlotFastCase(Slot* slot,
+                                       TypeofState typeof_state,
+                                       Result* result,
+                                       JumpTarget* slow,
+                                       JumpTarget* done);
 
   // Store the value on top of the expression stack into a slot, leaving the
   // value in place.
@@ -636,7 +656,9 @@ class CodeGenerator: public AstVisitor {
   // Fast support for number to string.
   void GenerateNumberToString(ZoneList<Expression*>* args);
 
-  // Fast swapping of elements.
+  // Fast swapping of elements. Takes three expressions, the object and two
+  // indices. This should only be used if the indices are known to be
+  // non-negative and within bounds of the elements array at the call site.
   void GenerateSwapElements(ZoneList<Expression*>* args);
 
   // Fast call for custom callbacks.
@@ -1080,8 +1102,8 @@ class RecordWriteStub : public CodeStub {
   }
 #endif
 
-  // Minor key encoding in 12 bits of three registers (object, address and
-  // scratch) OOOOAAAASSSS.
+  // Minor key encoding in 12 bits. 4 bits for each of the three
+  // registers (object, address and scratch) OOOOAAAASSSS.
   class ScratchBits: public BitField<uint32_t, 0, 4> {};
   class AddressBits: public BitField<uint32_t, 4, 4> {};
   class ObjectBits: public BitField<uint32_t, 8, 4> {};

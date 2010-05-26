@@ -27,6 +27,8 @@
 
 #include "v8.h"
 
+#if defined(V8_TARGET_ARCH_ARM)
+
 #include "codegen-inl.h"
 #include "register-allocator-inl.h"
 #include "scopes.h"
@@ -72,8 +74,15 @@ void VirtualFrame::PopToR0() {
 
 void VirtualFrame::MergeTo(VirtualFrame* expected) {
   if (Equals(expected)) return;
+  MergeTOSTo(expected->top_of_stack_state_);
+  ASSERT(register_allocation_map_ == expected->register_allocation_map_);
+}
+
+
+void VirtualFrame::MergeTOSTo(
+    VirtualFrame::TopOfStack expected_top_of_stack_state) {
 #define CASE_NUMBER(a, b) ((a) * TOS_STATES + (b))
-  switch (CASE_NUMBER(top_of_stack_state_, expected->top_of_stack_state_)) {
+  switch (CASE_NUMBER(top_of_stack_state_, expected_top_of_stack_state)) {
     case CASE_NUMBER(NO_TOS_REGISTERS, NO_TOS_REGISTERS):
       break;
     case CASE_NUMBER(NO_TOS_REGISTERS, R0_TOS):
@@ -154,7 +163,7 @@ void VirtualFrame::MergeTo(VirtualFrame* expected) {
       UNREACHABLE();
 #undef CASE_NUMBER
   }
-  ASSERT(register_allocation_map_ == expected->register_allocation_map_);
+  top_of_stack_state_ = expected_top_of_stack_state;
 }
 
 
@@ -298,20 +307,43 @@ void VirtualFrame::InvokeBuiltin(Builtins::JavaScript id,
 }
 
 
-void VirtualFrame::CallLoadIC(RelocInfo::Mode mode) {
+void VirtualFrame::CallLoadIC(Handle<String> name, RelocInfo::Mode mode) {
   Handle<Code> ic(Builtins::builtin(Builtins::LoadIC_Initialize));
+  PopToR0();
+  SpillAll();
+  __ mov(r2, Operand(name));
   CallCodeObject(ic, mode, 0);
+}
+
+
+void VirtualFrame::CallStoreIC(Handle<String> name, bool is_contextual) {
+  Handle<Code> ic(Builtins::builtin(Builtins::StoreIC_Initialize));
+  PopToR0();
+  if (is_contextual) {
+    SpillAll();
+    __ ldr(r1, MemOperand(cp, Context::SlotOffset(Context::GLOBAL_INDEX)));
+  } else {
+    EmitPop(r1);
+    SpillAll();
+  }
+  __ mov(r2, Operand(name));
+  CallCodeObject(ic, RelocInfo::CODE_TARGET, 0);
 }
 
 
 void VirtualFrame::CallKeyedLoadIC() {
   Handle<Code> ic(Builtins::builtin(Builtins::KeyedLoadIC_Initialize));
+  PopToR1R0();
+  SpillAll();
   CallCodeObject(ic, RelocInfo::CODE_TARGET, 0);
 }
 
 
 void VirtualFrame::CallKeyedStoreIC() {
   Handle<Code> ic(Builtins::builtin(Builtins::KeyedStoreIC_Initialize));
+  PopToR1R0();
+  SpillAll();
+  EmitPop(r2);
   CallCodeObject(ic, RelocInfo::CODE_TARGET, 0);
 }
 
@@ -398,7 +430,7 @@ void VirtualFrame::Pop() {
 
 
 void VirtualFrame::EmitPop(Register reg) {
-  ASSERT(!is_used(reg));
+  ASSERT(!is_used(RegisterAllocator::ToNumber(reg)));
   if (top_of_stack_state_ == NO_TOS_REGISTERS) {
     __ pop(reg);
   } else {
@@ -477,11 +509,89 @@ Register VirtualFrame::Peek() {
 }
 
 
+void VirtualFrame::Dup() {
+  if (SpilledScope::is_spilled()) {
+    __ ldr(ip, MemOperand(sp, 0));
+    __ push(ip);
+  } else {
+    switch (top_of_stack_state_) {
+      case NO_TOS_REGISTERS:
+        __ ldr(r0, MemOperand(sp, 0));
+        top_of_stack_state_ = R0_TOS;
+        break;
+      case R0_TOS:
+        __ mov(r1, r0);
+        // r0 and r1 contains the same value. Prefer state with r0 holding TOS.
+        top_of_stack_state_ = R0_R1_TOS;
+        break;
+      case R1_TOS:
+        __ mov(r0, r1);
+        // r0 and r1 contains the same value. Prefer state with r0 holding TOS.
+        top_of_stack_state_ = R0_R1_TOS;
+        break;
+      case R0_R1_TOS:
+        __ push(r1);
+        __ mov(r1, r0);
+        // r0 and r1 contains the same value. Prefer state with r0 holding TOS.
+        top_of_stack_state_ = R0_R1_TOS;
+        break;
+      case R1_R0_TOS:
+        __ push(r0);
+        __ mov(r0, r1);
+        // r0 and r1 contains the same value. Prefer state with r0 holding TOS.
+        top_of_stack_state_ = R0_R1_TOS;
+        break;
+      default:
+        UNREACHABLE();
+    }
+  }
+  element_count_++;
+}
+
+
+void VirtualFrame::Dup2() {
+  if (SpilledScope::is_spilled()) {
+    __ ldr(ip, MemOperand(sp, kPointerSize));
+    __ push(ip);
+    __ ldr(ip, MemOperand(sp, kPointerSize));
+    __ push(ip);
+  } else {
+    switch (top_of_stack_state_) {
+      case NO_TOS_REGISTERS:
+        __ ldr(r0, MemOperand(sp, 0));
+        __ ldr(r1, MemOperand(sp, kPointerSize));
+        top_of_stack_state_ = R0_R1_TOS;
+        break;
+      case R0_TOS:
+        __ push(r0);
+        __ ldr(r1, MemOperand(sp, kPointerSize));
+        top_of_stack_state_ = R0_R1_TOS;
+        break;
+      case R1_TOS:
+        __ push(r1);
+        __ ldr(r0, MemOperand(sp, kPointerSize));
+        top_of_stack_state_ = R1_R0_TOS;
+        break;
+      case R0_R1_TOS:
+        __ Push(r1, r0);
+        top_of_stack_state_ = R0_R1_TOS;
+        break;
+      case R1_R0_TOS:
+        __ Push(r0, r1);
+        top_of_stack_state_ = R1_R0_TOS;
+        break;
+      default:
+        UNREACHABLE();
+    }
+  }
+  element_count_ += 2;
+}
+
+
 Register VirtualFrame::PopToRegister(Register but_not_to_this_one) {
   ASSERT(but_not_to_this_one.is(r0) ||
          but_not_to_this_one.is(r1) ||
          but_not_to_this_one.is(no_reg));
-  AssertIsNotSpilled();
   element_count_--;
   if (top_of_stack_state_ == NO_TOS_REGISTERS) {
     if (but_not_to_this_one.is(r0)) {
@@ -533,11 +643,57 @@ void VirtualFrame::EmitPush(Register reg) {
 }
 
 
+void VirtualFrame::SetElementAt(Register reg, int this_far_down) {
+  if (this_far_down == 0) {
+    Pop();
+    Register dest = GetTOSRegister();
+    if (dest.is(reg)) {
+      // We already popped one item off the top of the stack.  If the only
+      // free register is the one we were asked to push then we have been
+      // asked to push a register that was already in use, which cannot
+      // happen.  It therefore folows that there are two free TOS registers:
+      ASSERT(top_of_stack_state_ == NO_TOS_REGISTERS);
+      dest = dest.is(r0) ? r1 : r0;
+    }
+    __ mov(dest, reg);
+    EmitPush(dest);
+  } else if (this_far_down == 1) {
+    int virtual_elements = kVirtualElements[top_of_stack_state_];
+    if (virtual_elements < 2) {
+      __ str(reg, ElementAt(this_far_down));
+    } else {
+      ASSERT(virtual_elements == 2);
+      ASSERT(!reg.is(r0));
+      ASSERT(!reg.is(r1));
+      Register dest = kBottomRegister[top_of_stack_state_];
+      __ mov(dest, reg);
+    }
+  } else {
+    ASSERT(this_far_down >= 2);
+    ASSERT(kVirtualElements[top_of_stack_state_] <= 2);
+    __ str(reg, ElementAt(this_far_down));
+  }
+}
+
+
 Register VirtualFrame::GetTOSRegister() {
   if (SpilledScope::is_spilled()) return r0;
 
   EnsureOneFreeTOSRegister();
   return kTopRegister[kStateAfterPush[top_of_stack_state_]];
+}
+
+
+void VirtualFrame::EmitPush(Operand operand) {
+  element_count_++;
+  if (SpilledScope::is_spilled()) {
+    __ mov(r0, operand);
+    __ push(r0);
+    return;
+  }
+  EnsureOneFreeTOSRegister();
+  top_of_stack_state_ = kStateAfterPush[top_of_stack_state_];
+  __ mov(kTopRegister[top_of_stack_state_], operand);
 }
 
 
@@ -551,6 +707,19 @@ void VirtualFrame::EmitPush(MemOperand operand) {
   EnsureOneFreeTOSRegister();
   top_of_stack_state_ = kStateAfterPush[top_of_stack_state_];
   __ ldr(kTopRegister[top_of_stack_state_], operand);
+}
+
+
+void VirtualFrame::EmitPushRoot(Heap::RootListIndex index) {
+  element_count_++;
+  if (SpilledScope::is_spilled()) {
+    __ LoadRoot(r0, index);
+    __ push(r0);
+    return;
+  }
+  EnsureOneFreeTOSRegister();
+  top_of_stack_state_ = kStateAfterPush[top_of_stack_state_];
+  __ LoadRoot(kTopRegister[top_of_stack_state_], index);
 }
 
 
@@ -589,3 +758,5 @@ void VirtualFrame::SpillAll() {
 #undef __
 
 } }  // namespace v8::internal
+
+#endif  // V8_TARGET_ARCH_ARM

@@ -29,12 +29,13 @@
 #define V8_X64_ASSEMBLER_X64_INL_H_
 
 #include "cpu.h"
+#include "debug.h"
 #include "memory.h"
 
 namespace v8 {
 namespace internal {
 
-Condition NegateCondition(Condition cc) {
+inline Condition NegateCondition(Condition cc) {
   return static_cast<Condition>(cc ^ 1);
 }
 
@@ -85,6 +86,11 @@ void Assembler::emit_rex_64(Register reg, Register rm_reg) {
 
 
 void Assembler::emit_rex_64(XMMRegister reg, Register rm_reg) {
+  emit(0x48 | (reg.code() & 0x8) >> 1 | rm_reg.code() >> 3);
+}
+
+
+void Assembler::emit_rex_64(Register reg, XMMRegister rm_reg) {
   emit(0x48 | (reg.code() & 0x8) >> 1 | rm_reg.code() >> 3);
 }
 
@@ -160,6 +166,12 @@ void Assembler::emit_optional_rex_32(XMMRegister reg, Register base) {
 }
 
 
+void Assembler::emit_optional_rex_32(Register reg, XMMRegister base) {
+  byte rex_bits =  (reg.code() & 0x8) >> 1 | (base.code() & 0x8) >> 3;
+  if (rex_bits != 0) emit(0x40 | rex_bits);
+}
+
+
 void Assembler::emit_optional_rex_32(Register rm_reg) {
   if (rm_reg.high_bit()) emit(0x41);
 }
@@ -215,6 +227,15 @@ Address RelocInfo::target_address() {
 Address RelocInfo::target_address_address() {
   ASSERT(IsCodeTarget(rmode_) || rmode_ == RUNTIME_ENTRY);
   return reinterpret_cast<Address>(pc_);
+}
+
+
+int RelocInfo::target_address_size() {
+  if (IsCodedSpecially()) {
+    return Assembler::kCallTargetSize;
+  } else {
+    return Assembler::kExternalTargetSize;
+  }
 }
 
 
@@ -308,6 +329,27 @@ Object** RelocInfo::call_object_address() {
   return reinterpret_cast<Object**>(
       pc_ + Assembler::kPatchReturnSequenceAddressOffset);
 }
+
+
+void RelocInfo::Visit(ObjectVisitor* visitor) {
+  RelocInfo::Mode mode = rmode();
+  if (mode == RelocInfo::EMBEDDED_OBJECT) {
+    visitor->VisitPointer(target_object_address());
+  } else if (RelocInfo::IsCodeTarget(mode)) {
+    visitor->VisitCodeTarget(this);
+  } else if (mode == RelocInfo::EXTERNAL_REFERENCE) {
+    visitor->VisitExternalReference(target_reference_address());
+#ifdef ENABLE_DEBUGGER_SUPPORT
+  } else if (Debug::has_break_points() &&
+             RelocInfo::IsJSReturn(mode) &&
+             IsPatchedReturnSequence()) {
+    visitor->VisitDebugTarget(this);
+#endif
+  } else if (mode == RelocInfo::RUNTIME_ENTRY) {
+    visitor->VisitRuntimeEntry(this);
+  }
+}
+
 
 // -----------------------------------------------------------------------------
 // Implementation of Operand

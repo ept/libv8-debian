@@ -33,6 +33,17 @@
 namespace v8 {
 namespace internal {
 
+// Flags used for the AllocateInNewSpace functions.
+enum AllocationFlags {
+  // No special flags.
+  NO_ALLOCATION_FLAGS = 0,
+  // Return the pointer to the allocated already tagged as a heap object.
+  TAG_OBJECT = 1 << 0,
+  // The content of the result register already contains the allocation top in
+  // new space.
+  RESULT_CONTAINS_TOP = 1 << 1
+};
+
 // Default scratch register used by MacroAssembler (and other code that needs
 // a spare register). The register isn't callee save, and not used by the
 // function calling convention.
@@ -62,9 +73,17 @@ class MacroAssembler: public Assembler {
   void CompareRoot(Register with, Heap::RootListIndex index);
   void CompareRoot(Operand with, Heap::RootListIndex index);
   void PushRoot(Heap::RootListIndex index);
+  void StoreRoot(Register source, Heap::RootListIndex index);
 
   // ---------------------------------------------------------------------------
   // GC Support
+
+  // Set the remebered set bit for an address which points into an
+  // object. RecordWriteHelper only works if the object is not in new
+  // space.
+  void RecordWriteHelper(Register object,
+                         Register addr,
+                         Register scratch);
 
   // Check if object is in new space. The condition cc can be equal or
   // not_equal. If it is equal a jump will be done if the object is on new
@@ -94,7 +113,6 @@ class MacroAssembler: public Assembler {
                          int offset,
                          Register value,
                          Register scratch);
-
 
 #ifdef ENABLE_DEBUGGER_SUPPORT
   // ---------------------------------------------------------------------------
@@ -205,6 +223,7 @@ class MacroAssembler: public Assembler {
   // Simple comparison of smis.
   void SmiCompare(Register dst, Register src);
   void SmiCompare(Register dst, Smi* src);
+  void SmiCompare(Register dst, const Operand& src);
   void SmiCompare(const Operand& dst, Register src);
   void SmiCompare(const Operand& dst, Smi* src);
   // Sets sign and zero flags depending on value of smi in register.
@@ -287,6 +306,10 @@ class MacroAssembler: public Assembler {
   // No overflow testing on the result is done.
   void SmiAddConstant(Register dst, Register src, Smi* constant);
 
+  // Add an integer constant to a tagged smi, giving a tagged smi as result.
+  // No overflow testing on the result is done.
+  void SmiAddConstant(const Operand& dst, Smi* constant);
+
   // Add an integer constant to a tagged smi, giving a tagged smi as result,
   // or jumping to a label if the result cannot be represented by a smi.
   void SmiAddConstant(Register dst,
@@ -295,7 +318,8 @@ class MacroAssembler: public Assembler {
                       Label* on_not_smi_result);
 
   // Subtract an integer constant from a tagged smi, giving a tagged smi as
-  // result. No testing on the result is done.
+  // result. No testing on the result is done. Sets the N and Z flags
+  // based on the value of the resulting integer.
   void SmiSubConstant(Register dst, Register src, Smi* constant);
 
   // Subtract an integer constant from a tagged smi, giving a tagged smi as
@@ -325,6 +349,11 @@ class MacroAssembler: public Assembler {
   void SmiSub(Register dst,
               Register src1,
               Register src2,
+              Label* on_not_smi_result);
+
+  void SmiSub(Register dst,
+              Register src1,
+              const Operand& src2,
               Label* on_not_smi_result);
 
   // Multiplies smi values and return the result as a smi,
@@ -361,8 +390,7 @@ class MacroAssembler: public Assembler {
 
   void SmiShiftLeftConstant(Register dst,
                             Register src,
-                            int shift_value,
-                            Label* on_not_smi_result);
+                            int shift_value);
   void SmiShiftLogicalRightConstant(Register dst,
                                   Register src,
                                   int shift_value,
@@ -375,8 +403,7 @@ class MacroAssembler: public Assembler {
   // Uses and clobbers rcx, so dst may not be rcx.
   void SmiShiftLeft(Register dst,
                     Register src1,
-                    Register src2,
-                    Label* on_not_smi_result);
+                    Register src2);
   // Shifts a smi value to the right, shifting in zero bits at the top, and
   // returns the unsigned intepretation of the result if that is a smi.
   // Uses and clobbers rcx, so dst may not be rcx.
@@ -510,10 +537,10 @@ class MacroAssembler: public Assembler {
   void FCmp();
 
   // Abort execution if argument is not a number. Used in debug code.
-  void AbortIfNotNumber(Register object, const char* msg);
+  void AbortIfNotNumber(Register object);
 
   // Abort execution if argument is not a smi. Used in debug code.
-  void AbortIfNotSmi(Register object, const char* msg);
+  void AbortIfNotSmi(Register object);
 
   // ---------------------------------------------------------------------------
   // Exception handling
@@ -778,10 +805,17 @@ class MacroAssembler: public Assembler {
   void LeaveFrame(StackFrame::Type type);
 
   // Allocation support helpers.
+  // Loads the top of new-space into the result register.
+  // If flags contains RESULT_CONTAINS_TOP then result_end is valid and
+  // already contains the top of new-space, and scratch is invalid.
+  // Otherwise the address of the new-space top is loaded into scratch (if
+  // scratch is valid), and the new-space top is loaded into result.
   void LoadAllocationTopHelper(Register result,
                                Register result_end,
                                Register scratch,
                                AllocationFlags flags);
+  // Update allocation top with value in result_end register.
+  // If scratch is valid, it contains the address of the allocation top.
   void UpdateAllocationTopHelper(Register result_end, Register scratch);
 };
 

@@ -27,6 +27,8 @@
 
 #include "v8.h"
 
+#if defined(V8_TARGET_ARCH_IA32)
+
 #include "ic-inl.h"
 #include "codegen-inl.h"
 #include "stub-cache.h"
@@ -221,7 +223,6 @@ void StubCompiler::GenerateLoadStringLength(MacroAssembler* masm,
 
   // Load length from the string and convert to a smi.
   __ mov(eax, FieldOperand(receiver, String::kLengthOffset));
-  __ SmiTag(eax);
   __ ret(0);
 
   // Check if the object is a JSValue wrapper.
@@ -234,7 +235,6 @@ void StubCompiler::GenerateLoadStringLength(MacroAssembler* masm,
   __ mov(scratch2, FieldOperand(receiver, JSValue::kValueOffset));
   GenerateStringCheck(masm, scratch2, scratch1, miss, miss);
   __ mov(eax, FieldOperand(scratch2, String::kLengthOffset));
-  __ SmiTag(eax);
   __ ret(0);
 }
 
@@ -356,7 +356,7 @@ class LoadInterceptorCompiler BASE_EMBEDDED {
                         Register holder,
                         Register scratch1,
                         Register scratch2,
-                        JSObject* holder_obj,
+                        JSObject* interceptor_holder,
                         LookupResult* lookup,
                         String* name,
                         Label* miss_label) {
@@ -376,7 +376,8 @@ class LoadInterceptorCompiler BASE_EMBEDDED {
     }
 
     if (!optimize) {
-      CompileRegular(masm, receiver, holder, scratch2, holder_obj, miss_label);
+      CompileRegular(masm, receiver, holder, scratch2, interceptor_holder,
+                     miss_label);
       return;
     }
 
@@ -389,12 +390,17 @@ class LoadInterceptorCompiler BASE_EMBEDDED {
     __ push(holder);
     __ push(name_);
 
+    // Invoke an interceptor.  Note: map checks from receiver to
+    // interceptor's holder has been compiled before (see a caller
+    // of this method.)
     CompileCallLoadPropertyWithInterceptor(masm,
                                            receiver,
                                            holder,
                                            name_,
-                                           holder_obj);
+                                           interceptor_holder);
 
+    // Check if interceptor provided a value for property.  If it's
+    // the case, return immediately.
     Label interceptor_failed;
     __ cmp(eax, Factory::no_interceptor_result_sentinel());
     __ j(equal, &interceptor_failed);
@@ -411,47 +417,61 @@ class LoadInterceptorCompiler BASE_EMBEDDED {
     __ LeaveInternalFrame();
 
     if (lookup->type() == FIELD) {
-      holder = stub_compiler->CheckPrototypes(holder_obj, holder,
+      // We found FIELD property in prototype chain of interceptor's holder.
+      // Check that the maps from interceptor's holder to field's holder
+      // haven't changed...
+      holder = stub_compiler->CheckPrototypes(interceptor_holder, holder,
                                               lookup->holder(), scratch1,
                                               scratch2,
                                               name,
                                               miss_label);
+      // ... and retrieve a field from field's holder.
       stub_compiler->GenerateFastPropertyLoad(masm, eax,
                                               holder, lookup->holder(),
                                               lookup->GetFieldIndex());
       __ ret(0);
     } else {
+      // We found CALLBACKS property in prototype chain of interceptor's
+      // holder.
       ASSERT(lookup->type() == CALLBACKS);
       ASSERT(lookup->GetCallbackObject()->IsAccessorInfo());
       ASSERT(callback != NULL);
       ASSERT(callback->getter() != NULL);
 
+      // Prepare for tail call: push receiver to stack after return address.
       Label cleanup;
-      __ pop(scratch2);
+      __ pop(scratch2);  // return address
       __ push(receiver);
       __ push(scratch2);
 
-      holder = stub_compiler->CheckPrototypes(holder_obj, holder,
+      // Check that the maps from interceptor's holder to callback's holder
+      // haven't changed.
+      holder = stub_compiler->CheckPrototypes(interceptor_holder, holder,
                                               lookup->holder(), scratch1,
                                               scratch2,
                                               name,
                                               &cleanup);
 
-      __ pop(scratch2);  // save old return address
+      // Continue tail call preparation: push remaining parameters after
+      // return address.
+      __ pop(scratch2);  // return address
       __ push(holder);
       __ mov(holder, Immediate(Handle<AccessorInfo>(callback)));
       __ push(holder);
       __ push(FieldOperand(holder, AccessorInfo::kDataOffset));
       __ push(name_);
-      __ push(scratch2);  // restore old return address
+      __ push(scratch2);  // restore return address
 
+      // Tail call to runtime.
       ExternalReference ref =
           ExternalReference(IC_Utility(IC::kLoadCallbackProperty));
       __ TailCallExternalReference(ref, 5, 1);
 
+      // Clean up code: we pushed receiver after return address and
+      // need to remove it from there.
       __ bind(&cleanup);
-      __ pop(scratch1);
-      __ pop(scratch2);
+      __ pop(scratch1);  // return address.
+      __ pop(scratch2);  // receiver.
       __ push(scratch1);
     }
   }
@@ -461,10 +481,10 @@ class LoadInterceptorCompiler BASE_EMBEDDED {
                       Register receiver,
                       Register holder,
                       Register scratch,
-                      JSObject* holder_obj,
+                      JSObject* interceptor_holder,
                       Label* miss_label) {
     __ pop(scratch);  // save old return address
-    PushInterceptorArguments(masm, receiver, holder, name_, holder_obj);
+    PushInterceptorArguments(masm, receiver, holder, name_, interceptor_holder);
     __ push(scratch);  // restore old return address
 
     ExternalReference ref = ExternalReference(
@@ -626,7 +646,7 @@ class CallInterceptorCompiler BASE_EMBEDDED {
                         Register receiver,
                         Register scratch1,
                         Register scratch2,
-                        JSObject* holder_obj,
+                        JSObject* interceptor_holder,
                         LookupResult* lookup,
                         String* name,
                         const CallOptimization& optimization,
@@ -639,10 +659,13 @@ class CallInterceptorCompiler BASE_EMBEDDED {
     bool can_do_fast_api_call = false;
     if (optimization.is_simple_api_call() &&
         !lookup->holder()->IsGlobalObject()) {
-      depth1 = optimization.GetPrototypeDepthOfExpectedType(object, holder_obj);
+      depth1 =
+          optimization.GetPrototypeDepthOfExpectedType(object,
+                                                       interceptor_holder);
       if (depth1 == kInvalidProtoDepth) {
-        depth2 = optimization.GetPrototypeDepthOfExpectedType(holder_obj,
-                                                              lookup->holder());
+        depth2 =
+            optimization.GetPrototypeDepthOfExpectedType(interceptor_holder,
+                                                         lookup->holder());
       }
       can_do_fast_api_call = (depth1 != kInvalidProtoDepth) ||
                              (depth2 != kInvalidProtoDepth);
@@ -655,24 +678,32 @@ class CallInterceptorCompiler BASE_EMBEDDED {
       ReserveSpaceForFastApiCall(masm, scratch1);
     }
 
+    // Check that the maps from receiver to interceptor's holder
+    // haven't changed and thus we can invoke interceptor.
     Label miss_cleanup;
     Label* miss = can_do_fast_api_call ? &miss_cleanup : miss_label;
     Register holder =
-        stub_compiler_->CheckPrototypes(object, receiver, holder_obj,
+        stub_compiler_->CheckPrototypes(object, receiver, interceptor_holder,
                                         scratch1, scratch2, name,
                                         depth1, miss);
 
+    // Invoke an interceptor and if it provides a value,
+    // branch to |regular_invoke|.
     Label regular_invoke;
-    LoadWithInterceptor(masm, receiver, holder, holder_obj, &regular_invoke);
+    LoadWithInterceptor(masm, receiver, holder, interceptor_holder,
+                        &regular_invoke);
 
-    // Generate code for the failed interceptor case.
+    // Interceptor returned nothing for this property.  Try to use cached
+    // constant function.
 
-    // Check the lookup is still valid.
-    stub_compiler_->CheckPrototypes(holder_obj, receiver,
+    // Check that the maps from interceptor's holder to constant function's
+    // holder haven't changed and thus we can use cached constant function.
+    stub_compiler_->CheckPrototypes(interceptor_holder, receiver,
                                     lookup->holder(),
                                     scratch1, scratch2, name,
                                     depth2, miss);
 
+    // Invoke function.
     if (can_do_fast_api_call) {
       GenerateFastApiCall(masm, optimization, arguments_.immediate());
     } else {
@@ -680,12 +711,14 @@ class CallInterceptorCompiler BASE_EMBEDDED {
                         JUMP_FUNCTION);
     }
 
+    // Deferred code for fast API call case---clean preallocated space.
     if (can_do_fast_api_call) {
       __ bind(&miss_cleanup);
       FreeSpaceForFastApiCall(masm, scratch1);
       __ jmp(miss_label);
     }
 
+    // Invoke a regular function.
     __ bind(&regular_invoke);
     if (can_do_fast_api_call) {
       FreeSpaceForFastApiCall(masm, scratch1);
@@ -698,10 +731,10 @@ class CallInterceptorCompiler BASE_EMBEDDED {
                       Register scratch1,
                       Register scratch2,
                       String* name,
-                      JSObject* holder_obj,
+                      JSObject* interceptor_holder,
                       Label* miss_label) {
     Register holder =
-        stub_compiler_->CheckPrototypes(object, receiver, holder_obj,
+        stub_compiler_->CheckPrototypes(object, receiver, interceptor_holder,
                                         scratch1, scratch2, name,
                                         miss_label);
 
@@ -713,7 +746,7 @@ class CallInterceptorCompiler BASE_EMBEDDED {
                              receiver,
                              holder,
                              name_,
-                             holder_obj);
+                             interceptor_holder);
 
     __ CallExternalReference(
           ExternalReference(
@@ -1179,7 +1212,7 @@ Object* CallStubCompiler::CompileArrayPushCall(Object* object,
       __ mov(eax, FieldOperand(edx, JSArray::kLengthOffset));
       STATIC_ASSERT(kSmiTagSize == 1);
       STATIC_ASSERT(kSmiTag == 0);
-      __ add(Operand(eax), Immediate(argc << 1));
+      __ add(Operand(eax), Immediate(Smi::FromInt(argc)));
 
       // Get the element's length into ecx.
       __ mov(ecx, FieldOperand(ebx, FixedArray::kLengthOffset));
@@ -1232,7 +1265,7 @@ Object* CallStubCompiler::CompileArrayPushCall(Object* object,
       __ j(not_equal, &call_builtin);
       __ add(Operand(ecx), Immediate(kAllocationDelta * kPointerSize));
       __ cmp(ecx, Operand::StaticVariable(new_space_allocation_limit));
-      __ j(greater, &call_builtin);
+      __ j(above, &call_builtin);
 
       // We fit and could grow elements.
       __ mov(Operand::StaticVariable(new_space_allocation_top), ecx);
@@ -1266,16 +1299,11 @@ Object* CallStubCompiler::CompileArrayPushCall(Object* object,
   }
 
   __ bind(&miss);
-
   Handle<Code> ic = ComputeCallMiss(arguments().immediate());
   __ jmp(ic, RelocInfo::CODE_TARGET);
 
   // Return the generated code.
-  String* function_name = NULL;
-  if (function->shared()->name()->IsString()) {
-    function_name = String::cast(function->shared()->name());
-  }
-  return GetCode(CONSTANT_FUNCTION, function_name);
+  return GetCode(function);
 }
 
 
@@ -1298,7 +1326,7 @@ Object* CallStubCompiler::CompileArrayPopCall(Object* object,
     return Heap::undefined_value();
   }
 
-  Label miss, empty_array, call_builtin;
+  Label miss, return_undefined, call_builtin;
 
   // Get the receiver from the stack.
   const int argc = arguments().immediate();
@@ -1307,7 +1335,6 @@ Object* CallStubCompiler::CompileArrayPopCall(Object* object,
   // Check that the receiver isn't a smi.
   __ test(edx, Immediate(kSmiTagMask));
   __ j(zero, &miss);
-
   CheckPrototypes(JSObject::cast(object), edx,
                   holder, ebx,
                   eax, name, &miss);
@@ -1323,7 +1350,7 @@ Object* CallStubCompiler::CompileArrayPopCall(Object* object,
   // Get the array's length into ecx and calculate new length.
   __ mov(ecx, FieldOperand(edx, JSArray::kLengthOffset));
   __ sub(Operand(ecx), Immediate(Smi::FromInt(1)));
-  __ j(negative, &empty_array);
+  __ j(negative, &return_undefined);
 
   // Get the last element.
   STATIC_ASSERT(kSmiTagSize == 1);
@@ -1344,27 +1371,21 @@ Object* CallStubCompiler::CompileArrayPopCall(Object* object,
          Immediate(Factory::the_hole_value()));
   __ ret((argc + 1) * kPointerSize);
 
-  __ bind(&empty_array);
+  __ bind(&return_undefined);
   __ mov(eax, Immediate(Factory::undefined_value()));
   __ ret((argc + 1) * kPointerSize);
 
   __ bind(&call_builtin);
-
   __ TailCallExternalReference(ExternalReference(Builtins::c_ArrayPop),
                                argc + 1,
                                1);
 
   __ bind(&miss);
-
   Handle<Code> ic = ComputeCallMiss(arguments().immediate());
   __ jmp(ic, RelocInfo::CODE_TARGET);
 
   // Return the generated code.
-  String* function_name = NULL;
-  if (function->shared()->name()->IsString()) {
-    function_name = String::cast(function->shared()->name());
-  }
-  return GetCode(CONSTANT_FUNCTION, function_name);
+  return GetCode(function);
 }
 
 
@@ -1383,9 +1404,9 @@ Object* CallStubCompiler::CompileCallConstant(Object* object,
 
   SharedFunctionInfo* function_info = function->shared();
   if (function_info->HasCustomCallGenerator()) {
-    CustomCallGenerator generator =
-        ToCData<CustomCallGenerator>(function_info->function_data());
-    Object* result = generator(this, object, holder, function, name, check);
+    const int id = function_info->custom_call_generator_id();
+    Object* result =
+        CompileCustomCall(id, object, holder, function, name, check);
     // undefined means bail out to regular compiler.
     if (!result->IsUndefined()) {
       return result;
@@ -1522,11 +1543,7 @@ Object* CallStubCompiler::CompileCallConstant(Object* object,
   __ jmp(ic, RelocInfo::CODE_TARGET);
 
   // Return the generated code.
-  String* function_name = NULL;
-  if (function->shared()->name()->IsString()) {
-    function_name = String::cast(function->shared()->name());
-  }
-  return GetCode(CONSTANT_FUNCTION, function_name);
+  return GetCode(function);
 }
 
 
@@ -2405,3 +2422,5 @@ Object* ConstructStubCompiler::CompileConstructStub(
 #undef __
 
 } }  // namespace v8::internal
+
+#endif  // V8_TARGET_ARCH_IA32

@@ -300,12 +300,16 @@ class Operand BASE_EMBEDDED {
           ScaleFactor scale,
           int32_t disp);
 
+  // Offset from existing memory operand.
+  // Offset is added to existing displacement as 32-bit signed values and
+  // this must not overflow.
+  Operand(const Operand& base, int32_t offset);
+
  private:
   byte rex_;
   byte buf_[10];
   // The number of bytes in buf_.
   unsigned int len_;
-  RelocInfo::Mode rmode_;
 
   // Set the ModR/M byte without an encoded 'reg' register. The
   // register is encoded later as part of the emit_operand operation.
@@ -567,11 +571,7 @@ class Assembler : public Malloced {
 
   // Arithmetics
   void addl(Register dst, Register src) {
-    if (dst.low_bits() == 4) {  // Forces SIB byte.
-      arithmetic_op_32(0x01, src, dst);
-    } else {
-      arithmetic_op_32(0x03, dst, src);
-    }
+    arithmetic_op_32(0x03, dst, src);
   }
 
   void addl(Register dst, Immediate src) {
@@ -604,6 +604,10 @@ class Assembler : public Malloced {
 
   void addq(const Operand& dst, Immediate src) {
     immediate_arithmetic_op(0x0, dst, src);
+  }
+
+  void sbbl(Register dst, Register src) {
+    arithmetic_op_32(0x1b, dst, src);
   }
 
   void cmpb(Register dst, Immediate src) {
@@ -1019,6 +1023,7 @@ class Assembler : public Malloced {
 
   void fld1();
   void fldz();
+  void fldpi();
 
   void fld_s(const Operand& adr);
   void fld_d(const Operand& adr);
@@ -1080,6 +1085,10 @@ class Assembler : public Malloced {
 
   // SSE2 instructions
   void movd(XMMRegister dst, Register src);
+  void movd(Register dst, XMMRegister src);
+  void movq(XMMRegister dst, Register src);
+  void movq(Register dst, XMMRegister src);
+  void extractps(Register dst, XMMRegister src, byte imm8);
 
   void movsd(const Operand& dst, XMMRegister src);
   void movsd(XMMRegister dst, XMMRegister src);
@@ -1087,6 +1096,7 @@ class Assembler : public Malloced {
 
   void cvttss2si(Register dst, const Operand& src);
   void cvttsd2si(Register dst, const Operand& src);
+  void cvttsd2siq(Register dst, XMMRegister src);
 
   void cvtlsi2sd(XMMRegister dst, const Operand& src);
   void cvtlsi2sd(XMMRegister dst, Register src);
@@ -1110,6 +1120,7 @@ class Assembler : public Malloced {
   void emit_sse_operand(XMMRegister dst, XMMRegister src);
   void emit_sse_operand(XMMRegister reg, const Operand& adr);
   void emit_sse_operand(XMMRegister dst, Register src);
+  void emit_sse_operand(Register dst, XMMRegister src);
 
   // Use either movsd or movlpd.
   // void movdbl(XMMRegister dst, const Operand& src);
@@ -1176,8 +1187,9 @@ class Assembler : public Malloced {
   // the top bit of both register codes.
   // High bit of reg goes to REX.R, high bit of rm_reg goes to REX.B.
   // REX.W is set.
-  inline void emit_rex_64(Register reg, Register rm_reg);
   inline void emit_rex_64(XMMRegister reg, Register rm_reg);
+  inline void emit_rex_64(Register reg, XMMRegister rm_reg);
+  inline void emit_rex_64(Register reg, Register rm_reg);
 
   // Emits a REX prefix that encodes a 64-bit operand size and
   // the top bit of the destination, index, and base register codes.
@@ -1235,8 +1247,12 @@ class Assembler : public Malloced {
   inline void emit_optional_rex_32(XMMRegister reg, XMMRegister base);
 
   // As for emit_optional_rex_32(Register, Register), except that
-  // the registers are XMM registers.
+  // one of the registers is an XMM registers.
   inline void emit_optional_rex_32(XMMRegister reg, Register base);
+
+  // As for emit_optional_rex_32(Register, Register), except that
+  // one of the registers is an XMM registers.
+  inline void emit_optional_rex_32(Register reg, XMMRegister base);
 
   // As for emit_optional_rex_32(Register, const Operand&), except that
   // the register is an XMM register.

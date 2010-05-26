@@ -37,6 +37,7 @@
 #include "macro-assembler.h"
 #include "natives.h"
 #include "snapshot.h"
+#include "stub-cache.h"
 
 namespace v8 {
 namespace internal {
@@ -228,6 +229,7 @@ class Genesis BASE_EMBEDDED {
   // Used for creating a context from scratch.
   void InstallNativeFunctions();
   bool InstallNatives();
+  void InstallCustomCallGenerators();
   void InstallJSFunctionResultCaches();
   // Used both for deserialized and from-scratch contexts to add the extensions
   // provided.
@@ -1229,6 +1231,8 @@ bool Genesis::InstallNatives() {
 
   InstallNativeFunctions();
 
+  InstallCustomCallGenerators();
+
   // Install Function.prototype.call and apply.
   { Handle<String> key = Factory::function_class_symbol();
     Handle<JSFunction> function =
@@ -1326,6 +1330,29 @@ bool Genesis::InstallNatives() {
 }
 
 
+static void InstallCustomCallGenerator(Handle<JSFunction> holder_function,
+                                       const char* function_name,
+                                       int id) {
+  Handle<JSObject> proto(JSObject::cast(holder_function->instance_prototype()));
+  Handle<String> name = Factory::LookupAsciiSymbol(function_name);
+  Handle<JSFunction> function(JSFunction::cast(proto->GetProperty(*name)));
+  function->shared()->set_function_data(Smi::FromInt(id));
+}
+
+
+void Genesis::InstallCustomCallGenerators() {
+  HandleScope scope;
+#define INSTALL_CALL_GENERATOR(holder_fun, fun_name, name)                \
+  {                                                                       \
+    Handle<JSFunction> holder(global_context()->holder_fun##_function()); \
+    const int id = CallStubCompiler::k##name##CallGenerator;              \
+    InstallCustomCallGenerator(holder, #fun_name, id);                    \
+  }
+  CUSTOM_CALL_IC_GENERATORS(INSTALL_CALL_GENERATOR)
+#undef INSTALL_CALL_GENERATOR
+}
+
+
 // Do not forget to update macros.py with named constant
 // of cache id.
 #define JSFUNCTION_RESULT_CACHE_LIST(F) \
@@ -1335,14 +1362,12 @@ bool Genesis::InstallNatives() {
 static FixedArray* CreateCache(int size, JSFunction* factory) {
   // Caches are supposed to live for a long time, allocate in old space.
   int array_size = JSFunctionResultCache::kEntriesIndex + 2 * size;
-  Handle<FixedArray> cache =
-      Factory::NewFixedArrayWithHoles(array_size, TENURED);
+  // Cannot use cast as object is not fully initialized yet.
+  JSFunctionResultCache* cache = reinterpret_cast<JSFunctionResultCache*>(
+      *Factory::NewFixedArrayWithHoles(array_size, TENURED));
   cache->set(JSFunctionResultCache::kFactoryIndex, factory);
-  cache->set(JSFunctionResultCache::kFingerIndex,
-      Smi::FromInt(JSFunctionResultCache::kEntriesIndex));
-  cache->set(JSFunctionResultCache::kCacheSizeIndex,
-      Smi::FromInt(JSFunctionResultCache::kEntriesIndex));
-  return *cache;
+  cache->MakeZeroSize();
+  return cache;
 }
 
 
@@ -1728,8 +1753,8 @@ Genesis::Genesis(Handle<Object> global_object,
         CreateNewGlobals(global_template, global_object, &inner_global);
     HookUpGlobalProxy(inner_global, global_proxy);
     InitializeGlobal(inner_global, empty_function);
-    if (!InstallNatives()) return;
     InstallJSFunctionResultCaches();
+    if (!InstallNatives()) return;
 
     MakeFunctionInstancePrototypeWritable();
 
