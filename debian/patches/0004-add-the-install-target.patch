@@ -2,15 +2,15 @@ add the install target, it is missing from the shipped source
 
 --- a/SConstruct
 +++ b/SConstruct
-@@ -783,6 +783,7 @@
-   result = Options()
+@@ -784,6 +784,7 @@
    result.Add('mode', 'compilation mode (debug, release)', 'release')
    result.Add('sample', 'build sample (shell, process, lineprocessor)', '')
+   result.Add('cache', 'directory to use for scons build cache', '')
 +  result.Add('install', 'install result files', '')
    result.Add('env', 'override environment settings (NAME0:value0,NAME1:value1,...)', '')
    result.Add('importenv', 'import environment settings (NAME0,NAME1,...)', '')
    for (name, option) in SIMPLE_OPTIONS.iteritems():
-@@ -1127,12 +1128,33 @@
+@@ -1130,8 +1131,27 @@
    env.Alias('sample', samples)
    env.Alias('d8', d8s)
  
@@ -31,7 +31,6 @@ add the install target, it is missing from the shipped source
 +  # Always build at least the library
 +  env.Default('library')
 +
-+
    if env['sample']:
      env.Default('sample')
 +  elif env['install']:
@@ -39,8 +38,3 @@ add the install target, it is missing from the shipped source
    else:
      env.Default('library')
  
- 
-+
- # We disable deprecation warnings because we need to be able to use
- # env.Copy without getting warnings for compatibility with older
- # version of scons.  Also, there's a bug in some revisions that

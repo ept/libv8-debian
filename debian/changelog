@@ -1,9 +1,9 @@
-libv8 (2.2.16-1) unstable; urgency=low
+libv8 (2.2.17-1) unstable; urgency=low
 
   * New upstream release, followed the procedure of README.source to update. 
   * Drops 0005-constraints-visibility.patch (applied upstream).
 
- -- Jérémy Lal <kapouer@melix.org>  Wed, 09 Jun 2010 21:03:57 +0200
+ -- Jérémy Lal <kapouer@melix.org>  Mon, 14 Jun 2010 16:05:48 +0200
 
 libv8 (2.2.7-1) unstable; urgency=low
 
