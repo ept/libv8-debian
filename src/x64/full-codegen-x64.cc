@@ -1518,12 +1518,13 @@ void FullCodeGenerator::EmitAssignment(Expression* expr) {
     case KEYED_PROPERTY: {
       __ push(rax);  // Preserve value.
       VisitForValue(prop->obj(), kStack);
-      VisitForValue(prop->key(), kStack);
-      __ movq(rax, Operand(rsp, 2 * kPointerSize));
+      VisitForValue(prop->key(), kAccumulator);
+      __ movq(rcx, rax);
+      __ pop(rdx);
+      __ pop(rax);
       Handle<Code> ic(Builtins::builtin(Builtins::KeyedStoreIC_Initialize));
       __ call(ic, RelocInfo::CODE_TARGET);
       __ nop();  // Signal no inlined code.
-      __ Drop(3);  // Receiver, key, and extra copy of value.
       break;
     }
   }
@@ -2242,11 +2243,8 @@ void FullCodeGenerator::EmitRandomHeapNumber(ZoneList<Expression*>* args) {
   __ jmp(&heapnumber_allocated);
 
   __ bind(&slow_allocate_heapnumber);
-  // To allocate a heap number, and ensure that it is not a smi, we
-  // call the runtime function FUnaryMinus on 0, returning the double
-  // -0.0.  A new, distinct heap number is returned each time.
-  __ Push(Smi::FromInt(0));
-  __ CallRuntime(Runtime::kNumberUnaryMinus, 1);
+  // Allocate a heap number.
+  __ CallRuntime(Runtime::kNumberAlloc, 0);
   __ movq(rbx, rax);
 
   __ bind(&heapnumber_allocated);
@@ -2806,9 +2804,11 @@ void FullCodeGenerator::VisitUnaryOperation(UnaryOperation* expr) {
 
     case Token::SUB: {
       Comment cmt(masm_, "[ UnaryOperation (SUB)");
-      bool overwrite =
+      bool can_overwrite =
           (expr->expression()->AsBinaryOperation() != NULL &&
            expr->expression()->AsBinaryOperation()->ResultOverwriteAllowed());
+      UnaryOverwriteMode overwrite =
+          can_overwrite ? UNARY_OVERWRITE : UNARY_NO_OVERWRITE;
       GenericUnaryOpStub stub(Token::SUB, overwrite);
       // GenericUnaryOpStub expects the argument to be in the
       // accumulator register rax.
@@ -2820,9 +2820,11 @@ void FullCodeGenerator::VisitUnaryOperation(UnaryOperation* expr) {
 
     case Token::BIT_NOT: {
       Comment cmt(masm_, "[ UnaryOperation (BIT_NOT)");
-      bool overwrite =
+      bool can_overwrite =
           (expr->expression()->AsBinaryOperation() != NULL &&
            expr->expression()->AsBinaryOperation()->ResultOverwriteAllowed());
+      UnaryOverwriteMode overwrite =
+          can_overwrite ? UNARY_OVERWRITE : UNARY_NO_OVERWRITE;
       GenericUnaryOpStub stub(Token::BIT_NOT, overwrite);
       // GenericUnaryOpStub expects the argument to be in the
       // accumulator register rax.

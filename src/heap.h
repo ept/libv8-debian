@@ -36,8 +36,6 @@
 namespace v8 {
 namespace internal {
 
-// Forward declarations.
-class ZoneScopeInfo;
 
 // Defines all the roots in Heap.
 #define UNCONDITIONAL_STRONG_ROOT_LIST(V)                                      \
@@ -69,10 +67,12 @@ class ZoneScopeInfo;
   V(Map, cons_symbol_map, ConsSymbolMap)                                       \
   V(Map, cons_ascii_symbol_map, ConsAsciiSymbolMap)                            \
   V(Map, external_symbol_map, ExternalSymbolMap)                               \
+  V(Map, external_symbol_with_ascii_data_map, ExternalSymbolWithAsciiDataMap)  \
   V(Map, external_ascii_symbol_map, ExternalAsciiSymbolMap)                    \
   V(Map, cons_string_map, ConsStringMap)                                       \
   V(Map, cons_ascii_string_map, ConsAsciiStringMap)                            \
   V(Map, external_string_map, ExternalStringMap)                               \
+  V(Map, external_string_with_ascii_data_map, ExternalStringWithAsciiDataMap)  \
   V(Map, external_ascii_string_map, ExternalAsciiStringMap)                    \
   V(Map, undetectable_string_map, UndetectableStringMap)                       \
   V(Map, undetectable_ascii_string_map, UndetectableAsciiStringMap)            \
@@ -624,7 +624,6 @@ class Heap : public AllStatic {
   // object by containing this pointer.
   // Please note this function does not perform a garbage collection.
   static Object* CreateCode(const CodeDesc& desc,
-                            ZoneScopeInfo* sinfo,
                             Code::Flags flags,
                             Handle<Object> self_reference);
 
@@ -772,11 +771,12 @@ class Heap : public AllStatic {
                                       DirtyRegionCallback visit_dirty_region,
                                       ObjectSlotCallback callback);
 
-  // Iterate pointers to new space found in memory interval from start to end.
+  // Iterate pointers to from semispace of new space found in memory interval
+  // from start to end.
   // Update dirty marks for page containing start address.
-  static void IterateAndMarkPointersToNewSpace(Address start,
-                                               Address end,
-                                               ObjectSlotCallback callback);
+  static void IterateAndMarkPointersToFromSpace(Address start,
+                                                Address end,
+                                                ObjectSlotCallback callback);
 
   // Iterate pointers to new space found in memory interval from start to end.
   // Return true if pointers to new space was found.
@@ -983,6 +983,8 @@ class Heap : public AllStatic {
 
   static void RecordStats(HeapStats* stats);
 
+  static Scavenger GetScavenger(int instance_type, int instance_size);
+
   // Copy block of memory from src to dst. Size of block should be aligned
   // by pointer size.
   static inline void CopyBlock(Address dst, Address src, int byte_size);
@@ -1003,6 +1005,7 @@ class Heap : public AllStatic {
   static void CheckNewSpaceExpansionCriteria();
 
   static inline void IncrementYoungSurvivorsCounter(int survived) {
+    young_survivors_after_last_gc_ = survived;
     survived_since_last_expansion_ += survived;
   }
 
@@ -1229,17 +1232,7 @@ class Heap : public AllStatic {
     set_instanceof_cache_function(the_hole_value());
   }
 
-  // Helper function used by CopyObject to copy a source object to an
-  // allocated target object and update the forwarding pointer in the source
-  // object.  Returns the target object.
-  static inline HeapObject* MigrateObject(HeapObject* source,
-                                          HeapObject* target,
-                                          int size);
-
 #if defined(DEBUG) || defined(ENABLE_LOGGING_AND_PROFILING)
-  // Record the copy of an object in the NewSpace's statistics.
-  static void RecordCopiedObject(HeapObject* obj);
-
   // Record statistics before and after garbage collection.
   static void ReportStatisticsBeforeGC();
   static void ReportStatisticsAfterGC();
@@ -1269,6 +1262,55 @@ class Heap : public AllStatic {
   // Flush code from functions we do not expect to use again. The code will
   // be replaced with a lazy compilable version.
   static void FlushCode();
+
+  static void UpdateSurvivalRateTrend(int start_new_space_size);
+
+  enum SurvivalRateTrend { INCREASING, STABLE, DECREASING, FLUCTUATING };
+
+  static const int kYoungSurvivalRateThreshold = 90;
+  static const int kYoungSurvivalRateAllowedDeviation = 15;
+
+  static int young_survivors_after_last_gc_;
+  static int high_survival_rate_period_length_;
+  static double survival_rate_;
+  static SurvivalRateTrend previous_survival_rate_trend_;
+  static SurvivalRateTrend survival_rate_trend_;
+
+  static void set_survival_rate_trend(SurvivalRateTrend survival_rate_trend) {
+    ASSERT(survival_rate_trend != FLUCTUATING);
+    previous_survival_rate_trend_ = survival_rate_trend_;
+    survival_rate_trend_ = survival_rate_trend;
+  }
+
+  static SurvivalRateTrend survival_rate_trend() {
+    if (survival_rate_trend_ == STABLE) {
+      return STABLE;
+    } else if (previous_survival_rate_trend_ == STABLE) {
+      return survival_rate_trend_;
+    } else if (survival_rate_trend_ != previous_survival_rate_trend_) {
+      return FLUCTUATING;
+    } else {
+      return survival_rate_trend_;
+    }
+  }
+
+  static bool IsStableOrIncreasingSurvivalTrend() {
+    switch (survival_rate_trend()) {
+      case STABLE:
+      case INCREASING:
+        return true;
+      default:
+        return false;
+    }
+  }
+
+  static bool IsIncreasingSurvivalTrend() {
+    return survival_rate_trend() == INCREASING;
+  }
+
+  static bool IsHighSurvivalRate() {
+    return high_survival_rate_period_length_ > 0;
+  }
 
   static const int kInitialSymbolTableSize = 2048;
   static const int kInitialEvalCacheSize = 64;

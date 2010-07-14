@@ -812,6 +812,9 @@ void Genesis::InitializeGlobal(Handle<GlobalObject> inner_global,
     initial_map->set_instance_size(
         initial_map->instance_size() + 5 * kPointerSize);
     initial_map->set_instance_descriptors(*descriptors);
+    initial_map->set_scavenger(
+        Heap::GetScavenger(initial_map->instance_type(),
+                           initial_map->instance_size()));
   }
 
   {  // -- J S O N
@@ -1462,6 +1465,7 @@ bool Genesis::InstallExtensions(Handle<Context> global_context,
   }
 
   if (FLAG_expose_gc) InstallExtension("v8/gc");
+  if (FLAG_expose_externalize_string) InstallExtension("v8/externalize");
 
   if (extensions == NULL) return true;
   // Install required extensions

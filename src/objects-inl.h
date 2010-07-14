@@ -237,31 +237,20 @@ bool StringShape::IsSymbol() {
 
 bool String::IsAsciiRepresentation() {
   uint32_t type = map()->instance_type();
-  if ((type & kStringRepresentationMask) == kConsStringTag &&
-      ConsString::cast(this)->second()->length() == 0) {
-    return ConsString::cast(this)->first()->IsAsciiRepresentation();
-  }
   return (type & kStringEncodingMask) == kAsciiStringTag;
 }
 
 
 bool String::IsTwoByteRepresentation() {
   uint32_t type = map()->instance_type();
-  if ((type & kStringRepresentationMask) == kConsStringTag &&
-             ConsString::cast(this)->second()->length() == 0) {
-    return ConsString::cast(this)->first()->IsTwoByteRepresentation();
-  }
   return (type & kStringEncodingMask) == kTwoByteStringTag;
 }
 
 
-bool String::IsExternalTwoByteStringWithAsciiChars() {
-  if (!IsExternalTwoByteString()) return false;
-  const uc16* data = ExternalTwoByteString::cast(this)->resource()->data();
-  for (int i = 0, len = length(); i < len; i++) {
-    if (data[i] > kMaxAsciiCharCode) return false;
-  }
-  return true;
+bool String::HasOnlyAsciiChars() {
+  uint32_t type = map()->instance_type();
+  return (type & kStringEncodingMask) == kAsciiStringTag ||
+         (type & kAsciiDataHintMask) == kAsciiDataHintTag;
 }
 
 
@@ -1177,6 +1166,8 @@ HeapObject* JSObject::elements() {
 
 
 void JSObject::set_elements(HeapObject* value, WriteBarrierMode mode) {
+  ASSERT(map()->has_fast_elements() ==
+         (value->map() == Heap::fixed_array_map()));
   // In the assert below Dictionary is covered under FixedArray.
   ASSERT(value->IsFixedArray() || value->IsPixelArray() ||
          value->IsExternalArray());
@@ -1192,8 +1183,18 @@ void JSObject::initialize_properties() {
 
 
 void JSObject::initialize_elements() {
+  ASSERT(map()->has_fast_elements());
   ASSERT(!Heap::InNewSpace(Heap::empty_fixed_array()));
   WRITE_FIELD(this, kElementsOffset, Heap::empty_fixed_array());
+}
+
+
+Object* JSObject::ResetElements() {
+  Object* obj = map()->GetFastElementsMap();
+  if (obj->IsFailure()) return obj;
+  set_map(Map::cast(obj));
+  initialize_elements();
+  return this;
 }
 
 
@@ -1334,16 +1335,26 @@ void JSObject::InitializeBody(int object_size) {
 }
 
 
+bool JSObject::HasFastProperties() {
+  return !properties()->IsDictionary();
+}
+
+
+int JSObject::MaxFastProperties() {
+  // Allow extra fast properties if the object has more than
+  // kMaxFastProperties in-object properties. When this is the case,
+  // it is very unlikely that the object is being used as a dictionary
+  // and there is a good chance that allowing more map transitions
+  // will be worth it.
+  return Max(map()->inobject_properties(), kMaxFastProperties);
+}
+
+
 void Struct::InitializeBody(int object_size) {
   Object* value = Heap::undefined_value();
   for (int offset = kHeaderSize; offset < object_size; offset += kPointerSize) {
     WRITE_FIELD(this, offset, value);
   }
-}
-
-
-bool JSObject::HasFastProperties() {
-  return !properties()->IsDictionary();
 }
 
 
@@ -2049,6 +2060,21 @@ void ExternalFloatArray::set(int index, float value) {
   ptr[index] = value;
 }
 
+inline Scavenger Map::scavenger() {
+  Scavenger callback = reinterpret_cast<Scavenger>(
+      READ_INTPTR_FIELD(this, kScavengerCallbackOffset));
+
+  ASSERT(callback == Heap::GetScavenger(instance_type(),
+                                        instance_size()));
+
+  return callback;
+}
+
+inline void Map::set_scavenger(Scavenger callback) {
+  WRITE_INTPTR_FIELD(this,
+                     kScavengerCallbackOffset,
+                     reinterpret_cast<intptr_t>(callback));
+}
 
 int Map::instance_size() {
   return READ_BYTE_FIELD(this, kInstanceSizeOffset) << kPointerSizeLog2;
@@ -2188,6 +2214,20 @@ bool Map::is_access_check_needed() {
 }
 
 
+void Map::set_is_extensible(bool value) {
+  if (value) {
+    set_bit_field2(bit_field2() | (1 << kIsExtensible));
+  } else {
+    set_bit_field2(bit_field2() & ~(1 << kIsExtensible));
+  }
+}
+
+bool Map::is_extensible() {
+  return ((1 << kIsExtensible) & bit_field2()) != 0;
+}
+
+
+
 Code::Flags Code::flags() {
   return static_cast<Flags>(READ_INT_FIELD(this, kFlagsOffset));
 }
@@ -2262,13 +2302,15 @@ Code::Flags Code::ComputeFlags(Kind kind,
                                InLoopFlag in_loop,
                                InlineCacheState ic_state,
                                PropertyType type,
-                               int argc) {
+                               int argc,
+                               InlineCacheHolderFlag holder) {
   // Compute the bit mask.
   int bits = kind << kFlagsKindShift;
   if (in_loop) bits |= kFlagsICInLoopMask;
   bits |= ic_state << kFlagsICStateShift;
   bits |= type << kFlagsTypeShift;
   bits |= argc << kFlagsArgumentsCountShift;
+  if (holder == PROTOTYPE_MAP) bits |= kFlagsCacheInPrototypeMapMask;
   // Cast to flags and validate result before returning it.
   Flags result = static_cast<Flags>(bits);
   ASSERT(ExtractKindFromFlags(result) == kind);
@@ -2282,9 +2324,10 @@ Code::Flags Code::ComputeFlags(Kind kind,
 
 Code::Flags Code::ComputeMonomorphicFlags(Kind kind,
                                           PropertyType type,
+                                          InlineCacheHolderFlag holder,
                                           InLoopFlag in_loop,
                                           int argc) {
-  return ComputeFlags(kind, in_loop, MONOMORPHIC, type, argc);
+  return ComputeFlags(kind, in_loop, MONOMORPHIC, type, argc, holder);
 }
 
 
@@ -2317,6 +2360,12 @@ int Code::ExtractArgumentsCountFromFlags(Flags flags) {
 }
 
 
+InlineCacheHolderFlag Code::ExtractCacheHolderFromFlags(Flags flags) {
+  int bits = (flags & kFlagsCacheInPrototypeMapMask);
+  return bits != 0 ? PROTOTYPE_MAP : OWN_MAP;
+}
+
+
 Code::Flags Code::RemoveTypeFromFlags(Flags flags) {
   int bits = flags & ~kFlagsTypeMask;
   return static_cast<Flags>(bits);
@@ -2343,6 +2392,26 @@ void Map::set_prototype(Object* value, WriteBarrierMode mode) {
   ASSERT(value->IsNull() || value->IsJSObject());
   WRITE_FIELD(this, kPrototypeOffset, value);
   CONDITIONAL_WRITE_BARRIER(this, kPrototypeOffset, mode);
+}
+
+
+Object* Map::GetFastElementsMap() {
+  if (has_fast_elements()) return this;
+  Object* obj = CopyDropTransitions();
+  if (obj->IsFailure()) return obj;
+  Map* new_map = Map::cast(obj);
+  new_map->set_has_fast_elements(true);
+  return new_map;
+}
+
+
+Object* Map::GetSlowElementsMap() {
+  if (!has_fast_elements()) return this;
+  Object* obj = CopyDropTransitions();
+  if (obj->IsFailure()) return obj;
+  Map* new_map = Map::cast(obj);
+  new_map->set_has_fast_elements(false);
+  return new_map;
 }
 
 
@@ -2442,6 +2511,7 @@ ACCESSORS(BreakPointInfo, break_point_objects, Object, kBreakPointObjectsIndex)
 #endif
 
 ACCESSORS(SharedFunctionInfo, name, Object, kNameOffset)
+ACCESSORS(SharedFunctionInfo, scope_info, Object, kScopeInfoOffset)
 ACCESSORS(SharedFunctionInfo, construct_stub, Code, kConstructStubOffset)
 ACCESSORS(SharedFunctionInfo, instance_class_name, Object,
           kInstanceClassNameOffset)
@@ -2753,8 +2823,7 @@ JSValue* JSValue::cast(Object* obj) {
 
 
 INT_ACCESSORS(Code, instruction_size, kInstructionSizeOffset)
-INT_ACCESSORS(Code, relocation_size, kRelocationSizeOffset)
-INT_ACCESSORS(Code, sinfo_size, kSInfoSizeOffset)
+ACCESSORS(Code, relocation_info, ByteArray, kRelocationInfoOffset)
 
 
 byte* Code::instruction_start()  {
@@ -2762,13 +2831,28 @@ byte* Code::instruction_start()  {
 }
 
 
+byte* Code::instruction_end()  {
+  return instruction_start() + instruction_size();
+}
+
+
 int Code::body_size() {
-  return RoundUp(instruction_size() + relocation_size(), kObjectAlignment);
+  return RoundUp(instruction_size(), kObjectAlignment);
+}
+
+
+ByteArray* Code::unchecked_relocation_info() {
+  return reinterpret_cast<ByteArray*>(READ_FIELD(this, kRelocationInfoOffset));
 }
 
 
 byte* Code::relocation_start() {
-  return FIELD_ADDR(this, kHeaderSize + instruction_size());
+  return unchecked_relocation_info()->GetDataStartAddress();
+}
+
+
+int Code::relocation_size() {
+  return unchecked_relocation_info()->length();
 }
 
 
@@ -2780,11 +2864,6 @@ byte* Code::entry() {
 bool Code::contains(byte* pc) {
   return (instruction_start() <= pc) &&
       (pc < instruction_start() + instruction_size());
-}
-
-
-byte* Code::sinfo_start() {
-  return FIELD_ADDR(this, kHeaderSize + body_size());
 }
 
 
@@ -2849,11 +2928,14 @@ JSObject::ElementsKind JSObject::GetElementsKind() {
   if (array->IsFixedArray()) {
     // FAST_ELEMENTS or DICTIONARY_ELEMENTS are both stored in a FixedArray.
     if (array->map() == Heap::fixed_array_map()) {
+      ASSERT(map()->has_fast_elements());
       return FAST_ELEMENTS;
     }
     ASSERT(array->IsDictionary());
+    ASSERT(!map()->has_fast_elements());
     return DICTIONARY_ELEMENTS;
   }
+  ASSERT(!map()->has_fast_elements());
   if (array->IsExternalArray()) {
     switch (array->map()->instance_type()) {
       case EXTERNAL_BYTE_ARRAY_TYPE:

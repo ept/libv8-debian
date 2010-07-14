@@ -25,6 +25,8 @@
 // (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
 // OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
+#ifdef ENABLE_DEBUGGER_SUPPORT
+
 #include <stdlib.h>
 
 #include "v8.h"
@@ -192,8 +194,9 @@ static int SetBreakPoint(Handle<v8::internal::JSFunction> fun, int position) {
   static int break_point = 0;
   Handle<v8::internal::SharedFunctionInfo> shared(fun->shared());
   Debug::SetBreakPoint(
-      shared, position,
-      Handle<Object>(v8::internal::Smi::FromInt(++break_point)));
+      shared,
+      Handle<Object>(v8::internal::Smi::FromInt(++break_point)),
+      &position);
   return break_point;
 }
 
@@ -2027,6 +2030,84 @@ TEST(ScriptBreakPointLine) {
 }
 
 
+// Test top level script break points set on lines.
+TEST(ScriptBreakPointLineTopLevel) {
+  v8::HandleScope scope;
+  DebugLocalContext env;
+  env.ExposeDebug();
+
+  v8::Debug::SetDebugEventListener(DebugEventBreakPointHitCount,
+                                   v8::Undefined());
+
+  v8::Local<v8::String> script = v8::String::New(
+    "function f() {\n"
+    "  a = 1;                   // line 1\n"
+    "}\n"
+    "a = 2;                     // line 3\n");
+  v8::Local<v8::Function> f;
+  {
+    v8::HandleScope scope;
+    v8::Script::Compile(script, v8::String::New("test.html"))->Run();
+  }
+  f = v8::Local<v8::Function>::Cast(env->Global()->Get(v8::String::New("f")));
+
+  Heap::CollectAllGarbage(false);
+
+  SetScriptBreakPointByNameFromJS("test.html", 3, -1);
+
+  // Call f and check that there was no break points.
+  break_point_hit_count = 0;
+  f->Call(env->Global(), 0, NULL);
+  CHECK_EQ(0, break_point_hit_count);
+
+  // Recompile and run script and check that break point was hit.
+  break_point_hit_count = 0;
+  v8::Script::Compile(script, v8::String::New("test.html"))->Run();
+  CHECK_EQ(1, break_point_hit_count);
+
+  // Call f and check that there are still no break points.
+  break_point_hit_count = 0;
+  f = v8::Local<v8::Function>::Cast(env->Global()->Get(v8::String::New("f")));
+  CHECK_EQ(0, break_point_hit_count);
+
+  v8::Debug::SetDebugEventListener(NULL);
+  CheckDebuggerUnloaded();
+}
+
+
+// Test that it is possible to add and remove break points in a top level
+// function which has no references but has not been collected yet.
+TEST(ScriptBreakPointTopLevelCrash) {
+  v8::HandleScope scope;
+  DebugLocalContext env;
+  env.ExposeDebug();
+
+  v8::Debug::SetDebugEventListener(DebugEventBreakPointHitCount,
+                                   v8::Undefined());
+
+  v8::Local<v8::String> script_source = v8::String::New(
+    "function f() {\n"
+    "  return 0;\n"
+    "}\n"
+    "f()");
+
+  int sbp1 = SetScriptBreakPointByNameFromJS("test.html", 3, -1);
+  {
+    v8::HandleScope scope;
+    break_point_hit_count = 0;
+    v8::Script::Compile(script_source, v8::String::New("test.html"))->Run();
+    CHECK_EQ(1, break_point_hit_count);
+  }
+
+  int sbp2 = SetScriptBreakPointByNameFromJS("test.html", 3, -1);
+  ClearBreakPointFromJS(sbp1);
+  ClearBreakPointFromJS(sbp2);
+
+  v8::Debug::SetDebugEventListener(NULL);
+  CheckDebuggerUnloaded();
+}
+
+
 // Test that it is possible to remove the last break point for a function
 // inside the break handling of that break point.
 TEST(RemoveBreakPointInBreak) {
@@ -2081,7 +2162,7 @@ TEST(DebuggerStatement) {
 }
 
 
-// Test setting a breakpoint on the  debugger statement.
+// Test setting a breakpoint on the debugger statement.
 TEST(DebuggerStatementBreakpoint) {
     break_point_hit_count = 0;
     v8::HandleScope scope;
@@ -6569,3 +6650,4 @@ TEST(DebugEventContext) {
   CheckDebuggerUnloaded();
 }
 
+#endif  // ENABLE_DEBUGGER_SUPPORT

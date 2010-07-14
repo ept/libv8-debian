@@ -121,7 +121,6 @@ void CpuFeatures::Probe() {
   CodeDesc desc;
   assm.GetCode(&desc);
   Object* code = Heap::CreateCode(desc,
-                                  NULL,
                                   Code::ComputeFlags(Code::STUB),
                                   Handle<Code>::null());
   if (!code->IsCode()) return;
@@ -375,6 +374,11 @@ void Assembler::Align(int m) {
   while ((pc_offset() & (m - 1)) != 0) {
     nop();
   }
+}
+
+
+void Assembler::CodeTargetAlign() {
+  Align(16);  // Preferred alignment of jump targets on ia32.
 }
 
 
@@ -2150,17 +2154,6 @@ void Assembler::sqrtsd(XMMRegister dst, XMMRegister src) {
   EMIT(0xF2);
   EMIT(0x0F);
   EMIT(0x51);
-  emit_sse_operand(dst, src);
-}
-
-
-void Assembler::comisd(XMMRegister dst, XMMRegister src) {
-  ASSERT(CpuFeatures::IsEnabled(SSE2));
-  EnsureSpace ensure_space(this);
-  last_pc_ = pc_;
-  EMIT(0x66);
-  EMIT(0x0F);
-  EMIT(0x2F);
   emit_sse_operand(dst, src);
 }
 

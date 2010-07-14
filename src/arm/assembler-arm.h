@@ -130,6 +130,20 @@ struct DwVfpRegister {
   // Supporting d0 to d15, can be later extended to d31.
   bool is_valid() const  { return 0 <= code_ && code_ < 16; }
   bool is(DwVfpRegister reg) const  { return code_ == reg.code_; }
+  SwVfpRegister low() const  {
+    SwVfpRegister reg;
+    reg.code_ = code_ * 2;
+
+    ASSERT(reg.is_valid());
+    return reg;
+  }
+  SwVfpRegister high() const  {
+    SwVfpRegister reg;
+    reg.code_ = (code_ * 2) + 1;
+
+    ASSERT(reg.is_valid());
+    return reg;
+  }
   int code() const  {
     ASSERT(is_valid());
     return code_;
@@ -279,7 +293,10 @@ enum Condition {
 
 
 // Returns the equivalent of !cc.
-INLINE(Condition NegateCondition(Condition cc));
+inline Condition NegateCondition(Condition cc) {
+  ASSERT(cc != al);
+  return static_cast<Condition>(cc ^ ne);
+}
 
 
 // Corresponds to transposing the operands of a comparison.
@@ -545,6 +562,12 @@ extern const Instr kMovMvnMask;
 extern const Instr kMovMvnPattern;
 extern const Instr kMovMvnFlip;
 
+extern const Instr kMovLeaveCCMask;
+extern const Instr kMovLeaveCCPattern;
+extern const Instr kMovwMask;
+extern const Instr kMovwPattern;
+extern const Instr kMovwLeaveCCFlip;
+
 extern const Instr kCmpCmnMask;
 extern const Instr kCmpCmnPattern;
 extern const Instr kCmpCmnFlip;
@@ -694,6 +717,8 @@ class Assembler : public Malloced {
   // possible to align the pc offset to a multiple
   // of m. m must be a power of 2 (>= 4).
   void Align(int m);
+  // Aligns code to something that's optimal for a jump target for the platform.
+  void CodeTargetAlign();
 
   // Branch instructions
   void b(int branch_offset, Condition cond = al);
@@ -771,6 +796,13 @@ class Assembler : public Malloced {
   void mov(Register dst, Register src, SBit s = LeaveCC, Condition cond = al) {
     mov(dst, Operand(src), s, cond);
   }
+
+  // ARMv7 instructions for loading a 32 bit immediate in two instructions.
+  // This may actually emit a different mov instruction, but on an ARMv7 it
+  // is guaranteed to only emit one instruction.
+  void movw(Register reg, uint32_t immediate, Condition cond = al);
+  // The constant for movt should be in the range 0-0xffff.
+  void movt(Register reg, uint32_t immediate, Condition cond = al);
 
   void bic(Register dst, Register src1, const Operand& src2,
            SBit s = LeaveCC, Condition cond = al);
@@ -912,6 +944,16 @@ class Assembler : public Malloced {
             const Register base,
             int offset,  // Offset must be a multiple of 4.
             const Condition cond = al);
+
+  void vmov(const DwVfpRegister dst,
+            double imm,
+            const Condition cond = al);
+  void vmov(const SwVfpRegister dst,
+            const SwVfpRegister src,
+            const Condition cond = al);
+  void vmov(const DwVfpRegister dst,
+            const DwVfpRegister src,
+            const Condition cond = al);
   void vmov(const DwVfpRegister dst,
             const Register src1,
             const Register src2,
@@ -970,6 +1012,9 @@ class Assembler : public Malloced {
             const Condition cond = al);
   void vmrs(const Register dst,
             const Condition cond = al);
+  void vsqrt(const DwVfpRegister dst,
+             const DwVfpRegister src,
+             const Condition cond = al);
 
   // Pseudo instructions
   void nop(int type = 0);
@@ -1092,6 +1137,7 @@ class Assembler : public Malloced {
   void EndBlockConstPool() {
     const_pool_blocked_nesting_--;
   }
+  bool is_const_pool_blocked() const { return const_pool_blocked_nesting_ > 0; }
 
  private:
   // Code buffer:
