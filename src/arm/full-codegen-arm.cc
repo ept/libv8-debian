@@ -110,10 +110,10 @@ void FullCodeGenerator::Generate(CompilationInfo* info, Mode mode) {
           __ mov(r1, Operand(Context::SlotOffset(slot->index())));
           __ str(r0, MemOperand(cp, r1));
           // Update the write barrier. This clobbers all involved
-          // registers, so we have use a third register to avoid
+          // registers, so we have to use two more registers to avoid
           // clobbering cp.
           __ mov(r2, Operand(cp));
-          __ RecordWrite(r2, r1, r0);
+          __ RecordWrite(r2, Operand(r1), r3, r0);
         }
       }
     }
@@ -666,8 +666,10 @@ void FullCodeGenerator::Move(Slot* dst,
   __ str(src, location);
   // Emit the write barrier code if the location is in the heap.
   if (dst->type() == Slot::CONTEXT) {
-    __ mov(scratch2, Operand(Context::SlotOffset(dst->index())));
-    __ RecordWrite(scratch1, scratch2, src);
+    __ RecordWrite(scratch1,
+                   Operand(Context::SlotOffset(dst->index())),
+                   scratch2,
+                   src);
   }
 }
 
@@ -715,10 +717,9 @@ void FullCodeGenerator::EmitDeclaration(Variable* variable,
           __ str(result_register(),
                  CodeGenerator::ContextOperand(cp, slot->index()));
           int offset = Context::SlotOffset(slot->index());
-          __ mov(r2, Operand(offset));
           // We know that we have written a function, which is not a smi.
           __ mov(r1, Operand(cp));
-          __ RecordWrite(r1, r2, result_register());
+          __ RecordWrite(r1, Operand(offset), r2, result_register());
         }
         break;
 
@@ -1252,8 +1253,7 @@ void FullCodeGenerator::VisitArrayLiteral(ArrayLiteral* expr) {
 
     // Update the write barrier for the array store with r0 as the scratch
     // register.
-    __ mov(r2, Operand(offset));
-    __ RecordWrite(r1, r2, result_register());
+    __ RecordWrite(r1, Operand(offset), r2, result_register());
   }
 
   if (result_saved) {
@@ -1493,8 +1493,7 @@ void FullCodeGenerator::EmitVariableAssignment(Variable* var,
         // RecordWrite may destroy all its register arguments.
         __ mov(r3, result_register());
         int offset = FixedArray::kHeaderSize + slot->index() * kPointerSize;
-        __ mov(r2, Operand(offset));
-        __ RecordWrite(r1, r2, r3);
+        __ RecordWrite(r1, Operand(offset), r2, r3);
         break;
       }
 
@@ -2157,16 +2156,13 @@ void FullCodeGenerator::EmitRandomHeapNumber(ZoneList<Expression*>* args) {
   Label slow_allocate_heapnumber;
   Label heapnumber_allocated;
 
-  __ AllocateHeapNumber(r4, r1, r2, &slow_allocate_heapnumber);
+  __ LoadRoot(r6, Heap::kHeapNumberMapRootIndex);
+  __ AllocateHeapNumber(r4, r1, r2, r6, &slow_allocate_heapnumber);
   __ jmp(&heapnumber_allocated);
 
   __ bind(&slow_allocate_heapnumber);
-  // To allocate a heap number, and ensure that it is not a smi, we
-  // call the runtime function FUnaryMinus on 0, returning the double
-  // -0.0. A new, distinct heap number is returned each time.
-  __ mov(r0, Operand(Smi::FromInt(0)));
-  __ push(r0);
-  __ CallRuntime(Runtime::kNumberUnaryMinus, 1);
+  // Allocate a heap number.
+  __ CallRuntime(Runtime::kNumberAlloc, 0);
   __ mov(r4, Operand(r0));
 
   __ bind(&heapnumber_allocated);
@@ -2276,8 +2272,7 @@ void FullCodeGenerator::EmitSetValueOf(ZoneList<Expression*>* args) {
   __ str(r0, FieldMemOperand(r1, JSValue::kValueOffset));
   // Update the write barrier.  Save the value as it will be
   // overwritten by the write barrier code and is needed afterward.
-  __ mov(r2, Operand(JSValue::kValueOffset - kHeapObjectTag));
-  __ RecordWrite(r1, r2, r3);
+  __ RecordWrite(r1, Operand(JSValue::kValueOffset - kHeapObjectTag), r2, r3);
 
   __ bind(&done);
   Apply(context_, r0);
@@ -2737,9 +2732,11 @@ void FullCodeGenerator::VisitUnaryOperation(UnaryOperation* expr) {
 
     case Token::SUB: {
       Comment cmt(masm_, "[ UnaryOperation (SUB)");
-      bool overwrite =
+      bool can_overwrite =
           (expr->expression()->AsBinaryOperation() != NULL &&
            expr->expression()->AsBinaryOperation()->ResultOverwriteAllowed());
+      UnaryOverwriteMode overwrite =
+          can_overwrite ? UNARY_OVERWRITE : UNARY_NO_OVERWRITE;
       GenericUnaryOpStub stub(Token::SUB, overwrite);
       // GenericUnaryOpStub expects the argument to be in the
       // accumulator register r0.
@@ -2751,9 +2748,11 @@ void FullCodeGenerator::VisitUnaryOperation(UnaryOperation* expr) {
 
     case Token::BIT_NOT: {
       Comment cmt(masm_, "[ UnaryOperation (BIT_NOT)");
-      bool overwrite =
+      bool can_overwrite =
           (expr->expression()->AsBinaryOperation() != NULL &&
            expr->expression()->AsBinaryOperation()->ResultOverwriteAllowed());
+      UnaryOverwriteMode overwrite =
+          can_overwrite ? UNARY_OVERWRITE : UNARY_NO_OVERWRITE;
       GenericUnaryOpStub stub(Token::BIT_NOT, overwrite);
       // GenericUnaryOpStub expects the argument to be in the
       // accumulator register r0.

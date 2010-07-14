@@ -678,6 +678,9 @@ Object* String::SlowTryFlatten(PretenureFlag pretenure) {
 
 
 bool String::MakeExternal(v8::String::ExternalStringResource* resource) {
+  // Externalizing twice leaks the external resource, so it's
+  // prohibited by the API.
+  ASSERT(!this->IsExternalString());
 #ifdef DEBUG
   if (FLAG_enable_slow_asserts) {
     // Assert that the resource and the string are equivalent.
@@ -697,13 +700,16 @@ bool String::MakeExternal(v8::String::ExternalStringResource* resource) {
     return false;
   }
   ASSERT(size >= ExternalString::kSize);
+  bool is_ascii = this->IsAsciiRepresentation();
   bool is_symbol = this->IsSymbol();
   int length = this->length();
   int hash_field = this->hash_field();
 
   // Morph the object to an external string by adjusting the map and
   // reinitializing the fields.
-  this->set_map(Heap::external_string_map());
+  this->set_map(is_ascii ?
+                Heap::external_string_with_ascii_data_map() :
+                Heap::external_string_map());
   ExternalTwoByteString* self = ExternalTwoByteString::cast(this);
   self->set_length(length);
   self->set_hash_field(hash_field);
@@ -713,7 +719,9 @@ bool String::MakeExternal(v8::String::ExternalStringResource* resource) {
   if (is_symbol) {
     self->Hash();  // Force regeneration of the hash value.
     // Now morph this external string into a external symbol.
-    this->set_map(Heap::external_symbol_map());
+    this->set_map(is_ascii ?
+                  Heap::external_symbol_with_ascii_data_map() :
+                  Heap::external_symbol_map());
   }
 
   // Fill the remainder of the string with dead wood.
@@ -1268,7 +1276,7 @@ Object* JSObject::AddFastProperty(String* name,
   }
 
   if (map()->unused_property_fields() == 0) {
-    if (properties()->length() > kMaxFastProperties) {
+    if (properties()->length() > MaxFastProperties()) {
       Object* obj = NormalizeProperties(CLEAR_INOBJECT_PROPERTIES, 0);
       if (obj->IsFailure()) return obj;
       return AddSlowProperty(name, value, attributes);
@@ -1378,6 +1386,11 @@ Object* JSObject::AddProperty(String* name,
                               Object* value,
                               PropertyAttributes attributes) {
   ASSERT(!IsJSGlobalProxy());
+  if (!map()->is_extensible()) {
+    Handle<Object> args[1] = {Handle<String>(name)};
+    return Top::Throw(*Factory::NewTypeError("object_not_extensible",
+                                               HandleVector(args, 1)));
+  }
   if (HasFastProperties()) {
     // Ensure the descriptor array does not get too big.
     if (map()->instance_descriptors()->number_of_descriptors() <
@@ -1466,7 +1479,7 @@ Object* JSObject::ConvertDescriptorToField(String* name,
                                            Object* new_value,
                                            PropertyAttributes attributes) {
   if (map()->unused_property_fields() == 0 &&
-      properties()->length() > kMaxFastProperties) {
+      properties()->length() > MaxFastProperties()) {
     Object* obj = NormalizeProperties(CLEAR_INOBJECT_PROPERTIES, 0);
     if (obj->IsFailure()) return obj;
     return ReplaceSlowProperty(name, new_value, attributes);
@@ -1738,8 +1751,6 @@ void JSObject::LocalLookupRealNamedProperty(String* name,
       result->DictionaryResult(this, entry);
       return;
     }
-    // Slow case object skipped during lookup. Do not use inline caching.
-    if (!IsGlobalObject()) result->DisallowCaching();
   }
   result->NotFound();
 }
@@ -2179,6 +2190,8 @@ Object* JSObject::NormalizeProperties(PropertyNormalizationMode mode,
     int new_instance_size = map()->instance_size() - instance_size_delta;
     new_map->set_inobject_properties(0);
     new_map->set_instance_size(new_instance_size);
+    new_map->set_scavenger(Heap::GetScavenger(new_map->instance_type(),
+                                              new_map->instance_size()));
     Heap::CreateFillerObjectAt(this->address() + new_instance_size,
                                instance_size_delta);
   }
@@ -2214,6 +2227,11 @@ Object* JSObject::TransformToFastProperties(int unused_property_fields) {
 Object* JSObject::NormalizeElements() {
   ASSERT(!HasPixelElements() && !HasExternalArrayElements());
   if (HasDictionaryElements()) return this;
+  ASSERT(map()->has_fast_elements());
+
+  Object* obj = map()->GetSlowElementsMap();
+  if (obj->IsFailure()) return obj;
+  Map* new_map = Map::cast(obj);
 
   // Get number of entries.
   FixedArray* array = FixedArray::cast(elements());
@@ -2222,7 +2240,7 @@ Object* JSObject::NormalizeElements() {
   int length = IsJSArray() ?
                Smi::cast(JSArray::cast(this)->length())->value() :
                array->length();
-  Object* obj = NumberDictionary::Allocate(length);
+  obj = NumberDictionary::Allocate(length);
   if (obj->IsFailure()) return obj;
   NumberDictionary* dictionary = NumberDictionary::cast(obj);
   // Copy entries.
@@ -2235,7 +2253,10 @@ Object* JSObject::NormalizeElements() {
       dictionary = NumberDictionary::cast(result);
     }
   }
-  // Switch to using the dictionary as the backing storage for elements.
+  // Switch to using the dictionary as the backing storage for
+  // elements. Set the new map first to satify the elements type
+  // assert in set_elements().
+  set_map(new_map);
   set_elements(dictionary);
 
   Counters::elements_to_dictionary.Increment();
@@ -2557,6 +2578,25 @@ bool JSObject::ReferencesObject(Object* obj) {
 
   // No references to object.
   return false;
+}
+
+
+Object* JSObject::PreventExtensions() {
+  // If there are fast elements we normalize.
+  if (HasFastElements()) {
+    NormalizeElements();
+  }
+  // Make sure that we never go back to fast case.
+  element_dictionary()->set_requires_slow_elements();
+
+  // Do a map transition, other objects with this map may still
+  // be extensible.
+  Object* new_map = map()->CopyDropTransitions();
+  if (new_map->IsFailure()) return new_map;
+  Map::cast(new_map)->set_is_extensible(false);
+  set_map(Map::cast(new_map));
+  ASSERT(!map()->is_extensible());
+  return new_map;
 }
 
 
@@ -3060,7 +3100,7 @@ Object* Map::CopyDropTransitions() {
   Object* descriptors = instance_descriptors()->RemoveTransitions();
   if (descriptors->IsFailure()) return descriptors;
   cast(new_map)->set_instance_descriptors(DescriptorArray::cast(descriptors));
-  return cast(new_map);
+  return new_map;
 }
 
 
@@ -4995,7 +5035,7 @@ void Map::ClearNonLiveTransitions(Object* real_prototype) {
 
 void Map::MapIterateBody(ObjectVisitor* v) {
   // Assumes all Object* members are contiguously allocated!
-  IteratePointers(v, kPrototypeOffset, kCodeCacheOffset + kPointerSize);
+  IteratePointers(v, kPointerFieldsBeginOffset, kPointerFieldsEndOffset);
 }
 
 
@@ -5276,11 +5316,17 @@ void Code::CodeIterateBody(ObjectVisitor* v) {
                   RelocInfo::ModeMask(RelocInfo::DEBUG_BREAK_SLOT) |
                   RelocInfo::ModeMask(RelocInfo::RUNTIME_ENTRY);
 
-  for (RelocIterator it(this, mode_mask); !it.done(); it.next()) {
+  // Use the relocation info pointer before it is visited by
+  // the heap compaction in the next statement.
+  RelocIterator it(this, mode_mask);
+
+  IteratePointers(v,
+                  kRelocationInfoOffset,
+                  kRelocationInfoOffset + kPointerSize);
+
+  for (; !it.done(); it.next()) {
     it.rinfo()->Visit(v);
   }
-
-  ScopeInfo<>::IterateScopeInfo(this, v);
 }
 
 
@@ -5295,14 +5341,6 @@ void Code::Relocate(intptr_t delta) {
 void Code::CopyFrom(const CodeDesc& desc) {
   // copy code
   memmove(instruction_start(), desc.buffer, desc.instr_size);
-
-  // fill gap with zero bytes
-  { byte* p = instruction_start() + desc.instr_size;
-    byte* q = relocation_start();
-    while (p < q) {
-      *p++ = 0;
-    }
-  }
 
   // copy reloc info
   memmove(relocation_start(),
@@ -5465,14 +5503,18 @@ void Code::Disassemble(const char* name) {
 #endif  // ENABLE_DISASSEMBLER
 
 
-void JSObject::SetFastElements(FixedArray* elems) {
+Object* JSObject::SetFastElementsCapacityAndLength(int capacity, int length) {
   // We should never end in here with a pixel or external array.
   ASSERT(!HasPixelElements() && !HasExternalArrayElements());
-#ifdef DEBUG
-  // Check the provided array is filled with the_hole.
-  uint32_t len = static_cast<uint32_t>(elems->length());
-  for (uint32_t i = 0; i < len; i++) ASSERT(elems->get(i)->IsTheHole());
-#endif
+
+  Object* obj = Heap::AllocateFixedArrayWithHoles(capacity);
+  if (obj->IsFailure()) return obj;
+  FixedArray* elems = FixedArray::cast(obj);
+
+  obj = map()->GetFastElementsMap();
+  if (obj->IsFailure()) return obj;
+  Map* new_map = Map::cast(obj);
+
   AssertNoAllocation no_gc;
   WriteBarrierMode mode = elems->GetWriteBarrierMode(no_gc);
   switch (GetElementsKind()) {
@@ -5500,7 +5542,15 @@ void JSObject::SetFastElements(FixedArray* elems) {
       UNREACHABLE();
       break;
   }
+
+  set_map(new_map);
   set_elements(elems);
+
+  if (IsJSArray()) {
+    JSArray::cast(this)->set_length(Smi::FromInt(length));
+  }
+
+  return this;
 }
 
 
@@ -5587,7 +5637,7 @@ Object* JSObject::SetElementsLength(Object* len) {
 
   Object* smi_length = len->ToSmi();
   if (smi_length->IsSmi()) {
-    int value = Smi::cast(smi_length)->value();
+    const int value = Smi::cast(smi_length)->value();
     if (value < 0) return ArrayLengthRangeError();
     switch (GetElementsKind()) {
       case FAST_ELEMENTS: {
@@ -5609,12 +5659,8 @@ Object* JSObject::SetElementsLength(Object* len) {
         int new_capacity = value > min ? value : min;
         if (new_capacity <= kMaxFastElementsLength ||
             !ShouldConvertToSlowElements(new_capacity)) {
-          Object* obj = Heap::AllocateFixedArrayWithHoles(new_capacity);
+          Object* obj = SetFastElementsCapacityAndLength(new_capacity, value);
           if (obj->IsFailure()) return obj;
-          if (IsJSArray()) {
-            JSArray::cast(this)->set_length(Smi::cast(smi_length));
-          }
-          SetFastElements(FixedArray::cast(obj));
           return this;
         }
         break;
@@ -5625,7 +5671,8 @@ Object* JSObject::SetElementsLength(Object* len) {
             // If the length of a slow array is reset to zero, we clear
             // the array and flush backing storage. This has the added
             // benefit that the array returns to fast mode.
-            initialize_elements();
+            Object* obj = ResetElements();
+            if (obj->IsFailure()) return obj;
           } else {
             // Remove deleted elements.
             uint32_t old_length =
@@ -6084,12 +6131,8 @@ Object* JSObject::SetFastElement(uint32_t index, Object* value) {
     if (new_capacity <= kMaxFastElementsLength ||
         !ShouldConvertToSlowElements(new_capacity)) {
       ASSERT(static_cast<uint32_t>(new_capacity) > index);
-      Object* obj = Heap::AllocateFixedArrayWithHoles(new_capacity);
+      Object* obj = SetFastElementsCapacityAndLength(new_capacity, index + 1);
       if (obj->IsFailure()) return obj;
-      SetFastElements(FixedArray::cast(obj));
-      if (IsJSArray()) {
-        JSArray::cast(this)->set_length(Smi::FromInt(index + 1));
-      }
       FixedArray::cast(elements())->set(index, value);
       return value;
     }
@@ -6188,6 +6231,15 @@ Object* JSObject::SetElementWithoutInterceptor(uint32_t index, Object* value) {
             return value;
           }
         }
+        // When we set the is_extensible flag to false we always force
+        // the element into dictionary mode (and force them to stay there).
+        if (!map()->is_extensible()) {
+          Handle<Object> number(Heap::NumberFromUint32(index));
+          Handle<String> index_string(Factory::NumberToString(number));
+          Handle<Object> args[1] = { index_string };
+          return Top::Throw(*Factory::NewTypeError("object_not_extensible",
+                                                   HandleVector(args, 1)));
+        }
         Object* result = dictionary->AtNumberPut(index, value);
         if (result->IsFailure()) return result;
         if (elms != FixedArray::cast(result)) {
@@ -6208,13 +6260,11 @@ Object* JSObject::SetElementWithoutInterceptor(uint32_t index, Object* value) {
         uint32_t new_length = 0;
         if (IsJSArray()) {
           CHECK(JSArray::cast(this)->length()->ToArrayIndex(&new_length));
-          JSArray::cast(this)->set_length(Smi::FromInt(new_length));
         } else {
           new_length = NumberDictionary::cast(elements())->max_number_key() + 1;
         }
-        Object* obj = Heap::AllocateFixedArrayWithHoles(new_length);
+        Object* obj = SetFastElementsCapacityAndLength(new_length, new_length);
         if (obj->IsFailure()) return obj;
-        SetFastElements(FixedArray::cast(obj));
 #ifdef DEBUG
         if (FLAG_trace_normalization) {
           PrintF("Object elements are fast case again:\n");
@@ -7518,14 +7568,18 @@ Object* JSObject::PrepareElementsForSort(uint32_t limit) {
     }
     // Convert to fast elements.
 
+    Object* obj = map()->GetFastElementsMap();
+    if (obj->IsFailure()) return obj;
+    Map* new_map = Map::cast(obj);
+
     PretenureFlag tenure = Heap::InNewSpace(this) ? NOT_TENURED: TENURED;
     Object* new_array =
         Heap::AllocateFixedArray(dict->NumberOfElements(), tenure);
-    if (new_array->IsFailure()) {
-      return new_array;
-    }
+    if (new_array->IsFailure()) return new_array;
     FixedArray* fast_elements = FixedArray::cast(new_array);
     dict->CopyValuesTo(fast_elements);
+
+    set_map(new_map);
     set_elements(fast_elements);
   }
   ASSERT(HasFastElements());
@@ -8147,7 +8201,7 @@ Object* Dictionary<Shape, Key>::DeleteProperty(int entry,
 
 template<typename Shape, typename Key>
 Object* Dictionary<Shape, Key>::AtPut(Key key, Object* value) {
-  int entry = FindEntry(key);
+  int entry = this->FindEntry(key);
 
   // If the entry is present set the value;
   if (entry != Dictionary<Shape, Key>::kNotFound) {
@@ -8172,7 +8226,7 @@ Object* Dictionary<Shape, Key>::Add(Key key,
                                     Object* value,
                                     PropertyDetails details) {
   // Valdate key is absent.
-  SLOW_ASSERT((FindEntry(key) == Dictionary<Shape, Key>::kNotFound));
+  SLOW_ASSERT((this->FindEntry(key) == Dictionary<Shape, Key>::kNotFound));
   // Check whether the dictionary should be extended.
   Object* obj = EnsureCapacity(1, key);
   if (obj->IsFailure()) return obj;
@@ -8231,7 +8285,7 @@ Object* NumberDictionary::AddNumberEntry(uint32_t key,
                                          Object* value,
                                          PropertyDetails details) {
   UpdateMaxNumberKey(key);
-  SLOW_ASSERT(FindEntry(key) == kNotFound);
+  SLOW_ASSERT(this->FindEntry(key) == kNotFound);
   return Add(key, value, details);
 }
 

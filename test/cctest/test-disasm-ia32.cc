@@ -276,9 +276,11 @@ TEST(DisasmIa320) {
 
   __ jmp(&L1);
   __ jmp(Operand(ebx, ecx, times_4, 10000));
+#ifdef ENABLE_DEBUGGER_SUPPORT
   ExternalReference after_break_target =
       ExternalReference(Debug_Address::AfterBreakTarget());
   __ jmp(Operand::StaticVariable(after_break_target));
+#endif  // ENABLE_DEBUGGER_SUPPORT
   __ jmp(ic, RelocInfo::CODE_TARGET);
   __ nop();
 
@@ -375,7 +377,7 @@ TEST(DisasmIa320) {
       __ divsd(xmm1, xmm0);
       __ movdbl(xmm1, Operand(ebx, ecx, times_4, 10000));
       __ movdbl(Operand(ebx, ecx, times_4, 10000), xmm1);
-      __ comisd(xmm0, xmm1);
+      __ ucomisd(xmm0, xmm1);
 
       // 128 bit move instructions.
       __ movdqa(xmm0, Operand(ebx, ecx, times_4, 10000));
@@ -413,7 +415,6 @@ TEST(DisasmIa320) {
   CodeDesc desc;
   assm.GetCode(&desc);
   Object* code = Heap::CreateCode(desc,
-                                  NULL,
                                   Code::ComputeFlags(Code::STUB),
                                   Handle<Object>(Heap::undefined_value()));
   CHECK(code->IsCode());

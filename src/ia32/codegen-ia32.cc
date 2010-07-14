@@ -604,6 +604,10 @@ void CodeGenerator::ConvertInt32ResultToNumber(Result* value) {
     RegisterFile empty_regs;
     SetFrame(clone, &empty_regs);
     __ bind(&allocation_failed);
+    if (!CpuFeatures::IsSupported(SSE2)) {
+      // Pop the value from the floating point stack.
+      __ fstp(0);
+    }
     unsafe_bailout_->Jump();
 
     done.Bind(value);
@@ -2991,7 +2995,7 @@ void CodeGenerator::GenerateInlineNumberComparison(Result* left_side,
                               &not_numbers);
     LoadComparisonOperandSSE2(masm_, right_side, xmm1, left_side, right_side,
                               &not_numbers);
-    __ comisd(xmm0, xmm1);
+    __ ucomisd(xmm0, xmm1);
   } else {
     Label check_right, compare;
 
@@ -6674,11 +6678,8 @@ void CodeGenerator::GenerateRandomHeapNumber(
   __ jmp(&heapnumber_allocated);
 
   __ bind(&slow_allocate_heapnumber);
-  // To allocate a heap number, and ensure that it is not a smi, we
-  // call the runtime function FUnaryMinus on 0, returning the double
-  // -0.0.  A new, distinct heap number is returned each time.
-  __ push(Immediate(Smi::FromInt(0)));
-  __ CallRuntime(Runtime::kNumberUnaryMinus, 1);
+  // Allocate a heap number.
+  __ CallRuntime(Runtime::kNumberAlloc, 0);
   __ mov(edi, eax);
 
   __ bind(&heapnumber_allocated);
@@ -7306,7 +7307,7 @@ void CodeGenerator::GenerateMathPow(ZoneList<Expression*>* args) {
     // Since xmm3 is 1 and xmm2 is -0.5 this is simply xmm2 + xmm3.
     __ addsd(xmm2, xmm3);
     // xmm2 now has 0.5.
-    __ comisd(xmm2, xmm1);
+    __ ucomisd(xmm2, xmm1);
     call_runtime.Branch(not_equal);
     // Calculates square root.
     __ movsd(xmm1, xmm0);
@@ -7579,9 +7580,12 @@ void CodeGenerator::VisitUnaryOperation(UnaryOperation* node) {
       frame_->Push(&value);
     } else {
       Load(node->expression());
-      bool overwrite =
+      bool can_overwrite =
           (node->expression()->AsBinaryOperation() != NULL &&
            node->expression()->AsBinaryOperation()->ResultOverwriteAllowed());
+      UnaryOverwriteMode overwrite =
+          can_overwrite ? UNARY_OVERWRITE : UNARY_NO_OVERWRITE;
+      bool no_negative_zero = node->expression()->no_negative_zero();
       switch (op) {
         case Token::NOT:
         case Token::DELETE:
@@ -7590,7 +7594,10 @@ void CodeGenerator::VisitUnaryOperation(UnaryOperation* node) {
           break;
 
         case Token::SUB: {
-          GenericUnaryOpStub stub(Token::SUB, overwrite);
+          GenericUnaryOpStub stub(
+              Token::SUB,
+              overwrite,
+              no_negative_zero ? kIgnoreNegativeZero : kStrictNegativeZero);
           Result operand = frame_->Pop();
           Result answer = frame_->CallStub(&stub, &operand);
           answer.set_type_info(TypeInfo::Number());
@@ -8849,7 +8856,7 @@ Result CodeGenerator::EmitKeyedLoad() {
     // Use masm-> here instead of the double underscore macro since extra
     // coverage code can interfere with the patching.
     masm_->cmp(FieldOperand(receiver.reg(), HeapObject::kMapOffset),
-              Immediate(Factory::null_value()));
+               Immediate(Factory::null_value()));
     deferred->Branch(not_equal);
 
     // Check that the key is a smi.
@@ -8864,9 +8871,11 @@ Result CodeGenerator::EmitKeyedLoad() {
     // is not a dictionary.
     __ mov(elements.reg(),
            FieldOperand(receiver.reg(), JSObject::kElementsOffset));
-    __ cmp(FieldOperand(elements.reg(), HeapObject::kMapOffset),
-           Immediate(Factory::fixed_array_map()));
-    deferred->Branch(not_equal);
+    if (FLAG_debug_code) {
+      __ cmp(FieldOperand(elements.reg(), HeapObject::kMapOffset),
+             Immediate(Factory::fixed_array_map()));
+      __ Assert(equal, "JSObject with fast elements map has slow elements");
+    }
 
     // Check that the key is within bounds.
     __ cmp(key.reg(),
@@ -9854,6 +9863,7 @@ void GenericBinaryOpStub::Generate(MacroAssembler* masm) {
           // the four basic operations. The stub stays in the DEFAULT state
           // forever for all other operations (also if smi code is skipped).
           GenerateTypeTransition(masm);
+          break;
         }
 
         Label not_floats;
@@ -10201,51 +10211,28 @@ void GenericBinaryOpStub::GenerateRegisterArgsPush(MacroAssembler* masm) {
 
 
 void GenericBinaryOpStub::GenerateTypeTransition(MacroAssembler* masm) {
-  Label get_result;
-
-  // Keep a copy of operands on the stack and make sure they are also in
-  // edx, eax.
+  // Ensure the operands are on the stack.
   if (HasArgsInRegisters()) {
     GenerateRegisterArgsPush(masm);
-  } else {
-    GenerateLoadArguments(masm);
   }
 
-  // Internal frame is necessary to handle exceptions properly.
-  __ EnterInternalFrame();
+  __ pop(ecx);  // Save return address.
 
-  // Push arguments on stack if the stub expects them there.
-  if (!HasArgsInRegisters()) {
-    __ push(edx);
-    __ push(eax);
-  }
-  // Call the stub proper to get the result in eax.
-  __ call(&get_result);
-  __ LeaveInternalFrame();
-
-  __ pop(ecx);  // Return address.
   // Left and right arguments are now on top.
-  // Push the operation result. The tail call to BinaryOp_Patch will
-  // return it to the original caller.
-  __ push(eax);
   // Push this stub's key. Although the operation and the type info are
   // encoded into the key, the encoding is opaque, so push them too.
   __ push(Immediate(Smi::FromInt(MinorKey())));
   __ push(Immediate(Smi::FromInt(op_)));
   __ push(Immediate(Smi::FromInt(runtime_operands_type_)));
 
-  __ push(ecx);  // Return address.
+  __ push(ecx);  // Push return address.
 
-  // Patch the caller to an appropriate specialized stub
-  // and return the operation result.
+  // Patch the caller to an appropriate specialized stub and return the
+  // operation result to the caller of the stub.
   __ TailCallExternalReference(
       ExternalReference(IC_Utility(IC::kBinaryOp_Patch)),
-      6,
+      5,
       1);
-
-  // The entry point for the result calculation is assumed to be immediately
-  // after this sequence.
-  __ bind(&get_result);
 }
 
 
@@ -10928,10 +10915,12 @@ void GenericUnaryOpStub::Generate(MacroAssembler* masm) {
     __ test(eax, Immediate(kSmiTagMask));
     __ j(not_zero, &try_float, not_taken);
 
-    // Go slow case if the value of the expression is zero
-    // to make sure that we switch between 0 and -0.
-    __ test(eax, Operand(eax));
-    __ j(zero, &slow, not_taken);
+    if (negative_zero_ == kStrictNegativeZero) {
+      // Go slow case if the value of the expression is zero
+      // to make sure that we switch between 0 and -0.
+      __ test(eax, Operand(eax));
+      __ j(zero, &slow, not_taken);
+    }
 
     // The value of the expression is a smi that is not zero.  Try
     // optimistic subtraction '0 - value'.
@@ -10939,11 +10928,7 @@ void GenericUnaryOpStub::Generate(MacroAssembler* masm) {
     __ mov(edx, Operand(eax));
     __ Set(eax, Immediate(0));
     __ sub(eax, Operand(edx));
-    __ j(overflow, &undo, not_taken);
-
-    // If result is a smi we are done.
-    __ test(eax, Immediate(kSmiTagMask));
-    __ j(zero, &done, taken);
+    __ j(no_overflow, &done, taken);
 
     // Restore eax and go slow case.
     __ bind(&undo);
@@ -10955,7 +10940,7 @@ void GenericUnaryOpStub::Generate(MacroAssembler* masm) {
     __ mov(edx, FieldOperand(eax, HeapObject::kMapOffset));
     __ cmp(edx, Factory::heap_number_map());
     __ j(not_equal, &slow);
-    if (overwrite_) {
+    if (overwrite_ == UNARY_OVERWRITE) {
       __ mov(edx, FieldOperand(eax, HeapNumber::kExponentOffset));
       __ xor_(edx, HeapNumber::kSignMask);  // Flip sign.
       __ mov(FieldOperand(eax, HeapNumber::kExponentOffset), edx);
@@ -10996,7 +10981,7 @@ void GenericUnaryOpStub::Generate(MacroAssembler* masm) {
 
     // Try to store the result in a heap number.
     __ bind(&try_float);
-    if (!overwrite_) {
+    if (overwrite_ == UNARY_NO_OVERWRITE) {
       // Allocate a fresh heap number, but don't overwrite eax until
       // we're sure we can do it without going through the slow case
       // that needs the value in eax.
@@ -11592,7 +11577,7 @@ void NumberToStringStub::GenerateLookupNumberStringCache(MacroAssembler* masm,
       CpuFeatures::Scope fscope(SSE2);
       __ movdbl(xmm0, FieldOperand(object, HeapNumber::kValueOffset));
       __ movdbl(xmm1, FieldOperand(probe, HeapNumber::kValueOffset));
-      __ comisd(xmm0, xmm1);
+      __ ucomisd(xmm0, xmm1);
     } else {
       __ fld_d(FieldOperand(object, HeapNumber::kValueOffset));
       __ fld_d(FieldOperand(probe, HeapNumber::kValueOffset));
@@ -11650,7 +11635,7 @@ static int NegativeComparisonResult(Condition cc) {
 
 
 void CompareStub::Generate(MacroAssembler* masm) {
-  Label call_builtin, done;
+  Label check_unequal_objects, done;
 
   // NOTICE! This code is only reached after a smi-fast-case check, so
   // it is certain that at least one operand isn't a smi.
@@ -11680,13 +11665,15 @@ void CompareStub::Generate(MacroAssembler* masm) {
       __ Set(eax, Immediate(Smi::FromInt(EQUAL)));
       __ ret(0);
     } else {
-      Label return_equal;
       Label heap_number;
-      // If it's not a heap number, then return equal.
       __ cmp(FieldOperand(edx, HeapObject::kMapOffset),
              Immediate(Factory::heap_number_map()));
       __ j(equal, &heap_number);
-      __ bind(&return_equal);
+      if (cc_ != equal) {
+        // Call runtime on identical JSObjects.  Otherwise return equal.
+        __ CmpObjectType(eax, FIRST_JS_OBJECT_TYPE, ecx);
+        __ j(above_equal, &not_identical);
+      }
       __ Set(eax, Immediate(Smi::FromInt(EQUAL)));
       __ ret(0);
 
@@ -11726,79 +11713,75 @@ void CompareStub::Generate(MacroAssembler* masm) {
     __ bind(&not_identical);
   }
 
-  if (cc_ == equal) {  // Both strict and non-strict.
+  // Strict equality can quickly decide whether objects are equal.
+  // Non-strict object equality is slower, so it is handled later in the stub.
+  if (cc_ == equal && strict_) {
     Label slow;  // Fallthrough label.
-
+    Label not_smis;
     // If we're doing a strict equality comparison, we don't have to do
     // type conversion, so we generate code to do fast comparison for objects
     // and oddballs. Non-smi numbers and strings still go through the usual
     // slow-case code.
-    if (strict_) {
-      // If either is a Smi (we know that not both are), then they can only
-      // be equal if the other is a HeapNumber. If so, use the slow case.
-      {
-        Label not_smis;
-        ASSERT_EQ(0, kSmiTag);
-        ASSERT_EQ(0, Smi::FromInt(0));
-        __ mov(ecx, Immediate(kSmiTagMask));
-        __ and_(ecx, Operand(eax));
-        __ test(ecx, Operand(edx));
-        __ j(not_zero, &not_smis);
-        // One operand is a smi.
+    // If either is a Smi (we know that not both are), then they can only
+    // be equal if the other is a HeapNumber. If so, use the slow case.
+    ASSERT_EQ(0, kSmiTag);
+    ASSERT_EQ(0, Smi::FromInt(0));
+    __ mov(ecx, Immediate(kSmiTagMask));
+    __ and_(ecx, Operand(eax));
+    __ test(ecx, Operand(edx));
+    __ j(not_zero, &not_smis);
+    // One operand is a smi.
 
-        // Check whether the non-smi is a heap number.
-        ASSERT_EQ(1, kSmiTagMask);
-        // ecx still holds eax & kSmiTag, which is either zero or one.
-        __ sub(Operand(ecx), Immediate(0x01));
-        __ mov(ebx, edx);
-        __ xor_(ebx, Operand(eax));
-        __ and_(ebx, Operand(ecx));  // ebx holds either 0 or eax ^ edx.
-        __ xor_(ebx, Operand(eax));
-        // if eax was smi, ebx is now edx, else eax.
+    // Check whether the non-smi is a heap number.
+    ASSERT_EQ(1, kSmiTagMask);
+    // ecx still holds eax & kSmiTag, which is either zero or one.
+    __ sub(Operand(ecx), Immediate(0x01));
+    __ mov(ebx, edx);
+    __ xor_(ebx, Operand(eax));
+    __ and_(ebx, Operand(ecx));  // ebx holds either 0 or eax ^ edx.
+    __ xor_(ebx, Operand(eax));
+    // if eax was smi, ebx is now edx, else eax.
 
-        // Check if the non-smi operand is a heap number.
-        __ cmp(FieldOperand(ebx, HeapObject::kMapOffset),
-               Immediate(Factory::heap_number_map()));
-        // If heap number, handle it in the slow case.
-        __ j(equal, &slow);
-        // Return non-equal (ebx is not zero)
-        __ mov(eax, ebx);
-        __ ret(0);
+    // Check if the non-smi operand is a heap number.
+    __ cmp(FieldOperand(ebx, HeapObject::kMapOffset),
+           Immediate(Factory::heap_number_map()));
+    // If heap number, handle it in the slow case.
+    __ j(equal, &slow);
+    // Return non-equal (ebx is not zero)
+    __ mov(eax, ebx);
+    __ ret(0);
 
-        __ bind(&not_smis);
-      }
+    __ bind(&not_smis);
+    // If either operand is a JSObject or an oddball value, then they are not
+    // equal since their pointers are different
+    // There is no test for undetectability in strict equality.
 
-      // If either operand is a JSObject or an oddball value, then they are not
-      // equal since their pointers are different
-      // There is no test for undetectability in strict equality.
+    // Get the type of the first operand.
+    // If the first object is a JS object, we have done pointer comparison.
+    Label first_non_object;
+    ASSERT(LAST_TYPE == JS_FUNCTION_TYPE);
+    __ CmpObjectType(eax, FIRST_JS_OBJECT_TYPE, ecx);
+    __ j(below, &first_non_object);
 
-      // Get the type of the first operand.
-      // If the first object is a JS object, we have done pointer comparison.
-      Label first_non_object;
-      ASSERT(LAST_TYPE == JS_FUNCTION_TYPE);
-      __ CmpObjectType(eax, FIRST_JS_OBJECT_TYPE, ecx);
-      __ j(below, &first_non_object);
+    // Return non-zero (eax is not zero)
+    Label return_not_equal;
+    ASSERT(kHeapObjectTag != 0);
+    __ bind(&return_not_equal);
+    __ ret(0);
 
-      // Return non-zero (eax is not zero)
-      Label return_not_equal;
-      ASSERT(kHeapObjectTag != 0);
-      __ bind(&return_not_equal);
-      __ ret(0);
+    __ bind(&first_non_object);
+    // Check for oddballs: true, false, null, undefined.
+    __ CmpInstanceType(ecx, ODDBALL_TYPE);
+    __ j(equal, &return_not_equal);
 
-      __ bind(&first_non_object);
-      // Check for oddballs: true, false, null, undefined.
-      __ CmpInstanceType(ecx, ODDBALL_TYPE);
-      __ j(equal, &return_not_equal);
+    __ CmpObjectType(edx, FIRST_JS_OBJECT_TYPE, ecx);
+    __ j(above_equal, &return_not_equal);
 
-      __ CmpObjectType(edx, FIRST_JS_OBJECT_TYPE, ecx);
-      __ j(above_equal, &return_not_equal);
+    // Check for oddballs: true, false, null, undefined.
+    __ CmpInstanceType(ecx, ODDBALL_TYPE);
+    __ j(equal, &return_not_equal);
 
-      // Check for oddballs: true, false, null, undefined.
-      __ CmpInstanceType(ecx, ODDBALL_TYPE);
-      __ j(equal, &return_not_equal);
-
-      // Fall through to the general case.
-    }
+    // Fall through to the general case.
     __ bind(&slow);
   }
 
@@ -11817,7 +11800,7 @@ void CompareStub::Generate(MacroAssembler* masm) {
       CpuFeatures::Scope use_cmov(CMOV);
 
       FloatingPointHelper::LoadSSE2Operands(masm, &non_number_comparison);
-      __ comisd(xmm0, xmm1);
+      __ ucomisd(xmm0, xmm1);
 
       // Don't base result on EFLAGS when a NaN is involved.
       __ j(parity_even, &unordered, not_taken);
@@ -11885,7 +11868,8 @@ void CompareStub::Generate(MacroAssembler* masm) {
 
   __ bind(&check_for_strings);
 
-  __ JumpIfNotBothSequentialAsciiStrings(edx, eax, ecx, ebx, &call_builtin);
+  __ JumpIfNotBothSequentialAsciiStrings(edx, eax, ecx, ebx,
+                                         &check_unequal_objects);
 
   // Inline comparison of ascii strings.
   StringCompareStub::GenerateCompareFlatAsciiStrings(masm,
@@ -11898,7 +11882,44 @@ void CompareStub::Generate(MacroAssembler* masm) {
   __ Abort("Unexpected fall-through from string comparison");
 #endif
 
-  __ bind(&call_builtin);
+  __ bind(&check_unequal_objects);
+  if (cc_ == equal && !strict_) {
+    // Non-strict equality.  Objects are unequal if
+    // they are both JSObjects and not undetectable,
+    // and their pointers are different.
+    Label not_both_objects;
+    Label return_unequal;
+    // At most one is a smi, so we can test for smi by adding the two.
+    // A smi plus a heap object has the low bit set, a heap object plus
+    // a heap object has the low bit clear.
+    ASSERT_EQ(0, kSmiTag);
+    ASSERT_EQ(1, kSmiTagMask);
+    __ lea(ecx, Operand(eax, edx, times_1, 0));
+    __ test(ecx, Immediate(kSmiTagMask));
+    __ j(not_zero, &not_both_objects);
+    __ CmpObjectType(eax, FIRST_JS_OBJECT_TYPE, ecx);
+    __ j(below, &not_both_objects);
+    __ CmpObjectType(edx, FIRST_JS_OBJECT_TYPE, ebx);
+    __ j(below, &not_both_objects);
+    // We do not bail out after this point.  Both are JSObjects, and
+    // they are equal if and only if both are undetectable.
+    // The and of the undetectable flags is 1 if and only if they are equal.
+    __ test_b(FieldOperand(ecx, Map::kBitFieldOffset),
+              1 << Map::kIsUndetectable);
+    __ j(zero, &return_unequal);
+    __ test_b(FieldOperand(ebx, Map::kBitFieldOffset),
+              1 << Map::kIsUndetectable);
+    __ j(zero, &return_unequal);
+    // The objects are both undetectable, so they both compare as the value
+    // undefined, and are equal.
+    __ Set(eax, Immediate(EQUAL));
+    __ bind(&return_unequal);
+    // Return non-equal by returning the non-zero object pointer in eax,
+    // or return equal if we fell through to here.
+    __ ret(2 * kPointerSize);  // rax, rdx were pushed
+    __ bind(&not_both_objects);
+  }
+
   // must swap argument order
   __ pop(ecx);
   __ pop(edx);
@@ -12848,7 +12869,7 @@ void StringAddStub::Generate(MacroAssembler* masm) {
 
   // If result is not supposed to be flat allocate a cons string object. If both
   // strings are ascii the result is an ascii cons string.
-  Label non_ascii, allocated;
+  Label non_ascii, allocated, ascii_data;
   __ mov(edi, FieldOperand(eax, HeapObject::kMapOffset));
   __ movzx_b(ecx, FieldOperand(edi, Map::kInstanceTypeOffset));
   __ mov(edi, FieldOperand(edx, HeapObject::kMapOffset));
@@ -12857,6 +12878,7 @@ void StringAddStub::Generate(MacroAssembler* masm) {
   ASSERT(kStringEncodingMask == kAsciiStringTag);
   __ test(ecx, Immediate(kAsciiStringTag));
   __ j(zero, &non_ascii);
+  __ bind(&ascii_data);
   // Allocate an acsii cons string.
   __ AllocateAsciiConsString(ecx, edi, no_reg, &string_add_runtime);
   __ bind(&allocated);
@@ -12871,6 +12893,19 @@ void StringAddStub::Generate(MacroAssembler* masm) {
   __ IncrementCounter(&Counters::string_add_native, 1);
   __ ret(2 * kPointerSize);
   __ bind(&non_ascii);
+  // At least one of the strings is two-byte. Check whether it happens
+  // to contain only ascii characters.
+  // ecx: first instance type AND second instance type.
+  // edi: second instance type.
+  __ test(ecx, Immediate(kAsciiDataHintMask));
+  __ j(not_zero, &ascii_data);
+  __ mov(ecx, FieldOperand(eax, HeapObject::kMapOffset));
+  __ movzx_b(ecx, FieldOperand(ecx, Map::kInstanceTypeOffset));
+  __ xor_(edi, Operand(ecx));
+  ASSERT(kAsciiStringTag != 0 && kAsciiDataHintTag != 0);
+  __ and_(edi, kAsciiStringTag | kAsciiDataHintTag);
+  __ cmp(edi, kAsciiStringTag | kAsciiDataHintTag);
+  __ j(equal, &ascii_data);
   // Allocate a two byte cons string.
   __ AllocateConsString(ecx, edi, no_reg, &string_add_runtime);
   __ jmp(&allocated);
@@ -13275,6 +13310,9 @@ void SubStringStub::Generate(MacroAssembler* masm) {
   __ test(edx, Immediate(kSmiTagMask));
   __ j(not_zero, &runtime);
   __ sub(ecx, Operand(edx));
+  __ cmp(ecx, FieldOperand(eax, String::kLengthOffset));
+  Label return_eax;
+  __ j(equal, &return_eax);
   // Special handling of sub-strings of length 1 and 2. One character strings
   // are handled in the runtime system (looked up in the single character
   // cache). Two character strings are looked for in the symbol cache.
@@ -13379,6 +13417,8 @@ void SubStringStub::Generate(MacroAssembler* masm) {
   // esi: character of sub string start
   StringHelper::GenerateCopyCharactersREP(masm, edi, esi, ecx, ebx, false);
   __ mov(esi, edx);  // Restore esi.
+
+  __ bind(&return_eax);
   __ IncrementCounter(&Counters::sub_string_native, 1);
   __ ret(3 * kPointerSize);
 
