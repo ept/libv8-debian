@@ -8,7 +8,24 @@ adding -march=armv5t to build libv8 on armel
          'CPPDEFINES' : ['CAN_USE_UNALIGNED_ACCESSES=0']
 -      }
 +      },
-+      'CCFLAGS':      ['-march=armv5t']
++      'CCFLAGS':      ['-march=armv4t', '-mno-thumb-interwork', '-fno-tree-sink']
      },
      'simulator:arm': {
        'CCFLAGS':      ['-m32'],
+--- a/src/platform-linux.cc
++++ b/src/platform-linux.cc
+@@ -289,9 +289,12 @@
+ void OS::DebugBreak() {
+ // TODO(lrn): Introduce processor define for runtime system (!= V8_ARCH_x,
+ //  which is the architecture of generated code).
+-#if (defined(__arm__) || defined(__thumb__)) && \
+-    defined(CAN_USE_ARMV5_INSTRUCTIONS)
++#if defined(__arm__) || defined(__thumb__)
++# if defined(CAN_USE_ARMV5_INSTRUCTIONS)
+   asm("bkpt 0");
++# else
++  asm("nop");
++# endif
+ #elif defined(__mips__)
+   asm("break");
+ #else
