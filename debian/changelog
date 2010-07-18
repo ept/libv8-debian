@@ -3,6 +3,7 @@ libv8 (2.2.24-1) unstable; urgency=low
   * New upstream release, followed the procedure of README.source to update.
   * Standards-Version 3.9.0
   * Build for armv4 instead of armv5, fix ARMV5 detection. (Closes: #589057)
+  * Include v8-profiler.h in libv8-dev. (Closes: #589584)
 
  -- Jérémy Lal <kapouer@melix.org>  Wed, 14 Jul 2010 18:56:09 +0200
 
