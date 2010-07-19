@@ -1,3 +1,10 @@
+libv8 (2.2.24-2) unstable; urgency=low
+
+  * Upstream patch : fix for...in loops for strings.
+    http://codereview.chromium.org/3037008 
+
+ -- Jérémy Lal <kapouer@melix.org>  Mon, 19 Jul 2010 14:55:22 +0200
+
 libv8 (2.2.24-1) unstable; urgency=low
 
   * New upstream release, followed the procedure of README.source to update.
