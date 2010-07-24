@@ -12,7 +12,7 @@ Vcs-Git: git://git.debian.org/git/collab-maint/libv8.git
 
 Package: libv8-dev
 Section: libdevel
-Architecture: i386 amd64 armel mips
+Architecture: i386 amd64 armel mipsel
 Depends: libv8-2.2.24 (= ${binary:Version}), ${misc:Depends}
 Description: Development files for the V8 JavaScript Engine
  V8 is Google's open source, high performance JavaScript engine. It is written

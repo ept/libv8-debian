@@ -1,3 +1,9 @@
+libv8 (2.2.24-3) unstable; urgency=low
+
+  * Replace arch: mips with mipsel, because only little endian is supported. 
+
+ -- Jérémy Lal <kapouer@melix.org>  Sat, 24 Jul 2010 13:43:28 +0200
+
 libv8 (2.2.24-2) unstable; urgency=low
 
   * Upstream patch : fix for...in loops for strings.
