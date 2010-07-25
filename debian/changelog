@@ -1,3 +1,9 @@
+libv8 (2.2.24-4) unstable; urgency=low
+
+  * Replace arch: mips with mipsel (on the three packages) 
+
+ -- Jérémy Lal <kapouer@melix.org>  Sun, 25 Jul 2010 09:49:03 +0200
+
 libv8 (2.2.24-3) unstable; urgency=low
 
   * Replace arch: mips with mipsel, because only little endian is supported. 
