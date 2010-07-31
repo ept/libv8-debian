@@ -1,0 +1,1481 @@
+diff -Nur libv8-2.2.24/include/v8-debug.h libv8-2.2.24.8/include/v8-debug.h
+--- libv8-2.2.24/include/v8-debug.h	2010-05-21 14:58:28.267409000 +0200
++++ libv8-2.2.24.8/include/v8-debug.h	2010-07-14 11:01:13.356453000 +0200
+@@ -76,7 +76,8 @@
+   NewFunction = 3,
+   BeforeCompile = 4,
+   AfterCompile  = 5,
+-  ScriptCollected = 6
++  ScriptCollected = 6,
++  BreakForCommand = 7
+ };
+ 
+ 
+@@ -172,6 +173,13 @@
+      */
+     virtual Handle<Value> GetCallbackData() const = 0;
+ 
++    /**
++     * Client data passed to DebugBreakForCommand function. The
++     * debugger takes ownership of the data and will delete it even if
++     * there is no message handler.
++     */
++    virtual ClientData* GetClientData() const = 0;
++
+     virtual ~EventDetails() {}
+   };
+ 
+@@ -248,6 +256,12 @@
+   // Break execution of JavaScript.
+   static void DebugBreak();
+ 
++  // Break execution of JavaScript (this method can be invoked from a
++  // non-VM thread) for further client command execution on a VM
++  // thread. Client data is then passed in EventDetails to
++  // EventCallback at the moment when the VM actually stops.
++  static void DebugBreakForCommand(ClientData* data = NULL);
++
+   // Message based interface. The message protocol is JSON. NOTE the message
+   // handler thread is not supported any more parameter must be false.
+   static void SetMessageHandler(MessageHandler handler,
+diff -Nur libv8-2.2.24/src/api.cc libv8-2.2.24.8/src/api.cc
+--- libv8-2.2.24/src/api.cc	2010-07-13 22:58:03.257819000 +0200
++++ libv8-2.2.24.8/src/api.cc	2010-07-14 11:01:13.356453000 +0200
+@@ -4213,6 +4213,12 @@
+ }
+ 
+ 
++void Debug::DebugBreakForCommand(ClientData* data) {
++  if (!i::V8::IsRunning()) return;
++  i::Debugger::EnqueueDebugCommand(data);
++}
++
++
+ static v8::Debug::MessageHandler message_handler = NULL;
+ 
+ static void MessageHandlerWrapper(const v8::Debug::Message& message) {
+diff -Nur libv8-2.2.24/src/arm/codegen-arm.cc libv8-2.2.24.8/src/arm/codegen-arm.cc
+--- libv8-2.2.24/src/arm/codegen-arm.cc	2010-07-13 22:58:03.257819000 +0200
++++ libv8-2.2.24.8/src/arm/codegen-arm.cc	2010-07-28 15:36:30.144289000 +0200
+@@ -54,11 +54,15 @@
+                                           Condition cc,
+                                           bool never_nan_nan);
+ static void EmitSmiNonsmiComparison(MacroAssembler* masm,
++                                    Register lhs,
++                                    Register rhs,
+                                     Label* lhs_not_nan,
+                                     Label* slow,
+                                     bool strict);
+ static void EmitTwoNonNanDoubleComparison(MacroAssembler* masm, Condition cc);
+-static void EmitStrictTwoHeapObjectCompare(MacroAssembler* masm);
++static void EmitStrictTwoHeapObjectCompare(MacroAssembler* masm,
++                                           Register lhs,
++                                           Register rhs);
+ static void MultiplyByKnownInt(MacroAssembler* masm,
+                                Register source,
+                                Register destination,
+@@ -1404,11 +1408,7 @@
+     // Perform non-smi comparison by stub.
+     // CompareStub takes arguments in r0 and r1, returns <0, >0 or 0 in r0.
+     // We call with 0 args because there are 0 on the stack.
+-    if (!rhs.is(r0)) {
+-      __ Swap(rhs, lhs, ip);
+-    }
+-
+-    CompareStub stub(cc, strict);
++    CompareStub stub(cc, strict, kBothCouldBeNaN, true, lhs, rhs);
+     frame_->CallStub(&stub, 0);
+     __ cmp(r0, Operand(0));
+     exit.Jump();
+@@ -1626,6 +1626,7 @@
+   // The function and its two arguments have been dropped.
+   frame_->Drop();  // Drop the receiver as well.
+   frame_->EmitPush(r0);
++  frame_->SpillAll();  // A spilled frame is also jumping to label done.
+   // Stack now has 1 element:
+   //   sp[0]: result
+   __ bind(&done);
+@@ -6968,7 +6969,7 @@
+             // undefined >= undefined should fail.
+             __ mov(r0, Operand(LESS));
+           }
+-          __ mov(pc, Operand(lr));       // Return.
++          __ Ret();
+         }
+       }
+     }
+@@ -6982,7 +6983,7 @@
+   } else {
+     __ mov(r0, Operand(EQUAL));    // Things are <=, >=, ==, === themselves.
+   }
+-  __ mov(pc, Operand(lr));  // Return.
++  __ Ret();
+ 
+   if (cc != eq || !never_nan_nan) {
+     // For less and greater we don't have to check for NaN since the result of
+@@ -7014,14 +7015,14 @@
+       // value if it's a NaN.
+       if (cc != eq) {
+         // All-zero means Infinity means equal.
+-        __ mov(pc, Operand(lr), LeaveCC, eq);  // Return equal
++        __ Ret(eq);
+         if (cc == le) {
+           __ mov(r0, Operand(GREATER));  // NaN <= NaN should fail.
+         } else {
+           __ mov(r0, Operand(LESS));     // NaN >= NaN should fail.
+         }
+       }
+-      __ mov(pc, Operand(lr));  // Return.
++      __ Ret();
+     }
+     // No fall through here.
+   }
+@@ -7032,43 +7033,50 @@
+ 
+ // See comment at call site.
+ static void EmitSmiNonsmiComparison(MacroAssembler* masm,
++                                    Register lhs,
++                                    Register rhs,
+                                     Label* lhs_not_nan,
+                                     Label* slow,
+                                     bool strict) {
++  ASSERT((lhs.is(r0) && rhs.is(r1)) ||
++         (lhs.is(r1) && rhs.is(r0)));
++
+   Label rhs_is_smi;
+-  __ tst(r0, Operand(kSmiTagMask));
++  __ tst(rhs, Operand(kSmiTagMask));
+   __ b(eq, &rhs_is_smi);
+ 
+   // Lhs is a Smi.  Check whether the rhs is a heap number.
+-  __ CompareObjectType(r0, r4, r4, HEAP_NUMBER_TYPE);
++  __ CompareObjectType(rhs, r4, r4, HEAP_NUMBER_TYPE);
+   if (strict) {
+     // If rhs is not a number and lhs is a Smi then strict equality cannot
+-    // succeed.  Return non-equal (r0 is already not zero)
+-    __ mov(pc, Operand(lr), LeaveCC, ne);  // Return.
++    // succeed.  Return non-equal
++    // If rhs is r0 then there is already a non zero value in it.
++    if (!rhs.is(r0)) {
++      __ mov(r0, Operand(NOT_EQUAL), LeaveCC, ne);
++    }
++    __ Ret(ne);
+   } else {
+     // Smi compared non-strictly with a non-Smi non-heap-number.  Call
+     // the runtime.
+     __ b(ne, slow);
+   }
+ 
+-  // Lhs (r1) is a smi, rhs (r0) is a number.
++  // Lhs is a smi, rhs is a number.
+   if (CpuFeatures::IsSupported(VFP3)) {
+-    // Convert lhs to a double in d7              .
++    // Convert lhs to a double in d7.
+     CpuFeatures::Scope scope(VFP3);
+-    __ mov(r7, Operand(r1, ASR, kSmiTagSize));
+-    __ vmov(s15, r7);
+-    __ vcvt_f64_s32(d7, s15);
++    __ SmiToDoubleVFPRegister(lhs, d7, r7, s15);
+     // Load the double from rhs, tagged HeapNumber r0, to d6.
+-    __ sub(r7, r0, Operand(kHeapObjectTag));
++    __ sub(r7, rhs, Operand(kHeapObjectTag));
+     __ vldr(d6, r7, HeapNumber::kValueOffset);
+   } else {
+     __ push(lr);
+     // Convert lhs to a double in r2, r3.
+-    __ mov(r7, Operand(r1));
++    __ mov(r7, Operand(lhs));
+     ConvertToDoubleStub stub1(r3, r2, r7, r6);
+     __ Call(stub1.GetCode(), RelocInfo::CODE_TARGET);
+     // Load rhs to a double in r0, r1.
+-    __ Ldrd(r0, r1, FieldMemOperand(r0, HeapNumber::kValueOffset));
++    __ Ldrd(r0, r1, FieldMemOperand(rhs, HeapNumber::kValueOffset));
+     __ pop(lr);
+   }
+ 
+@@ -7078,34 +7086,35 @@
+ 
+   __ bind(&rhs_is_smi);
+   // Rhs is a smi.  Check whether the non-smi lhs is a heap number.
+-  __ CompareObjectType(r1, r4, r4, HEAP_NUMBER_TYPE);
++  __ CompareObjectType(lhs, r4, r4, HEAP_NUMBER_TYPE);
+   if (strict) {
+     // If lhs is not a number and rhs is a smi then strict equality cannot
+     // succeed.  Return non-equal.
+-    __ mov(r0, Operand(1), LeaveCC, ne);  // Non-zero indicates not equal.
+-    __ mov(pc, Operand(lr), LeaveCC, ne);  // Return.
++    // If lhs is r0 then there is already a non zero value in it.
++    if (!lhs.is(r0)) {
++      __ mov(r0, Operand(NOT_EQUAL), LeaveCC, ne);
++    }
++    __ Ret(ne);
+   } else {
+     // Smi compared non-strictly with a non-smi non-heap-number.  Call
+     // the runtime.
+     __ b(ne, slow);
+   }
+ 
+-  // Rhs (r0) is a smi, lhs (r1) is a heap number.
++  // Rhs is a smi, lhs is a heap number.
+   if (CpuFeatures::IsSupported(VFP3)) {
+-    // Convert rhs to a double in d6              .
+     CpuFeatures::Scope scope(VFP3);
+     // Load the double from lhs, tagged HeapNumber r1, to d7.
+-    __ sub(r7, r1, Operand(kHeapObjectTag));
++    __ sub(r7, lhs, Operand(kHeapObjectTag));
+     __ vldr(d7, r7, HeapNumber::kValueOffset);
+-    __ mov(r7, Operand(r0, ASR, kSmiTagSize));
+-    __ vmov(s13, r7);
+-    __ vcvt_f64_s32(d6, s13);
++    // Convert rhs to a double in d6              .
++    __ SmiToDoubleVFPRegister(rhs, d6, r7, s13);
+   } else {
+     __ push(lr);
+     // Load lhs to a double in r2, r3.
+-    __ Ldrd(r2, r3, FieldMemOperand(r1, HeapNumber::kValueOffset));
++    __ Ldrd(r2, r3, FieldMemOperand(lhs, HeapNumber::kValueOffset));
+     // Convert rhs to a double in r0, r1.
+-    __ mov(r7, Operand(r0));
++    __ mov(r7, Operand(rhs));
+     ConvertToDoubleStub stub2(r1, r0, r7, r6);
+     __ Call(stub2.GetCode(), RelocInfo::CODE_TARGET);
+     __ pop(lr);
+@@ -7159,7 +7168,7 @@
+   } else {
+     __ mov(r0, Operand(LESS));
+   }
+-  __ mov(pc, Operand(lr));  // Return.
++  __ Ret();
+ 
+   __ bind(&neither_is_nan);
+ }
+@@ -7180,11 +7189,11 @@
+     __ cmp(rhs_mantissa, Operand(lhs_mantissa));
+     __ orr(r0, rhs_mantissa, Operand(lhs_mantissa), LeaveCC, ne);
+     // Return non-zero if the numbers are unequal.
+-    __ mov(pc, Operand(lr), LeaveCC, ne);
++    __ Ret(ne);
+ 
+     __ sub(r0, rhs_exponent, Operand(lhs_exponent), SetCC);
+     // If exponents are equal then return 0.
+-    __ mov(pc, Operand(lr), LeaveCC, eq);
++    __ Ret(eq);
+ 
+     // Exponents are unequal.  The only way we can return that the numbers
+     // are equal is if one is -0 and the other is 0.  We already dealt
+@@ -7194,11 +7203,11 @@
+     // equal.
+     __ orr(r4, lhs_mantissa, Operand(lhs_exponent, LSL, kSmiTagSize), SetCC);
+     __ mov(r0, Operand(r4), LeaveCC, ne);
+-    __ mov(pc, Operand(lr), LeaveCC, ne);  // Return conditionally.
++    __ Ret(ne);
+     // Now they are equal if and only if the lhs exponent is zero in its
+     // low 31 bits.
+     __ mov(r0, Operand(rhs_exponent, LSL, kSmiTagSize));
+-    __ mov(pc, Operand(lr));
++    __ Ret();
+   } else {
+     // Call a native function to do a comparison between two non-NaNs.
+     // Call C routine that may not cause GC or other trouble.
+@@ -7211,7 +7220,12 @@
+ 
+ 
+ // See comment at call site.
+-static void EmitStrictTwoHeapObjectCompare(MacroAssembler* masm) {
++static void EmitStrictTwoHeapObjectCompare(MacroAssembler* masm,
++                                           Register lhs,
++                                           Register rhs) {
++    ASSERT((lhs.is(r0) && rhs.is(r1)) ||
++           (lhs.is(r1) && rhs.is(r0)));
++
+     // If either operand is a JSObject or an oddball value, then they are
+     // not equal since their pointers are different.
+     // There is no test for undetectability in strict equality.
+@@ -7219,20 +7233,20 @@
+     Label first_non_object;
+     // Get the type of the first operand into r2 and compare it with
+     // FIRST_JS_OBJECT_TYPE.
+-    __ CompareObjectType(r0, r2, r2, FIRST_JS_OBJECT_TYPE);
++    __ CompareObjectType(rhs, r2, r2, FIRST_JS_OBJECT_TYPE);
+     __ b(lt, &first_non_object);
+ 
+     // Return non-zero (r0 is not zero)
+     Label return_not_equal;
+     __ bind(&return_not_equal);
+-    __ mov(pc, Operand(lr));  // Return.
++    __ Ret();
+ 
+     __ bind(&first_non_object);
+     // Check for oddballs: true, false, null, undefined.
+     __ cmp(r2, Operand(ODDBALL_TYPE));
+     __ b(eq, &return_not_equal);
+ 
+-    __ CompareObjectType(r1, r3, r3, FIRST_JS_OBJECT_TYPE);
++    __ CompareObjectType(lhs, r3, r3, FIRST_JS_OBJECT_TYPE);
+     __ b(ge, &return_not_equal);
+ 
+     // Check for oddballs: true, false, null, undefined.
+@@ -7251,12 +7265,17 @@
+ 
+ // See comment at call site.
+ static void EmitCheckForTwoHeapNumbers(MacroAssembler* masm,
++                                       Register lhs,
++                                       Register rhs,
+                                        Label* both_loaded_as_doubles,
+                                        Label* not_heap_numbers,
+                                        Label* slow) {
+-  __ CompareObjectType(r0, r3, r2, HEAP_NUMBER_TYPE);
++  ASSERT((lhs.is(r0) && rhs.is(r1)) ||
++         (lhs.is(r1) && rhs.is(r0)));
++
++  __ CompareObjectType(rhs, r3, r2, HEAP_NUMBER_TYPE);
+   __ b(ne, not_heap_numbers);
+-  __ ldr(r2, FieldMemOperand(r1, HeapObject::kMapOffset));
++  __ ldr(r2, FieldMemOperand(lhs, HeapObject::kMapOffset));
+   __ cmp(r2, r3);
+   __ b(ne, slow);  // First was a heap number, second wasn't.  Go slow case.
+ 
+@@ -7264,13 +7283,13 @@
+   // for that.
+   if (CpuFeatures::IsSupported(VFP3)) {
+     CpuFeatures::Scope scope(VFP3);
+-    __ sub(r7, r0, Operand(kHeapObjectTag));
++    __ sub(r7, rhs, Operand(kHeapObjectTag));
+     __ vldr(d6, r7, HeapNumber::kValueOffset);
+-    __ sub(r7, r1, Operand(kHeapObjectTag));
++    __ sub(r7, lhs, Operand(kHeapObjectTag));
+     __ vldr(d7, r7, HeapNumber::kValueOffset);
+   } else {
+-    __ Ldrd(r2, r3, FieldMemOperand(r1, HeapNumber::kValueOffset));
+-    __ Ldrd(r0, r1, FieldMemOperand(r0, HeapNumber::kValueOffset));
++    __ Ldrd(r2, r3, FieldMemOperand(lhs, HeapNumber::kValueOffset));
++    __ Ldrd(r0, r1, FieldMemOperand(rhs, HeapNumber::kValueOffset));
+   }
+   __ jmp(both_loaded_as_doubles);
+ }
+@@ -7278,9 +7297,14 @@
+ 
+ // Fast negative check for symbol-to-symbol equality.
+ static void EmitCheckForSymbolsOrObjects(MacroAssembler* masm,
++                                         Register lhs,
++                                         Register rhs,
+                                          Label* possible_strings,
+                                          Label* not_both_strings) {
+-  // r2 is object type of r0.
++  ASSERT((lhs.is(r0) && rhs.is(r1)) ||
++         (lhs.is(r1) && rhs.is(r0)));
++
++  // r2 is object type of rhs.
+   // Ensure that no non-strings have the symbol bit set.
+   Label object_test;
+   ASSERT(kSymbolTag != 0);
+@@ -7288,31 +7312,31 @@
+   __ b(ne, &object_test);
+   __ tst(r2, Operand(kIsSymbolMask));
+   __ b(eq, possible_strings);
+-  __ CompareObjectType(r1, r3, r3, FIRST_NONSTRING_TYPE);
++  __ CompareObjectType(lhs, r3, r3, FIRST_NONSTRING_TYPE);
+   __ b(ge, not_both_strings);
+   __ tst(r3, Operand(kIsSymbolMask));
+   __ b(eq, possible_strings);
+ 
+   // Both are symbols.  We already checked they weren't the same pointer
+   // so they are not equal.
+-  __ mov(r0, Operand(1));   // Non-zero indicates not equal.
+-  __ mov(pc, Operand(lr));  // Return.
++  __ mov(r0, Operand(NOT_EQUAL));
++  __ Ret();
+ 
+   __ bind(&object_test);
+   __ cmp(r2, Operand(FIRST_JS_OBJECT_TYPE));
+   __ b(lt, not_both_strings);
+-  __ CompareObjectType(r1, r2, r3, FIRST_JS_OBJECT_TYPE);
++  __ CompareObjectType(lhs, r2, r3, FIRST_JS_OBJECT_TYPE);
+   __ b(lt, not_both_strings);
+-  // If both objects are undetectable, they are equal.  Otherwise, they
++  // If both objects are undetectable, they are equal. Otherwise, they
+   // are not equal, since they are different objects and an object is not
+   // equal to undefined.
+-  __ ldr(r3, FieldMemOperand(r0, HeapObject::kMapOffset));
++  __ ldr(r3, FieldMemOperand(rhs, HeapObject::kMapOffset));
+   __ ldrb(r2, FieldMemOperand(r2, Map::kBitFieldOffset));
+   __ ldrb(r3, FieldMemOperand(r3, Map::kBitFieldOffset));
+   __ and_(r0, r2, Operand(r3));
+   __ and_(r0, r0, Operand(1 << Map::kIsUndetectable));
+   __ eor(r0, r0, Operand(1 << Map::kIsUndetectable));
+-  __ mov(pc, Operand(lr));  // Return.
++  __ Ret();
+ }
+ 
+ 
+@@ -7434,10 +7458,13 @@
+ }
+ 
+ 
+-// On entry r0 (rhs) and r1 (lhs) are the values to be compared.
++// On entry lhs_ and rhs_ are the values to be compared.
+ // On exit r0 is 0, positive or negative to indicate the result of
+ // the comparison.
+ void CompareStub::Generate(MacroAssembler* masm) {
++  ASSERT((lhs_.is(r0) && rhs_.is(r1)) ||
++         (lhs_.is(r1) && rhs_.is(r0)));
++
+   Label slow;  // Call builtin.
+   Label not_smis, both_loaded_as_doubles, lhs_not_nan;
+ 
+@@ -7452,7 +7479,7 @@
+   // be strictly equal if the other is a HeapNumber.
+   ASSERT_EQ(0, kSmiTag);
+   ASSERT_EQ(0, Smi::FromInt(0));
+-  __ and_(r2, r0, Operand(r1));
++  __ and_(r2, lhs_, Operand(rhs_));
+   __ tst(r2, Operand(kSmiTagMask));
+   __ b(ne, &not_smis);
+   // One operand is a smi.  EmitSmiNonsmiComparison generates code that can:
+@@ -7464,7 +7491,7 @@
+   // comparison.  If VFP3 is supported the double values of the numbers have
+   // been loaded into d7 and d6.  Otherwise, the double values have been loaded
+   // into r0, r1, r2, and r3.
+-  EmitSmiNonsmiComparison(masm, &lhs_not_nan, &slow, strict_);
++  EmitSmiNonsmiComparison(masm, lhs_, rhs_, &lhs_not_nan, &slow, strict_);
+ 
+   __ bind(&both_loaded_as_doubles);
+   // The arguments have been converted to doubles and stored in d6 and d7, if
+@@ -7481,7 +7508,7 @@
+     __ mov(r0, Operand(EQUAL), LeaveCC, eq);
+     __ mov(r0, Operand(LESS), LeaveCC, lt);
+     __ mov(r0, Operand(GREATER), LeaveCC, gt);
+-    __ mov(pc, Operand(lr));
++    __ Ret();
+ 
+     __ bind(&nan);
+     // If one of the sides was a NaN then the v flag is set.  Load r0 with
+@@ -7492,7 +7519,7 @@
+     } else {
+       __ mov(r0, Operand(LESS));
+     }
+-    __ mov(pc, Operand(lr));
++    __ Ret();
+   } else {
+     // Checks for NaN in the doubles we have loaded.  Can return the answer or
+     // fall through if neither is a NaN.  Also binds lhs_not_nan.
+@@ -7504,11 +7531,11 @@
+ 
+   __ bind(&not_smis);
+   // At this point we know we are dealing with two different objects,
+-  // and neither of them is a Smi.  The objects are in r0 and r1.
++  // and neither of them is a Smi.  The objects are in rhs_ and lhs_.
+   if (strict_) {
+     // This returns non-equal for some object types, or falls through if it
+     // was not lucky.
+-    EmitStrictTwoHeapObjectCompare(masm);
++    EmitStrictTwoHeapObjectCompare(masm, lhs_, rhs_);
+   }
+ 
+   Label check_for_symbols;
+@@ -7516,8 +7543,10 @@
+   // Check for heap-number-heap-number comparison.  Can jump to slow case,
+   // or load both doubles into r0, r1, r2, r3 and jump to the code that handles
+   // that case.  If the inputs are not doubles then jumps to check_for_symbols.
+-  // In this case r2 will contain the type of r0.  Never falls through.
++  // In this case r2 will contain the type of rhs_.  Never falls through.
+   EmitCheckForTwoHeapNumbers(masm,
++                             lhs_,
++                             rhs_,
+                              &both_loaded_as_doubles,
+                              &check_for_symbols,
+                              &flat_string_check);
+@@ -7528,20 +7557,20 @@
+   if (cc_ == eq && !strict_) {
+     // Returns an answer for two symbols or two detectable objects.
+     // Otherwise jumps to string case or not both strings case.
+-    // Assumes that r2 is the type of r0 on entry.
+-    EmitCheckForSymbolsOrObjects(masm, &flat_string_check, &slow);
++    // Assumes that r2 is the type of rhs_ on entry.
++    EmitCheckForSymbolsOrObjects(masm, lhs_, rhs_, &flat_string_check, &slow);
+   }
+ 
+   // Check for both being sequential ASCII strings, and inline if that is the
+   // case.
+   __ bind(&flat_string_check);
+ 
+-  __ JumpIfNonSmisNotBothSequentialAsciiStrings(r0, r1, r2, r3, &slow);
++  __ JumpIfNonSmisNotBothSequentialAsciiStrings(lhs_, rhs_, r2, r3, &slow);
+ 
+   __ IncrementCounter(&Counters::string_compare_native, 1, r2, r3);
+   StringCompareStub::GenerateCompareFlatAsciiStrings(masm,
+-                                                     r1,
+-                                                     r0,
++                                                     lhs_,
++                                                     rhs_,
+                                                      r2,
+                                                      r3,
+                                                      r4,
+@@ -7550,7 +7579,7 @@
+ 
+   __ bind(&slow);
+ 
+-  __ Push(r1, r0);
++  __ Push(lhs_, rhs_);
+   // Figure out which native to call and setup the arguments.
+   Builtins::JavaScript native;
+   if (cc_ == eq) {
+@@ -10051,6 +10080,9 @@
+ // Unfortunately you have to run without snapshots to see most of these
+ // names in the profile since most compare stubs end up in the snapshot.
+ const char* CompareStub::GetName() {
++  ASSERT((lhs_.is(r0) && rhs_.is(r1)) ||
++         (lhs_.is(r1) && rhs_.is(r0)));
++
+   if (name_ != NULL) return name_;
+   const int kMaxNameLength = 100;
+   name_ = Bootstrapper::AllocateAutoDeletedArray(kMaxNameLength);
+@@ -10067,6 +10099,9 @@
+     default: cc_name = "UnknownCondition"; break;
+   }
+ 
++  const char* lhs_name = lhs_.is(r0) ? "_r0" : "_r1";
++  const char* rhs_name = rhs_.is(r0) ? "_r0" : "_r1";
++
+   const char* strict_name = "";
+   if (strict_ && (cc_ == eq || cc_ == ne)) {
+     strict_name = "_STRICT";
+@@ -10083,8 +10118,10 @@
+   }
+ 
+   OS::SNPrintF(Vector<char>(name_, kMaxNameLength),
+-               "CompareStub_%s%s%s%s",
++               "CompareStub_%s%s%s%s%s%s",
+                cc_name,
++               lhs_name,
++               rhs_name,
+                strict_name,
+                never_nan_nan_name,
+                include_number_compare_name);
+@@ -10096,8 +10133,11 @@
+   // Encode the three parameters in a unique 16 bit value. To avoid duplicate
+   // stubs the never NaN NaN condition is only taken into account if the
+   // condition is equals.
+-  ASSERT((static_cast<unsigned>(cc_) >> 28) < (1 << 13));
++  ASSERT((static_cast<unsigned>(cc_) >> 28) < (1 << 12));
++  ASSERT((lhs_.is(r0) && rhs_.is(r1)) ||
++         (lhs_.is(r1) && rhs_.is(r0)));
+   return ConditionField::encode(static_cast<unsigned>(cc_) >> 28)
++         | RegisterField::encode(lhs_.is(r0))
+          | StrictField::encode(strict_)
+          | NeverNanNanField::encode(cc_ == eq ? never_nan_nan_ : false)
+          | IncludeNumberCompareField::encode(include_number_compare_);
+diff -Nur libv8-2.2.24/src/arm/full-codegen-arm.cc libv8-2.2.24.8/src/arm/full-codegen-arm.cc
+--- libv8-2.2.24/src/arm/full-codegen-arm.cc	2010-07-13 22:58:03.257819000 +0200
++++ libv8-2.2.24.8/src/arm/full-codegen-arm.cc	2010-07-15 11:58:47.142927000 +0200
+@@ -822,8 +822,7 @@
+     // the smi vs. smi case to be handled before it is called.
+     Label slow_case;
+     __ ldr(r1, MemOperand(sp, 0));  // Switch value.
+-    __ mov(r2, r1);
+-    __ orr(r2, r2, r0);
++    __ orr(r2, r1, r0);
+     __ tst(r2, Operand(kSmiTagMask));
+     __ b(ne, &slow_case);
+     __ cmp(r1, r0);
+@@ -832,9 +831,9 @@
+     __ b(clause->body_target()->entry_label());
+ 
+     __ bind(&slow_case);
+-    CompareStub stub(eq, true);
++    CompareStub stub(eq, true, kBothCouldBeNaN, true, r1, r0);
+     __ CallStub(&stub);
+-    __ tst(r0, r0);
++    __ cmp(r0, Operand(0));
+     __ b(ne, &next_test);
+     __ Drop(1);  // Switch value is no longer needed.
+     __ b(clause->body_target()->entry_label());
+@@ -3088,7 +3087,7 @@
+       __ jmp(if_false);
+ 
+       __ bind(&slow_case);
+-      CompareStub stub(cc, strict);
++      CompareStub stub(cc, strict, kBothCouldBeNaN, true, r1, r0);
+       __ CallStub(&stub);
+       __ cmp(r0, Operand(0));
+       __ b(cc, if_true);
+diff -Nur libv8-2.2.24/src/arm/stub-cache-arm.cc libv8-2.2.24.8/src/arm/stub-cache-arm.cc
+--- libv8-2.2.24/src/arm/stub-cache-arm.cc	2010-07-13 22:58:03.257819000 +0200
++++ libv8-2.2.24.8/src/arm/stub-cache-arm.cc	2010-07-15 11:58:47.142927000 +0200
+@@ -176,6 +176,13 @@
+       __ cmp(entity_name, Operand(Handle<String>(name)));
+       __ b(eq, miss_label);
+ 
++      // Check if the entry name is not a symbol.
++      __ ldr(entity_name, FieldMemOperand(entity_name, HeapObject::kMapOffset));
++      __ ldrb(entity_name,
++              FieldMemOperand(entity_name, Map::kInstanceTypeOffset));
++      __ tst(entity_name, Operand(kIsSymbolMask));
++      __ b(eq, miss_label);
++
+       // Restore the properties.
+       __ ldr(properties,
+              FieldMemOperand(receiver, JSObject::kPropertiesOffset));
+diff -Nur libv8-2.2.24/src/codegen.h libv8-2.2.24.8/src/codegen.h
+--- libv8-2.2.24/src/codegen.h	2010-07-07 14:22:46.872819000 +0200
++++ libv8-2.2.24.8/src/codegen.h	2010-07-15 11:58:47.142927000 +0200
+@@ -461,11 +461,15 @@
+   CompareStub(Condition cc,
+               bool strict,
+               NaNInformation nan_info = kBothCouldBeNaN,
+-              bool include_number_compare = true) :
++              bool include_number_compare = true,
++              Register lhs = no_reg,
++              Register rhs = no_reg) :
+       cc_(cc),
+       strict_(strict),
+       never_nan_nan_(nan_info == kCantBothBeNaN),
+       include_number_compare_(include_number_compare),
++      lhs_(lhs),
++      rhs_(rhs),
+       name_(NULL) { }
+ 
+   void Generate(MacroAssembler* masm);
+@@ -483,12 +487,19 @@
+   // comparison code is used when the number comparison has been inlined, and
+   // the stub will be called if one of the operands is not a number.
+   bool include_number_compare_;
++  // Register holding the left hand side of the comparison if the stub gives
++  // a choice, no_reg otherwise.
++  Register lhs_;
++  // Register holding the right hand side of the comparison if the stub gives
++  // a choice, no_reg otherwise.
++  Register rhs_;
+ 
+-  // Encoding of the minor key CCCCCCCCCCCCCCNS.
++  // Encoding of the minor key CCCCCCCCCCCCRCNS.
+   class StrictField: public BitField<bool, 0, 1> {};
+   class NeverNanNanField: public BitField<bool, 1, 1> {};
+   class IncludeNumberCompareField: public BitField<bool, 2, 1> {};
+-  class ConditionField: public BitField<int, 3, 13> {};
++  class RegisterField: public BitField<bool, 3, 1> {};
++  class ConditionField: public BitField<int, 4, 12> {};
+ 
+   Major MajorKey() { return Compare; }
+ 
+@@ -507,11 +518,17 @@
+ #ifdef DEBUG
+   void Print() {
+     PrintF("CompareStub (cc %d), (strict %s), "
+-           "(never_nan_nan %s), (number_compare %s)\n",
++           "(never_nan_nan %s), (number_compare %s) ",
+            static_cast<int>(cc_),
+            strict_ ? "true" : "false",
+            never_nan_nan_ ? "true" : "false",
+            include_number_compare_ ? "included" : "not included");
++
++    if (!lhs_.is(no_reg) && !rhs_.is(no_reg)) {
++      PrintF("(lhs r%d), (rhs r%d)\n", lhs_.code(), rhs_.code());
++    } else {
++      PrintF("\n");
++    }
+   }
+ #endif
+ };
+diff -Nur libv8-2.2.24/src/debug.cc libv8-2.2.24.8/src/debug.cc
+--- libv8-2.2.24/src/debug.cc	2010-07-13 22:58:03.257819000 +0200
++++ libv8-2.2.24.8/src/debug.cc	2010-07-14 11:01:13.356453000 +0200
+@@ -1882,6 +1882,7 @@
+ DebuggerAgent* Debugger::agent_ = NULL;
+ LockingCommandMessageQueue Debugger::command_queue_(kQueueInitialSize);
+ Semaphore* Debugger::command_received_ = OS::CreateSemaphore(0);
++LockingCommandMessageQueue Debugger::event_command_queue_(kQueueInitialSize);
+ 
+ 
+ Handle<Object> Debugger::MakeJSObject(Vector<const char> constructor_name,
+@@ -2207,39 +2208,75 @@
+                          event_data,
+                          auto_continue);
+   }
+-  // Notify registered debug event listener. This can be either a C or a
+-  // JavaScript function.
+-  if (!event_listener_.is_null()) {
+-    if (event_listener_->IsProxy()) {
+-      // C debug event listener.
+-      Handle<Proxy> callback_obj(Handle<Proxy>::cast(event_listener_));
+-      v8::Debug::EventCallback2 callback =
+-            FUNCTION_CAST<v8::Debug::EventCallback2>(callback_obj->proxy());
+-      EventDetailsImpl event_details(
+-          event,
+-          Handle<JSObject>::cast(exec_state),
+-          event_data,
+-          event_listener_data_);
+-      callback(event_details);
+-    } else {
+-      // JavaScript debug event listener.
+-      ASSERT(event_listener_->IsJSFunction());
+-      Handle<JSFunction> fun(Handle<JSFunction>::cast(event_listener_));
+-
+-      // Invoke the JavaScript debug event listener.
+-      const int argc = 4;
+-      Object** argv[argc] = { Handle<Object>(Smi::FromInt(event)).location(),
+-                              exec_state.location(),
+-                              Handle<Object>::cast(event_data).location(),
+-                              event_listener_data_.location() };
+-      Handle<Object> result = Execution::TryCall(fun, Top::global(),
+-                                                 argc, argv, &caught_exception);
+-      // Silently ignore exceptions from debug event listeners.
++  // Notify registered debug event listener. This can be either a C or
++  // a JavaScript function. Don't call event listener for v8::Break
++  // here, if it's only a debug command -- they will be processed later.
++  if ((event != v8::Break || !auto_continue) && !event_listener_.is_null()) {
++    CallEventCallback(event, exec_state, event_data, NULL);
++  }
++  // Process pending debug commands.
++  if (event == v8::Break) {
++    while (!event_command_queue_.IsEmpty()) {
++      CommandMessage command = event_command_queue_.Get();
++      if (!event_listener_.is_null()) {
++        CallEventCallback(v8::BreakForCommand,
++                          exec_state,
++                          event_data,
++                          command.client_data());
++      }
++      command.Dispose();
+     }
+   }
+ }
+ 
+ 
++void Debugger::CallEventCallback(v8::DebugEvent event,
++                                 Handle<Object> exec_state,
++                                 Handle<Object> event_data,
++                                 v8::Debug::ClientData* client_data) {
++  if (event_listener_->IsProxy()) {
++    CallCEventCallback(event, exec_state, event_data, client_data);
++  } else {
++    CallJSEventCallback(event, exec_state, event_data);
++  }
++}
++
++
++void Debugger::CallCEventCallback(v8::DebugEvent event,
++                                  Handle<Object> exec_state,
++                                  Handle<Object> event_data,
++                                  v8::Debug::ClientData* client_data) {
++  Handle<Proxy> callback_obj(Handle<Proxy>::cast(event_listener_));
++  v8::Debug::EventCallback2 callback =
++      FUNCTION_CAST<v8::Debug::EventCallback2>(callback_obj->proxy());
++  EventDetailsImpl event_details(
++      event,
++      Handle<JSObject>::cast(exec_state),
++      Handle<JSObject>::cast(event_data),
++      event_listener_data_,
++      client_data);
++  callback(event_details);
++}
++
++
++void Debugger::CallJSEventCallback(v8::DebugEvent event,
++                                   Handle<Object> exec_state,
++                                   Handle<Object> event_data) {
++  ASSERT(event_listener_->IsJSFunction());
++  Handle<JSFunction> fun(Handle<JSFunction>::cast(event_listener_));
++
++  // Invoke the JavaScript debug event listener.
++  const int argc = 4;
++  Object** argv[argc] = { Handle<Object>(Smi::FromInt(event)).location(),
++                          exec_state.location(),
++                          Handle<Object>::cast(event_data).location(),
++                          event_listener_data_.location() };
++  bool caught_exception = false;
++  Execution::TryCall(fun, Top::global(), argc, argv, &caught_exception);
++  // Silently ignore exceptions from debug event listeners.
++}
++
++
+ Handle<Context> Debugger::GetDebugContext() {
+     never_unload_debugger_ = true;
+     EnterDebugger debugger;
+@@ -2273,6 +2310,7 @@
+   bool sendEventMessage = false;
+   switch (event) {
+     case v8::Break:
++    case v8::BreakForCommand:
+       sendEventMessage = !auto_continue;
+       break;
+     case v8::Exception:
+@@ -2560,6 +2598,17 @@
+ }
+ 
+ 
++void Debugger::EnqueueDebugCommand(v8::Debug::ClientData* client_data) {
++  CommandMessage message = CommandMessage::New(Vector<uint16_t>(), client_data);
++  event_command_queue_.Put(message);
++
++  // Set the debug command break flag to have the command processed.
++  if (!Debug::InDebugger()) {
++    StackGuard::DebugCommand();
++  }
++}
++
++
+ bool Debugger::IsDebuggerActive() {
+   ScopedLock with(debugger_access_);
+ 
+@@ -2761,11 +2810,13 @@
+ EventDetailsImpl::EventDetailsImpl(DebugEvent event,
+                                    Handle<JSObject> exec_state,
+                                    Handle<JSObject> event_data,
+-                                   Handle<Object> callback_data)
++                                   Handle<Object> callback_data,
++                                   v8::Debug::ClientData* client_data)
+     : event_(event),
+       exec_state_(exec_state),
+       event_data_(event_data),
+-      callback_data_(callback_data) {}
++      callback_data_(callback_data),
++      client_data_(client_data) {}
+ 
+ 
+ DebugEvent EventDetailsImpl::GetEvent() const {
+@@ -2793,6 +2844,11 @@
+ }
+ 
+ 
++v8::Debug::ClientData* EventDetailsImpl::GetClientData() const {
++  return client_data_;
++}
++
++
+ CommandMessage::CommandMessage() : text_(Vector<uint16_t>::empty()),
+                                    client_data_(NULL) {
+ }
+diff -Nur libv8-2.2.24/src/debug.h libv8-2.2.24.8/src/debug.h
+--- libv8-2.2.24/src/debug.h	2010-07-05 13:01:40.955149000 +0200
++++ libv8-2.2.24.8/src/debug.h	2010-07-14 11:01:13.356453000 +0200
+@@ -566,18 +566,21 @@
+   EventDetailsImpl(DebugEvent event,
+                    Handle<JSObject> exec_state,
+                    Handle<JSObject> event_data,
+-                   Handle<Object> callback_data);
++                   Handle<Object> callback_data,
++                   v8::Debug::ClientData* client_data);
+   virtual DebugEvent GetEvent() const;
+   virtual v8::Handle<v8::Object> GetExecutionState() const;
+   virtual v8::Handle<v8::Object> GetEventData() const;
+   virtual v8::Handle<v8::Context> GetEventContext() const;
+   virtual v8::Handle<v8::Value> GetCallbackData() const;
++  virtual v8::Debug::ClientData* GetClientData() const;
+  private:
+   DebugEvent event_;  // Debug event causing the break.
+-  Handle<JSObject> exec_state_;  // Current execution state.
+-  Handle<JSObject> event_data_;  // Data associated with the event.
+-  Handle<Object> callback_data_;  // User data passed with the callback when
+-                                  // it was registered.
++  Handle<JSObject> exec_state_;         // Current execution state.
++  Handle<JSObject> event_data_;         // Data associated with the event.
++  Handle<Object> callback_data_;        // User data passed with the callback
++                                        // when it was registered.
++  v8::Debug::ClientData* client_data_;  // Data passed to DebugBreakForCommand.
+ };
+ 
+ 
+@@ -706,6 +709,9 @@
+   // Check whether there are commands in the command queue.
+   static bool HasCommands();
+ 
++  // Enqueue a debugger command to the command queue for event listeners.
++  static void EnqueueDebugCommand(v8::Debug::ClientData* client_data = NULL);
++
+   static Handle<Object> Call(Handle<JSFunction> fun,
+                              Handle<Object> data,
+                              bool* pending_exception);
+@@ -753,6 +759,17 @@
+   static bool IsDebuggerActive();
+ 
+  private:
++  static void CallEventCallback(v8::DebugEvent event,
++                                Handle<Object> exec_state,
++                                Handle<Object> event_data,
++                                v8::Debug::ClientData* client_data);
++  static void CallCEventCallback(v8::DebugEvent event,
++                                 Handle<Object> exec_state,
++                                 Handle<Object> event_data,
++                                 v8::Debug::ClientData* client_data);
++  static void CallJSEventCallback(v8::DebugEvent event,
++                                  Handle<Object> exec_state,
++                                  Handle<Object> event_data);
+   static void ListenersChanged();
+ 
+   static Mutex* debugger_access_;  // Mutex guarding debugger variables.
+@@ -775,6 +792,8 @@
+   static LockingCommandMessageQueue command_queue_;
+   static Semaphore* command_received_;  // Signaled for each command received.
+ 
++  static LockingCommandMessageQueue event_command_queue_;
++
+   friend class EnterDebugger;
+ };
+ 
+diff -Nur libv8-2.2.24/src/ia32/codegen-ia32.cc libv8-2.2.24.8/src/ia32/codegen-ia32.cc
+--- libv8-2.2.24/src/ia32/codegen-ia32.cc	2010-07-13 22:58:03.257819000 +0200
++++ libv8-2.2.24.8/src/ia32/codegen-ia32.cc	2010-07-15 11:58:47.142927000 +0200
+@@ -11635,6 +11635,8 @@
+ 
+ 
+ void CompareStub::Generate(MacroAssembler* masm) {
++  ASSERT(lhs_.is(no_reg) && rhs_.is(no_reg));
++
+   Label check_unequal_objects, done;
+ 
+   // NOTICE! This code is only reached after a smi-fast-case check, so
+@@ -12528,8 +12530,10 @@
+   // Encode the three parameters in a unique 16 bit value. To avoid duplicate
+   // stubs the never NaN NaN condition is only taken into account if the
+   // condition is equals.
+-  ASSERT(static_cast<unsigned>(cc_) < (1 << 13));
++  ASSERT(static_cast<unsigned>(cc_) < (1 << 12));
++  ASSERT(lhs_.is(no_reg) && rhs_.is(no_reg));
+   return ConditionField::encode(static_cast<unsigned>(cc_))
++         | RegisterField::encode(false)   // lhs_ and rhs_ are not used
+          | StrictField::encode(strict_)
+          | NeverNanNanField::encode(cc_ == equal ? never_nan_nan_ : false)
+          | IncludeNumberCompareField::encode(include_number_compare_);
+@@ -12539,6 +12543,8 @@
+ // Unfortunately you have to run without snapshots to see most of these
+ // names in the profile since most compare stubs end up in the snapshot.
+ const char* CompareStub::GetName() {
++  ASSERT(lhs_.is(no_reg) && rhs_.is(no_reg));
++
+   if (name_ != NULL) return name_;
+   const int kMaxNameLength = 100;
+   name_ = Bootstrapper::AllocateAutoDeletedArray(kMaxNameLength);
+diff -Nur libv8-2.2.24/src/ia32/stub-cache-ia32.cc libv8-2.2.24.8/src/ia32/stub-cache-ia32.cc
+--- libv8-2.2.24/src/ia32/stub-cache-ia32.cc	2010-07-13 22:58:03.257819000 +0200
++++ libv8-2.2.24.8/src/ia32/stub-cache-ia32.cc	2010-07-15 11:58:47.142927000 +0200
+@@ -184,6 +184,12 @@
+       // Stop if found the property.
+       __ cmp(entity_name, Handle<String>(name));
+       __ j(equal, miss_label, not_taken);
++
++      // Check if the entry name is not a symbol.
++      __ mov(entity_name, FieldOperand(entity_name, HeapObject::kMapOffset));
++      __ test_b(FieldOperand(entity_name, Map::kInstanceTypeOffset),
++                kIsSymbolMask);
++      __ j(zero, miss_label, not_taken);
+     } else {
+       // Give up probing if still not found the undefined value.
+       __ j(not_equal, miss_label, not_taken);
+diff -Nur libv8-2.2.24/src/objects.cc libv8-2.2.24.8/src/objects.cc
+--- libv8-2.2.24/src/objects.cc	2010-07-13 22:58:03.257819000 +0200
++++ libv8-2.2.24.8/src/objects.cc	2010-07-23 14:48:36.795540000 +0200
+@@ -2966,7 +2966,8 @@
+         break;
+     }
+ 
+-    SetElementCallback(index, info, info->property_attributes());
++    Object* ok = SetElementCallback(index, info, info->property_attributes());
++    if (ok->IsFailure()) return ok;
+   } else {
+     // Lookup the name.
+     LookupResult result;
+@@ -2976,7 +2977,8 @@
+     if (result.IsProperty() && (result.IsReadOnly() || result.IsDontDelete())) {
+       return Heap::undefined_value();
+     }
+-    SetPropertyCallback(name, info, info->property_attributes());
++    Object* ok = SetPropertyCallback(name, info, info->property_attributes());
++    if (ok->IsFailure()) return ok;
+   }
+ 
+   return this;
+diff -Nur libv8-2.2.24/src/runtime.cc libv8-2.2.24.8/src/runtime.cc
+--- libv8-2.2.24/src/runtime.cc	2010-07-13 22:58:03.257819000 +0200
++++ libv8-2.2.24.8/src/runtime.cc	2010-07-27 16:23:04.567279000 +0200
+@@ -9344,6 +9344,13 @@
+     }
+     Debug::SetBreakPoint(shared, break_point_object_arg, &position);
+     position += shared->start_position();
++
++    // The result position may become beyond script source end.
++    // This is expected when the function is toplevel. This may become
++    // a problem later when actual position gets converted into line/column.
++    if (shared->is_toplevel() && position == shared->end_position()) {
++      position = shared->end_position() - 1;
++    }
+     return Smi::FromInt(position);
+   }
+   return  Heap::undefined_value();
+diff -Nur libv8-2.2.24/src/version.cc libv8-2.2.24.8/src/version.cc
+--- libv8-2.2.24/src/version.cc	2010-07-13 22:58:03.257819000 +0200
++++ libv8-2.2.24.8/src/version.cc	2010-07-30 12:18:18.121784000 +0200
+@@ -35,7 +35,7 @@
+ #define MAJOR_VERSION     2
+ #define MINOR_VERSION     2
+ #define BUILD_NUMBER      24
+-#define PATCH_LEVEL       0
++#define PATCH_LEVEL       8
+ #define CANDIDATE_VERSION false
+ 
+ // Define SONAME to have the SCons build the put a specific SONAME into the
+diff -Nur libv8-2.2.24/src/x64/assembler-x64.cc libv8-2.2.24.8/src/x64/assembler-x64.cc
+--- libv8-2.2.24/src/x64/assembler-x64.cc	2010-07-13 22:58:03.257819000 +0200
++++ libv8-2.2.24.8/src/x64/assembler-x64.cc	2010-07-28 08:55:53.407150000 +0200
+@@ -2529,10 +2529,10 @@
+   EnsureSpace ensure_space(this);
+   last_pc_ = pc_;
+   emit(0x66);
+-  emit_optional_rex_32(dst, src);
++  emit_optional_rex_32(src, dst);
+   emit(0x0F);
+   emit(0x7E);
+-  emit_sse_operand(dst, src);
++  emit_sse_operand(src, dst);
+ }
+ 
+ 
+@@ -2551,10 +2551,10 @@
+   EnsureSpace ensure_space(this);
+   last_pc_ = pc_;
+   emit(0x66);
+-  emit_rex_64(dst, src);
++  emit_rex_64(src, dst);
+   emit(0x0F);
+   emit(0x7E);
+-  emit_sse_operand(dst, src);
++  emit_sse_operand(src, dst);
+ }
+ 
+ 
+diff -Nur libv8-2.2.24/src/x64/codegen-x64.cc libv8-2.2.24.8/src/x64/codegen-x64.cc
+--- libv8-2.2.24/src/x64/codegen-x64.cc	2010-07-13 22:58:03.257819000 +0200
++++ libv8-2.2.24.8/src/x64/codegen-x64.cc	2010-07-15 11:58:47.142927000 +0200
+@@ -3428,49 +3428,56 @@
+     CodeForStatementPosition(node);
+     Slot* loop_var_slot = loop_var->slot();
+     if (loop_var_slot->type() == Slot::LOCAL) {
+-      frame_->PushLocalAt(loop_var_slot->index());
++      frame_->TakeLocalAt(loop_var_slot->index());
+     } else {
+       ASSERT(loop_var_slot->type() == Slot::PARAMETER);
+-      frame_->PushParameterAt(loop_var_slot->index());
++      frame_->TakeParameterAt(loop_var_slot->index());
+     }
+     Result loop_var_result = frame_->Pop();
+     if (!loop_var_result.is_register()) {
+       loop_var_result.ToRegister();
+     }
+-
++    Register loop_var_reg = loop_var_result.reg();
++    frame_->Spill(loop_var_reg);
+     if (increments) {
+-      __ SmiAddConstant(loop_var_result.reg(),
+-                        loop_var_result.reg(),
++      __ SmiAddConstant(loop_var_reg,
++                        loop_var_reg,
+                         Smi::FromInt(1));
+     } else {
+-      __ SmiSubConstant(loop_var_result.reg(),
+-                        loop_var_result.reg(),
++      __ SmiSubConstant(loop_var_reg,
++                        loop_var_reg,
+                         Smi::FromInt(1));
+     }
+ 
+-    {
+-      __ SmiCompare(loop_var_result.reg(), limit_value);
+-      Condition condition;
+-      switch (compare_op) {
+-        case Token::LT:
+-          condition = less;
+-          break;
+-        case Token::LTE:
+-          condition = less_equal;
+-          break;
+-        case Token::GT:
+-          condition = greater;
+-          break;
+-        case Token::GTE:
+-          condition = greater_equal;
+-          break;
+-        default:
+-          condition = never;
+-          UNREACHABLE();
+-      }
+-      loop.Branch(condition);
++    frame_->Push(&loop_var_result);
++    if (loop_var_slot->type() == Slot::LOCAL) {
++      frame_->StoreToLocalAt(loop_var_slot->index());
++    } else {
++      ASSERT(loop_var_slot->type() == Slot::PARAMETER);
++      frame_->StoreToParameterAt(loop_var_slot->index());
+     }
+-    loop_var_result.Unuse();
++    frame_->Drop();
++
++    __ SmiCompare(loop_var_reg, limit_value);
++    Condition condition;
++    switch (compare_op) {
++      case Token::LT:
++        condition = less;
++        break;
++      case Token::LTE:
++        condition = less_equal;
++        break;
++      case Token::GT:
++        condition = greater;
++        break;
++      case Token::GTE:
++        condition = greater_equal;
++        break;
++      default:
++        condition = never;
++        UNREACHABLE();
++    }
++    loop.Branch(condition);
+   }
+   if (node->break_target()->is_linked()) {
+     node->break_target()->Bind();
+@@ -10094,6 +10101,8 @@
+ 
+ 
+ void CompareStub::Generate(MacroAssembler* masm) {
++  ASSERT(lhs_.is(no_reg) && rhs_.is(no_reg));
++
+   Label check_unequal_objects, done;
+   // The compare stub returns a positive, negative, or zero 64-bit integer
+   // value in rax, corresponding to result of comparing the two inputs.
+@@ -10942,8 +10951,10 @@
+   // Encode the three parameters in a unique 16 bit value. To avoid duplicate
+   // stubs the never NaN NaN condition is only taken into account if the
+   // condition is equals.
+-  ASSERT(static_cast<unsigned>(cc_) < (1 << 13));
++  ASSERT(static_cast<unsigned>(cc_) < (1 << 12));
++  ASSERT(lhs_.is(no_reg) && rhs_.is(no_reg));
+   return ConditionField::encode(static_cast<unsigned>(cc_))
++         | RegisterField::encode(false)    // lhs_ and rhs_ are not used
+          | StrictField::encode(strict_)
+          | NeverNanNanField::encode(cc_ == equal ? never_nan_nan_ : false)
+          | IncludeNumberCompareField::encode(include_number_compare_);
+@@ -10953,6 +10964,8 @@
+ // Unfortunately you have to run without snapshots to see most of these
+ // names in the profile since most compare stubs end up in the snapshot.
+ const char* CompareStub::GetName() {
++  ASSERT(lhs_.is(no_reg) && rhs_.is(no_reg));
++
+   if (name_ != NULL) return name_;
+   const int kMaxNameLength = 100;
+   name_ = Bootstrapper::AllocateAutoDeletedArray(kMaxNameLength);
+diff -Nur libv8-2.2.24/src/x64/disasm-x64.cc libv8-2.2.24.8/src/x64/disasm-x64.cc
+--- libv8-2.2.24/src/x64/disasm-x64.cc	2010-06-30 11:09:34.790111000 +0200
++++ libv8-2.2.24.8/src/x64/disasm-x64.cc	2010-07-28 08:55:53.407150000 +0200
+@@ -1019,10 +1019,10 @@
+                        NameOfXMMRegister(regop));
+         current += PrintRightOperand(current);
+       } else if (opcode == 0x7E) {
+-        AppendToBuffer("mov%c %s,",
+-                       rex_w() ? 'q' : 'd',
+-                       NameOfCPURegister(regop));
+-        current += PrintRightXMMOperand(current);
++        AppendToBuffer("mov%c ",
++                       rex_w() ? 'q' : 'd');
++        current += PrintRightOperand(current);
++        AppendToBuffer(", %s", NameOfXMMRegister(regop));
+       } else {
+         const char* mnemonic = "?";
+         if (opcode == 0x57) {
+diff -Nur libv8-2.2.24/src/x64/stub-cache-x64.cc libv8-2.2.24.8/src/x64/stub-cache-x64.cc
+--- libv8-2.2.24/src/x64/stub-cache-x64.cc	2010-07-13 22:58:03.257819000 +0200
++++ libv8-2.2.24.8/src/x64/stub-cache-x64.cc	2010-07-15 11:58:47.142927000 +0200
+@@ -164,6 +164,12 @@
+       // Stop if found the property.
+       __ Cmp(entity_name, Handle<String>(name));
+       __ j(equal, miss_label);
++
++      // Check if the entry name is not a symbol.
++      __ movq(entity_name, FieldOperand(entity_name, HeapObject::kMapOffset));
++      __ testb(FieldOperand(entity_name, Map::kInstanceTypeOffset),
++               Immediate(kIsSymbolMask));
++      __ j(zero, miss_label);
+     } else {
+       // Give up probing if still not found the undefined value.
+       __ j(not_equal, miss_label);
+diff -Nur libv8-2.2.24/test/cctest/test-debug.cc libv8-2.2.24.8/test/cctest/test-debug.cc
+--- libv8-2.2.24/test/cctest/test-debug.cc	2010-07-05 13:01:40.955149000 +0200
++++ libv8-2.2.24.8/test/cctest/test-debug.cc	2010-07-14 11:01:13.356453000 +0200
+@@ -6650,4 +6650,69 @@
+   CheckDebuggerUnloaded();
+ }
+ 
++
++static void* expected_break_data;
++static bool was_debug_break_called;
++static bool was_debug_event_called;
++static void DebugEventBreakDataChecker(const v8::Debug::EventDetails& details) {
++  if (details.GetEvent() == v8::BreakForCommand) {
++    CHECK_EQ(expected_break_data, details.GetClientData());
++    was_debug_event_called = true;
++  } else if (details.GetEvent() == v8::Break) {
++    was_debug_break_called = true;
++  }
++}
++
++// Check that event details contain context where debug event occured.
++TEST(DebugEventBreakData) {
++  v8::HandleScope scope;
++  DebugLocalContext env;
++  v8::Debug::SetDebugEventListener2(DebugEventBreakDataChecker);
++
++  TestClientData::constructor_call_counter = 0;
++  TestClientData::destructor_call_counter = 0;
++
++  expected_break_data = NULL;
++  was_debug_event_called = false;
++  was_debug_break_called = false;
++  v8::Debug::DebugBreakForCommand();
++  v8::Script::Compile(v8::String::New("(function(x){return x;})(1);"))->Run();
++  CHECK(was_debug_event_called);
++  CHECK(!was_debug_break_called);
++
++  TestClientData* data1 = new TestClientData();
++  expected_break_data = data1;
++  was_debug_event_called = false;
++  was_debug_break_called = false;
++  v8::Debug::DebugBreakForCommand(data1);
++  v8::Script::Compile(v8::String::New("(function(x){return x+1;})(1);"))->Run();
++  CHECK(was_debug_event_called);
++  CHECK(!was_debug_break_called);
++
++  expected_break_data = NULL;
++  was_debug_event_called = false;
++  was_debug_break_called = false;
++  v8::Debug::DebugBreak();
++  v8::Script::Compile(v8::String::New("(function(x){return x+2;})(1);"))->Run();
++  CHECK(!was_debug_event_called);
++  CHECK(was_debug_break_called);
++
++  TestClientData* data2 = new TestClientData();
++  expected_break_data = data2;
++  was_debug_event_called = false;
++  was_debug_break_called = false;
++  v8::Debug::DebugBreak();
++  v8::Debug::DebugBreakForCommand(data2);
++  v8::Script::Compile(v8::String::New("(function(x){return x+3;})(1);"))->Run();
++  CHECK(was_debug_event_called);
++  CHECK(was_debug_break_called);
++
++  CHECK_EQ(2, TestClientData::constructor_call_counter);
++  CHECK_EQ(TestClientData::constructor_call_counter,
++           TestClientData::destructor_call_counter);
++
++  v8::Debug::SetDebugEventListener(NULL);
++  CheckDebuggerUnloaded();
++}
++
+ #endif  // ENABLE_DEBUGGER_SUPPORT
+diff -Nur libv8-2.2.24/test/mjsunit/call-stub.js libv8-2.2.24.8/test/mjsunit/call-stub.js
+--- libv8-2.2.24/test/mjsunit/call-stub.js	2010-07-05 13:01:40.955149000 +0200
++++ libv8-2.2.24.8/test/mjsunit/call-stub.js	2010-07-15 11:58:47.142927000 +0200
+@@ -49,3 +49,18 @@
+   }
+   assertEquals(i < 50 || i >= 70 ? 1 : 2, h.m());
+ }
++
++
++var nonsymbol = 'wwwww '.split(' ')[0];
++Hash.prototype.wwwww = Hash.prototype.m;
++
++for (var i = 1; i < 100; i++) {
++  if (i == 50) {
++    h[nonsymbol] = function() {
++      return 2;
++    };
++  } else if (i == 70) {
++    delete h[nonsymbol];
++  }
++  assertEquals(i < 50 || i >= 70 ? 1 : 2, h.wwwww());
++}
+diff -Nur libv8-2.2.24/test/mjsunit/debug-setbreakpoint.js libv8-2.2.24.8/test/mjsunit/debug-setbreakpoint.js
+--- libv8-2.2.24/test/mjsunit/debug-setbreakpoint.js	2010-06-30 11:09:34.790111000 +0200
++++ libv8-2.2.24.8/test/mjsunit/debug-setbreakpoint.js	2010-07-27 16:23:04.567279000 +0200
+@@ -192,3 +192,26 @@
+ sourceUrlFunc();
+ 
+ assertTrue(breakListenerCalled, "Break listener not called on breakpoint set by sourceURL");
++
++
++// Breakpoint in a script with no statements test case. If breakpoint is set
++// to the script body, its actual position is taken from the nearest statement
++// below or like in this case is reset to the very end of the script.
++// Unless some precautions made, this position becomes out-of-range and
++// we get an exception.
++
++// Gets a script of 'i1' function and sets the breakpoint at line #4 which
++// should be empty.
++function SetBreakpointInI1Script() {
++  var i_script = Debug.findScript(i1);
++  assertTrue(!!i_script, "invalid script for i1");
++  Debug.setScriptBreakPoint(Debug.ScriptBreakPointType.ScriptId,
++                            i_script.id, 4);
++}
++
++// Creates the eval script and tries to set the breakpoint.
++// The tricky part is that the script function must be strongly reachable at the
++// moment. Since there's no way of simply getting the pointer to the function,
++// we run this code while the script function is being activated on stack.
++eval('SetBreakpointInI1Script()\nfunction i1(){}\n\n\n\nfunction i2(){}\n');
++
+diff -Nur libv8-2.2.24/test/mjsunit/regress/regress-784.js libv8-2.2.24.8/test/mjsunit/regress/regress-784.js
+--- libv8-2.2.24/test/mjsunit/regress/regress-784.js	1970-01-01 01:00:00.000000000 +0100
++++ libv8-2.2.24.8/test/mjsunit/regress/regress-784.js	2010-07-28 15:36:30.144289000 +0200
+@@ -0,0 +1,42 @@
++// Copyright 2010 the V8 project authors. All rights reserved.
++// Redistribution and use in source and binary forms, with or without
++// modification, are permitted provided that the following conditions are
++// met:
++//
++//     * Redistributions of source code must retain the above copyright
++//       notice, this list of conditions and the following disclaimer.
++//     * Redistributions in binary form must reproduce the above
++//       copyright notice, this list of conditions and the following
++//       disclaimer in the documentation and/or other materials provided
++//       with the distribution.
++//     * Neither the name of Google Inc. nor the names of its
++//       contributors may be used to endorse or promote products derived
++//       from this software without specific prior written permission.
++//
++// THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
++// "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
++// LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
++// A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
++// OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
++// SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
++// LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
++// DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
++// THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
++// (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
++// OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
++
++// Test that CallApplyLazy, generating optimized code for apply calls of the
++// form x.apply(y, arguments), does not leave an extra copy of the result
++// on the stack.
++
++// See http://code.google.com/p/v8/issues/detail?id=784
++
++A = {x:{y:function(i){return i;}}};
++B = function(x){return 17;};
++
++foo = function () {
++  A.x.y(B.apply(this, arguments));
++};
++
++foo();
++foo("Hello", "There");
+diff -Nur libv8-2.2.24/test/mjsunit/regress/regress-r4998.js libv8-2.2.24.8/test/mjsunit/regress/regress-r4998.js
+--- libv8-2.2.24/test/mjsunit/regress/regress-r4998.js	1970-01-01 01:00:00.000000000 +0100
++++ libv8-2.2.24.8/test/mjsunit/regress/regress-r4998.js	2010-07-14 16:37:29.889223000 +0200
+@@ -0,0 +1,94 @@
++// Copyright 2010 the V8 project authors. All rights reserved.
++// Redistribution and use in source and binary forms, with or without
++// modification, are permitted provided that the following conditions are
++// met:
++//
++//     * Redistributions of source code must retain the above copyright
++//       notice, this list of conditions and the following disclaimer.
++//     * Redistributions in binary form must reproduce the above
++//       copyright notice, this list of conditions and the following
++//       disclaimer in the documentation and/or other materials provided
++//       with the distribution.
++//     * Neither the name of Google Inc. nor the names of its
++//       contributors may be used to endorse or promote products derived
++//       from this software without specific prior written permission.
++//
++// THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
++// "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
++// LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
++// A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
++// OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
++// SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
++// LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
++// DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
++// THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
++// (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
++// OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
++
++// Test for a broken fast-smi-loop that does not save the incremented value
++// of the loop index.  If this test fails, it loops forever, and times out.
++
++// Flags: --nofull-compiler
++
++// Calling foo() spills the virtual frame.
++function foo() {
++  return;
++}
++
++function bar() {
++  var x1 = 3;
++  var x2 = 3;
++  var x3 = 3;
++  var x4 = 3;
++  var x5 = 3;
++  var x6 = 3;
++  var x7 = 3;
++  var x8 = 3;
++  var x9 = 3;
++  var x10 = 3;
++  var x11 = 3;
++  var x12 = 3;
++  var x13 = 3;
++
++  foo();
++
++  x1 = 257;
++  x2 = 258;
++  x3 = 259;
++  x4 = 260;
++  x5 = 261;
++  x6 = 262;
++  x7 = 263;
++  x8 = 264;
++  x9 = 265;
++  x10 = 266;
++  x11 = 267;
++  x12 = 268;
++  x13 = 269;
++
++  // The loop variable x7 is initialized to 3,
++  // and then MakeMergeable is called on the virtual frame.
++  // MakeMergeable has forced the loop variable x7 to be spilled,
++  // so it is marked as synced
++  // The back edge then merges its virtual frame, which incorrectly
++  // claims that x7 is synced, and does not save the modified
++  // value.
++  for (x7 = 3; x7 < 10; ++x7) {
++    foo();
++  }
++}
++
++bar();
++
++function aliasing() {
++  var x = 3;
++  var j;
++  for (j = 7; j < 11; ++j) {
++    x = j;
++  }
++
++  assertEquals(10, x);
++  assertEquals(11, j);
++}
++
++aliasing();
+diff -Nur libv8-2.2.24/tools/js2c.py libv8-2.2.24.8/tools/js2c.py
+--- libv8-2.2.24/tools/js2c.py	2010-07-07 14:22:46.872819000 +0200
++++ libv8-2.2.24.8/tools/js2c.py	2010-07-30 12:18:18.121784000 +0200
+@@ -275,8 +275,8 @@
+   debugger_ids = []
+   modules = []
+   # Locate the macros file name.
+-  consts = {}
+-  macros = {}
++  consts = []
++  macros = []
+   for s in source:
+     if 'macros.py' == (os.path.split(str(s))[1]):
+       (consts, macros) = ReadMacros(ReadLines(str(s)))
