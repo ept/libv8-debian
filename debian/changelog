@@ -1,3 +1,9 @@
+libv8 (2.2.24-5) unstable; urgency=low
+
+  * Apply upstream patches from 2.2.24.8 (2.2 branch) 
+
+ -- Jérémy Lal <kapouer@melix.org>  Sat, 31 Jul 2010 19:06:56 +0200
+
 libv8 (2.2.24-4) unstable; urgency=low
 
   * Replace arch: mips with mipsel (on the three packages) 
