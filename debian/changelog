@@ -2,6 +2,7 @@ libv8 (2.2.24-5) unstable; urgency=low
 
   * Apply upstream patches from 2.2.24.8 (2.2 branch)
   * Standards-Version 3.9.1
+  * Change priority to optional. (Closes: #591148)
 
  -- Jérémy Lal <kapouer@melix.org>  Sat, 31 Jul 2010 19:10:18 +0200
 

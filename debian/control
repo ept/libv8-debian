@@ -1,5 +1,5 @@
 Source: libv8
-Priority: extra
+Priority: optional
 Maintainer: Antonio Radici <antonio@dyne.org>
 Uploaders: Jérémy Lal <kapouer@melix.org>
 Build-Depends: debhelper (>= 7), pkg-config, scons, cdbs (>= 0.4.73)
@@ -32,6 +32,7 @@ Description: V8 JavaScript Engine
  program.
 
 Package: libv8-dbg
+Priority: extra
 Section: debug
 Architecture: i386 amd64 armel mipsel
 Depends: libv8-2.2.24 (= ${binary:Version}), ${misc:Depends}
