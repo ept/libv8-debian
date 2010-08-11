@@ -1,6 +1,15 @@
-diff -Nur libv8-2.2.24/include/v8-debug.h libv8-2.2.24.8/include/v8-debug.h
+diff -Nur libv8-2.2.24/AUTHORS libv8-2.2.24.9/AUTHORS
+--- libv8-2.2.24/AUTHORS	2010-05-10 11:25:39.041340000 +0200
++++ libv8-2.2.24.9/AUTHORS	2010-08-08 11:52:35.427532000 +0200
+@@ -28,4 +28,5 @@
+ Rodolph Perfetta <rodolph.perfetta@arm.com>
+ Ryan Dahl <coldredlemur@gmail.com>
+ Subrato K De <subratokde@codeaurora.org>
++Burcu Dogan <burcujdogan@gmail.com>
+ 
+diff -Nur libv8-2.2.24/include/v8-debug.h libv8-2.2.24.9/include/v8-debug.h
 --- libv8-2.2.24/include/v8-debug.h	2010-05-21 14:58:28.267409000 +0200
-+++ libv8-2.2.24.8/include/v8-debug.h	2010-07-14 11:01:13.356453000 +0200
++++ libv8-2.2.24.9/include/v8-debug.h	2010-07-14 11:01:13.356453000 +0200
 @@ -76,7 +76,8 @@
    NewFunction = 3,
    BeforeCompile = 4,
@@ -38,10 +47,38 @@ diff -Nur libv8-2.2.24/include/v8-debug.h libv8-2.2.24.8/include/v8-debug.h
    // Message based interface. The message protocol is JSON. NOTE the message
    // handler thread is not supported any more parameter must be false.
    static void SetMessageHandler(MessageHandler handler,
-diff -Nur libv8-2.2.24/src/api.cc libv8-2.2.24.8/src/api.cc
+diff -Nur libv8-2.2.24/src/api.cc libv8-2.2.24.9/src/api.cc
 --- libv8-2.2.24/src/api.cc	2010-07-13 22:58:03.257819000 +0200
-+++ libv8-2.2.24.8/src/api.cc	2010-07-14 11:01:13.356453000 +0200
-@@ -4213,6 +4213,12 @@
++++ libv8-2.2.24.9/src/api.cc	2010-08-05 20:35:53.566473000 +0200
+@@ -126,7 +126,7 @@
+ 
+ // When V8 cannot allocated memory FatalProcessOutOfMemory is called.
+ // The default fatal error handler is called and execution is stopped.
+-void i::V8::FatalProcessOutOfMemory(const char* location) {
++void i::V8::FatalProcessOutOfMemory(const char* location, bool take_snapshot) {
+   i::HeapStats heap_stats;
+   int start_marker;
+   heap_stats.start_marker = &start_marker;
+@@ -166,9 +166,17 @@
+   heap_stats.near_death_global_handle_count = &near_death_global_handle_count;
+   int destroyed_global_handle_count;
+   heap_stats.destroyed_global_handle_count = &destroyed_global_handle_count;
++  int memory_allocator_size;
++  heap_stats.memory_allocator_size = &memory_allocator_size;
++  int memory_allocator_capacity;
++  heap_stats.memory_allocator_capacity = &memory_allocator_capacity;
++  int objects_per_type[LAST_TYPE + 1] = {0};
++  heap_stats.objects_per_type = objects_per_type;
++  int size_per_type[LAST_TYPE + 1] = {0};
++  heap_stats.size_per_type = size_per_type;
+   int end_marker;
+   heap_stats.end_marker = &end_marker;
+-  i::Heap::RecordStats(&heap_stats);
++  i::Heap::RecordStats(&heap_stats, take_snapshot);
+   i::V8::SetFatalError();
+   FatalErrorCallback callback = GetFatalErrorHandler();
+   {
+@@ -4213,6 +4221,12 @@
  }
  
  
@@ -54,9 +91,47 @@ diff -Nur libv8-2.2.24/src/api.cc libv8-2.2.24.8/src/api.cc
  static v8::Debug::MessageHandler message_handler = NULL;
  
  static void MessageHandlerWrapper(const v8::Debug::Message& message) {
-diff -Nur libv8-2.2.24/src/arm/codegen-arm.cc libv8-2.2.24.8/src/arm/codegen-arm.cc
+diff -Nur libv8-2.2.24/src/arm/assembler-arm-inl.h libv8-2.2.24.9/src/arm/assembler-arm-inl.h
+--- libv8-2.2.24/src/arm/assembler-arm-inl.h	2010-06-23 11:06:43.415766000 +0200
++++ libv8-2.2.24.9/src/arm/assembler-arm-inl.h	2010-08-05 17:01:05.985678000 +0200
+@@ -120,9 +120,8 @@
+ 
+ 
+ void RelocInfo::set_call_address(Address target) {
+-  ASSERT(IsPatchedReturnSequence());
+-  // The 2 instructions offset assumes patched return sequence.
+-  ASSERT(IsJSReturn(rmode()));
++  ASSERT((IsJSReturn(rmode()) && IsPatchedReturnSequence()) ||
++         (IsDebugBreakSlot(rmode()) && IsPatchedDebugBreakSlotSequence()));
+   Memory::Address_at(pc_ + 2 * Assembler::kInstrSize) = target;
+ }
+ 
+@@ -132,16 +131,15 @@
+ }
+ 
+ 
+-Object** RelocInfo::call_object_address() {
+-  ASSERT(IsPatchedReturnSequence());
+-  // The 2 instructions offset assumes patched return sequence.
+-  ASSERT(IsJSReturn(rmode()));
+-  return reinterpret_cast<Object**>(pc_ + 2 * Assembler::kInstrSize);
++void RelocInfo::set_call_object(Object* target) {
++  *call_object_address() = target;
+ }
+ 
+ 
+-void RelocInfo::set_call_object(Object* target) {
+-  *call_object_address() = target;
++Object** RelocInfo::call_object_address() {
++  ASSERT((IsJSReturn(rmode()) && IsPatchedReturnSequence()) ||
++         (IsDebugBreakSlot(rmode()) && IsPatchedDebugBreakSlotSequence()));
++  return reinterpret_cast<Object**>(pc_ + 2 * Assembler::kInstrSize);
+ }
+ 
+ 
+diff -Nur libv8-2.2.24/src/arm/codegen-arm.cc libv8-2.2.24.9/src/arm/codegen-arm.cc
 --- libv8-2.2.24/src/arm/codegen-arm.cc	2010-07-13 22:58:03.257819000 +0200
-+++ libv8-2.2.24.8/src/arm/codegen-arm.cc	2010-07-28 15:36:30.144289000 +0200
++++ libv8-2.2.24.9/src/arm/codegen-arm.cc	2010-08-10 08:39:13.055445000 +0200
 @@ -54,11 +54,15 @@
                                            Condition cc,
                                            bool never_nan_nan);
@@ -95,7 +170,32 @@ diff -Nur libv8-2.2.24/src/arm/codegen-arm.cc libv8-2.2.24.8/src/arm/codegen-arm
    // Stack now has 1 element:
    //   sp[0]: result
    __ bind(&done);
-@@ -6968,7 +6969,7 @@
+@@ -4760,6 +4761,24 @@
+ }
+ 
+ 
++void CodeGenerator::GenerateIsSpecObject(ZoneList<Expression*>* args) {
++  // This generates a fast version of:
++  // (typeof(arg) === 'object' || %_ClassOf(arg) == 'RegExp' ||
++  // typeof(arg) == function).
++  // It includes undetectable objects (as opposed to IsObject).
++  ASSERT(args->length() == 1);
++  Load(args->at(0));
++  Register value = frame_->PopToRegister();
++  __ tst(value, Operand(kSmiTagMask));
++  false_target()->Branch(eq);
++  // Check that this is an object.
++  __ ldr(value, FieldMemOperand(value, HeapObject::kMapOffset));
++  __ ldrb(value, FieldMemOperand(value, Map::kInstanceTypeOffset));
++  __ cmp(value, Operand(FIRST_JS_OBJECT_TYPE));
++  cc_reg_ = ge;
++}
++
++
+ void CodeGenerator::GenerateIsFunction(ZoneList<Expression*>* args) {
+   // This generates a fast version of:
+   // (%_ClassOf(arg) === 'Function')
+@@ -6968,7 +6987,7 @@
              // undefined >= undefined should fail.
              __ mov(r0, Operand(LESS));
            }
@@ -104,7 +204,7 @@ diff -Nur libv8-2.2.24/src/arm/codegen-arm.cc libv8-2.2.24.8/src/arm/codegen-arm
          }
        }
      }
-@@ -6982,7 +6983,7 @@
+@@ -6982,7 +7001,7 @@
    } else {
      __ mov(r0, Operand(EQUAL));    // Things are <=, >=, ==, === themselves.
    }
@@ -113,7 +213,7 @@ diff -Nur libv8-2.2.24/src/arm/codegen-arm.cc libv8-2.2.24.8/src/arm/codegen-arm
  
    if (cc != eq || !never_nan_nan) {
      // For less and greater we don't have to check for NaN since the result of
-@@ -7014,14 +7015,14 @@
+@@ -7014,14 +7033,14 @@
        // value if it's a NaN.
        if (cc != eq) {
          // All-zero means Infinity means equal.
@@ -130,7 +230,7 @@ diff -Nur libv8-2.2.24/src/arm/codegen-arm.cc libv8-2.2.24.8/src/arm/codegen-arm
      }
      // No fall through here.
    }
-@@ -7032,43 +7033,50 @@
+@@ -7032,43 +7051,50 @@
  
  // See comment at call site.
  static void EmitSmiNonsmiComparison(MacroAssembler* masm,
@@ -193,7 +293,7 @@ diff -Nur libv8-2.2.24/src/arm/codegen-arm.cc libv8-2.2.24.8/src/arm/codegen-arm
      __ pop(lr);
    }
  
-@@ -7078,34 +7086,35 @@
+@@ -7078,34 +7104,35 @@
  
    __ bind(&rhs_is_smi);
    // Rhs is a smi.  Check whether the non-smi lhs is a heap number.
@@ -240,7 +340,7 @@ diff -Nur libv8-2.2.24/src/arm/codegen-arm.cc libv8-2.2.24.8/src/arm/codegen-arm
      ConvertToDoubleStub stub2(r1, r0, r7, r6);
      __ Call(stub2.GetCode(), RelocInfo::CODE_TARGET);
      __ pop(lr);
-@@ -7159,7 +7168,7 @@
+@@ -7159,7 +7186,7 @@
    } else {
      __ mov(r0, Operand(LESS));
    }
@@ -249,7 +349,7 @@ diff -Nur libv8-2.2.24/src/arm/codegen-arm.cc libv8-2.2.24.8/src/arm/codegen-arm
  
    __ bind(&neither_is_nan);
  }
-@@ -7180,11 +7189,11 @@
+@@ -7180,11 +7207,11 @@
      __ cmp(rhs_mantissa, Operand(lhs_mantissa));
      __ orr(r0, rhs_mantissa, Operand(lhs_mantissa), LeaveCC, ne);
      // Return non-zero if the numbers are unequal.
@@ -263,7 +363,7 @@ diff -Nur libv8-2.2.24/src/arm/codegen-arm.cc libv8-2.2.24.8/src/arm/codegen-arm
  
      // Exponents are unequal.  The only way we can return that the numbers
      // are equal is if one is -0 and the other is 0.  We already dealt
-@@ -7194,11 +7203,11 @@
+@@ -7194,11 +7221,11 @@
      // equal.
      __ orr(r4, lhs_mantissa, Operand(lhs_exponent, LSL, kSmiTagSize), SetCC);
      __ mov(r0, Operand(r4), LeaveCC, ne);
@@ -277,7 +377,7 @@ diff -Nur libv8-2.2.24/src/arm/codegen-arm.cc libv8-2.2.24.8/src/arm/codegen-arm
    } else {
      // Call a native function to do a comparison between two non-NaNs.
      // Call C routine that may not cause GC or other trouble.
-@@ -7211,7 +7220,12 @@
+@@ -7211,7 +7238,12 @@
  
  
  // See comment at call site.
@@ -291,7 +391,7 @@ diff -Nur libv8-2.2.24/src/arm/codegen-arm.cc libv8-2.2.24.8/src/arm/codegen-arm
      // If either operand is a JSObject or an oddball value, then they are
      // not equal since their pointers are different.
      // There is no test for undetectability in strict equality.
-@@ -7219,20 +7233,20 @@
+@@ -7219,20 +7251,20 @@
      Label first_non_object;
      // Get the type of the first operand into r2 and compare it with
      // FIRST_JS_OBJECT_TYPE.
@@ -315,7 +415,7 @@ diff -Nur libv8-2.2.24/src/arm/codegen-arm.cc libv8-2.2.24.8/src/arm/codegen-arm
      __ b(ge, &return_not_equal);
  
      // Check for oddballs: true, false, null, undefined.
-@@ -7251,12 +7265,17 @@
+@@ -7251,12 +7283,17 @@
  
  // See comment at call site.
  static void EmitCheckForTwoHeapNumbers(MacroAssembler* masm,
@@ -335,7 +435,7 @@ diff -Nur libv8-2.2.24/src/arm/codegen-arm.cc libv8-2.2.24.8/src/arm/codegen-arm
    __ cmp(r2, r3);
    __ b(ne, slow);  // First was a heap number, second wasn't.  Go slow case.
  
-@@ -7264,13 +7283,13 @@
+@@ -7264,13 +7301,13 @@
    // for that.
    if (CpuFeatures::IsSupported(VFP3)) {
      CpuFeatures::Scope scope(VFP3);
@@ -353,7 +453,7 @@ diff -Nur libv8-2.2.24/src/arm/codegen-arm.cc libv8-2.2.24.8/src/arm/codegen-arm
    }
    __ jmp(both_loaded_as_doubles);
  }
-@@ -7278,9 +7297,14 @@
+@@ -7278,9 +7315,14 @@
  
  // Fast negative check for symbol-to-symbol equality.
  static void EmitCheckForSymbolsOrObjects(MacroAssembler* masm,
@@ -369,7 +469,7 @@ diff -Nur libv8-2.2.24/src/arm/codegen-arm.cc libv8-2.2.24.8/src/arm/codegen-arm
    // Ensure that no non-strings have the symbol bit set.
    Label object_test;
    ASSERT(kSymbolTag != 0);
-@@ -7288,31 +7312,31 @@
+@@ -7288,31 +7330,31 @@
    __ b(ne, &object_test);
    __ tst(r2, Operand(kIsSymbolMask));
    __ b(eq, possible_strings);
@@ -408,7 +508,7 @@ diff -Nur libv8-2.2.24/src/arm/codegen-arm.cc libv8-2.2.24.8/src/arm/codegen-arm
  }
  
  
-@@ -7434,10 +7458,13 @@
+@@ -7434,10 +7476,13 @@
  }
  
  
@@ -423,7 +523,7 @@ diff -Nur libv8-2.2.24/src/arm/codegen-arm.cc libv8-2.2.24.8/src/arm/codegen-arm
    Label slow;  // Call builtin.
    Label not_smis, both_loaded_as_doubles, lhs_not_nan;
  
-@@ -7452,7 +7479,7 @@
+@@ -7452,7 +7497,7 @@
    // be strictly equal if the other is a HeapNumber.
    ASSERT_EQ(0, kSmiTag);
    ASSERT_EQ(0, Smi::FromInt(0));
@@ -432,7 +532,7 @@ diff -Nur libv8-2.2.24/src/arm/codegen-arm.cc libv8-2.2.24.8/src/arm/codegen-arm
    __ tst(r2, Operand(kSmiTagMask));
    __ b(ne, &not_smis);
    // One operand is a smi.  EmitSmiNonsmiComparison generates code that can:
-@@ -7464,7 +7491,7 @@
+@@ -7464,7 +7509,7 @@
    // comparison.  If VFP3 is supported the double values of the numbers have
    // been loaded into d7 and d6.  Otherwise, the double values have been loaded
    // into r0, r1, r2, and r3.
@@ -441,7 +541,7 @@ diff -Nur libv8-2.2.24/src/arm/codegen-arm.cc libv8-2.2.24.8/src/arm/codegen-arm
  
    __ bind(&both_loaded_as_doubles);
    // The arguments have been converted to doubles and stored in d6 and d7, if
-@@ -7481,7 +7508,7 @@
+@@ -7481,7 +7526,7 @@
      __ mov(r0, Operand(EQUAL), LeaveCC, eq);
      __ mov(r0, Operand(LESS), LeaveCC, lt);
      __ mov(r0, Operand(GREATER), LeaveCC, gt);
@@ -450,7 +550,7 @@ diff -Nur libv8-2.2.24/src/arm/codegen-arm.cc libv8-2.2.24.8/src/arm/codegen-arm
  
      __ bind(&nan);
      // If one of the sides was a NaN then the v flag is set.  Load r0 with
-@@ -7492,7 +7519,7 @@
+@@ -7492,7 +7537,7 @@
      } else {
        __ mov(r0, Operand(LESS));
      }
@@ -459,7 +559,7 @@ diff -Nur libv8-2.2.24/src/arm/codegen-arm.cc libv8-2.2.24.8/src/arm/codegen-arm
    } else {
      // Checks for NaN in the doubles we have loaded.  Can return the answer or
      // fall through if neither is a NaN.  Also binds lhs_not_nan.
-@@ -7504,11 +7531,11 @@
+@@ -7504,11 +7549,11 @@
  
    __ bind(&not_smis);
    // At this point we know we are dealing with two different objects,
@@ -473,7 +573,7 @@ diff -Nur libv8-2.2.24/src/arm/codegen-arm.cc libv8-2.2.24.8/src/arm/codegen-arm
    }
  
    Label check_for_symbols;
-@@ -7516,8 +7543,10 @@
+@@ -7516,8 +7561,10 @@
    // Check for heap-number-heap-number comparison.  Can jump to slow case,
    // or load both doubles into r0, r1, r2, r3 and jump to the code that handles
    // that case.  If the inputs are not doubles then jumps to check_for_symbols.
@@ -485,7 +585,7 @@ diff -Nur libv8-2.2.24/src/arm/codegen-arm.cc libv8-2.2.24.8/src/arm/codegen-arm
                               &both_loaded_as_doubles,
                               &check_for_symbols,
                               &flat_string_check);
-@@ -7528,20 +7557,20 @@
+@@ -7528,20 +7575,20 @@
    if (cc_ == eq && !strict_) {
      // Returns an answer for two symbols or two detectable objects.
      // Otherwise jumps to string case or not both strings case.
@@ -511,7 +611,7 @@ diff -Nur libv8-2.2.24/src/arm/codegen-arm.cc libv8-2.2.24.8/src/arm/codegen-arm
                                                       r2,
                                                       r3,
                                                       r4,
-@@ -7550,7 +7579,7 @@
+@@ -7550,7 +7597,7 @@
  
    __ bind(&slow);
  
@@ -520,7 +620,7 @@ diff -Nur libv8-2.2.24/src/arm/codegen-arm.cc libv8-2.2.24.8/src/arm/codegen-arm
    // Figure out which native to call and setup the arguments.
    Builtins::JavaScript native;
    if (cc_ == eq) {
-@@ -10051,6 +10080,9 @@
+@@ -10051,6 +10098,9 @@
  // Unfortunately you have to run without snapshots to see most of these
  // names in the profile since most compare stubs end up in the snapshot.
  const char* CompareStub::GetName() {
@@ -530,7 +630,7 @@ diff -Nur libv8-2.2.24/src/arm/codegen-arm.cc libv8-2.2.24.8/src/arm/codegen-arm
    if (name_ != NULL) return name_;
    const int kMaxNameLength = 100;
    name_ = Bootstrapper::AllocateAutoDeletedArray(kMaxNameLength);
-@@ -10067,6 +10099,9 @@
+@@ -10067,6 +10117,9 @@
      default: cc_name = "UnknownCondition"; break;
    }
  
@@ -540,7 +640,7 @@ diff -Nur libv8-2.2.24/src/arm/codegen-arm.cc libv8-2.2.24.8/src/arm/codegen-arm
    const char* strict_name = "";
    if (strict_ && (cc_ == eq || cc_ == ne)) {
      strict_name = "_STRICT";
-@@ -10083,8 +10118,10 @@
+@@ -10083,8 +10136,10 @@
    }
  
    OS::SNPrintF(Vector<char>(name_, kMaxNameLength),
@@ -552,7 +652,7 @@ diff -Nur libv8-2.2.24/src/arm/codegen-arm.cc libv8-2.2.24.8/src/arm/codegen-arm
                 strict_name,
                 never_nan_nan_name,
                 include_number_compare_name);
-@@ -10096,8 +10133,11 @@
+@@ -10096,8 +10151,11 @@
    // Encode the three parameters in a unique 16 bit value. To avoid duplicate
    // stubs the never NaN NaN condition is only taken into account if the
    // condition is equals.
@@ -565,9 +665,20 @@ diff -Nur libv8-2.2.24/src/arm/codegen-arm.cc libv8-2.2.24.8/src/arm/codegen-arm
           | StrictField::encode(strict_)
           | NeverNanNanField::encode(cc_ == eq ? never_nan_nan_ : false)
           | IncludeNumberCompareField::encode(include_number_compare_);
-diff -Nur libv8-2.2.24/src/arm/full-codegen-arm.cc libv8-2.2.24.8/src/arm/full-codegen-arm.cc
+diff -Nur libv8-2.2.24/src/arm/codegen-arm.h libv8-2.2.24.9/src/arm/codegen-arm.h
+--- libv8-2.2.24/src/arm/codegen-arm.h	2010-07-05 13:01:40.955149000 +0200
++++ libv8-2.2.24.9/src/arm/codegen-arm.h	2010-08-10 08:39:13.055445000 +0200
+@@ -475,6 +475,7 @@
+   void GenerateIsArray(ZoneList<Expression*>* args);
+   void GenerateIsRegExp(ZoneList<Expression*>* args);
+   void GenerateIsObject(ZoneList<Expression*>* args);
++  void GenerateIsSpecObject(ZoneList<Expression*>* args);
+   void GenerateIsFunction(ZoneList<Expression*>* args);
+   void GenerateIsUndetectableObject(ZoneList<Expression*>* args);
+ 
+diff -Nur libv8-2.2.24/src/arm/full-codegen-arm.cc libv8-2.2.24.9/src/arm/full-codegen-arm.cc
 --- libv8-2.2.24/src/arm/full-codegen-arm.cc	2010-07-13 22:58:03.257819000 +0200
-+++ libv8-2.2.24.8/src/arm/full-codegen-arm.cc	2010-07-15 11:58:47.142927000 +0200
++++ libv8-2.2.24.9/src/arm/full-codegen-arm.cc	2010-08-10 08:39:13.055445000 +0200
 @@ -822,8 +822,7 @@
      // the smi vs. smi case to be handled before it is called.
      Label slow_case;
@@ -590,7 +701,33 @@ diff -Nur libv8-2.2.24/src/arm/full-codegen-arm.cc libv8-2.2.24.8/src/arm/full-c
      __ b(ne, &next_test);
      __ Drop(1);  // Switch value is no longer needed.
      __ b(clause->body_target()->entry_label());
-@@ -3088,7 +3087,7 @@
+@@ -1909,6 +1908,25 @@
+ }
+ 
+ 
++void FullCodeGenerator::EmitIsSpecObject(ZoneList<Expression*>* args) {
++  ASSERT(args->length() == 1);
++
++  VisitForValue(args->at(0), kAccumulator);
++
++  Label materialize_true, materialize_false;
++  Label* if_true = NULL;
++  Label* if_false = NULL;
++  PrepareTest(&materialize_true, &materialize_false, &if_true, &if_false);
++
++  __ BranchOnSmi(r0, if_false);
++  __ CompareObjectType(r0, r1, r1, FIRST_JS_OBJECT_TYPE);
++  __ b(ge, if_true);
++  __ b(if_false);
++
++  Apply(context_, if_true, if_false);
++}
++
++
+ void FullCodeGenerator::EmitIsUndetectableObject(ZoneList<Expression*>* args) {
+   ASSERT(args->length() == 1);
+ 
+@@ -3088,7 +3106,7 @@
        __ jmp(if_false);
  
        __ bind(&slow_case);
@@ -599,9 +736,9 @@ diff -Nur libv8-2.2.24/src/arm/full-codegen-arm.cc libv8-2.2.24.8/src/arm/full-c
        __ CallStub(&stub);
        __ cmp(r0, Operand(0));
        __ b(cc, if_true);
-diff -Nur libv8-2.2.24/src/arm/stub-cache-arm.cc libv8-2.2.24.8/src/arm/stub-cache-arm.cc
+diff -Nur libv8-2.2.24/src/arm/stub-cache-arm.cc libv8-2.2.24.9/src/arm/stub-cache-arm.cc
 --- libv8-2.2.24/src/arm/stub-cache-arm.cc	2010-07-13 22:58:03.257819000 +0200
-+++ libv8-2.2.24.8/src/arm/stub-cache-arm.cc	2010-07-15 11:58:47.142927000 +0200
++++ libv8-2.2.24.9/src/arm/stub-cache-arm.cc	2010-07-15 11:58:47.142927000 +0200
 @@ -176,6 +176,13 @@
        __ cmp(entity_name, Operand(Handle<String>(name)));
        __ b(eq, miss_label);
@@ -616,9 +753,38 @@ diff -Nur libv8-2.2.24/src/arm/stub-cache-arm.cc libv8-2.2.24.8/src/arm/stub-cac
        // Restore the properties.
        __ ldr(properties,
               FieldMemOperand(receiver, JSObject::kPropertiesOffset));
-diff -Nur libv8-2.2.24/src/codegen.h libv8-2.2.24.8/src/codegen.h
+diff -Nur libv8-2.2.24/src/assembler.h libv8-2.2.24.9/src/assembler.h
+--- libv8-2.2.24/src/assembler.h	2010-06-09 11:38:56.859891000 +0200
++++ libv8-2.2.24.9/src/assembler.h	2010-08-05 17:01:05.985678000 +0200
+@@ -232,8 +232,8 @@
+   INLINE(Address call_address());
+   INLINE(void set_call_address(Address target));
+   INLINE(Object* call_object());
+-  INLINE(Object** call_object_address());
+   INLINE(void set_call_object(Object* target));
++  INLINE(Object** call_object_address());
+ 
+   inline void Visit(ObjectVisitor* v);
+ 
+diff -Nur libv8-2.2.24/src/codegen.h libv8-2.2.24.9/src/codegen.h
 --- libv8-2.2.24/src/codegen.h	2010-07-07 14:22:46.872819000 +0200
-+++ libv8-2.2.24.8/src/codegen.h	2010-07-15 11:58:47.142927000 +0200
++++ libv8-2.2.24.9/src/codegen.h	2010-08-10 08:39:13.055445000 +0200
+@@ -120,6 +120,7 @@
+   F(IsObject, 1, 1)                                                          \
+   F(IsFunction, 1, 1)                                                        \
+   F(IsUndetectableObject, 1, 1)                                              \
++  F(IsSpecObject, 1, 1)                                            \
+   F(StringAdd, 2, 1)                                                         \
+   F(SubString, 3, 1)                                                         \
+   F(StringCompare, 2, 1)                                                     \
+@@ -180,7 +181,6 @@
+   CodeGenerator* previous_;
+ };
+ 
+-
+ #if V8_TARGET_ARCH_IA32 || V8_TARGET_ARCH_X64
+ 
+ // State of used registers in a virtual frame.
 @@ -461,11 +461,15 @@
    CompareStub(Condition cc,
                bool strict,
@@ -677,9 +843,9 @@ diff -Nur libv8-2.2.24/src/codegen.h libv8-2.2.24.8/src/codegen.h
    }
  #endif
  };
-diff -Nur libv8-2.2.24/src/debug.cc libv8-2.2.24.8/src/debug.cc
+diff -Nur libv8-2.2.24/src/debug.cc libv8-2.2.24.9/src/debug.cc
 --- libv8-2.2.24/src/debug.cc	2010-07-13 22:58:03.257819000 +0200
-+++ libv8-2.2.24.8/src/debug.cc	2010-07-14 11:01:13.356453000 +0200
++++ libv8-2.2.24.9/src/debug.cc	2010-07-14 11:01:13.356453000 +0200
 @@ -1882,6 +1882,7 @@
  DebuggerAgent* Debugger::agent_ = NULL;
  LockingCommandMessageQueue Debugger::command_queue_(kQueueInitialSize);
@@ -846,9 +1012,9 @@ diff -Nur libv8-2.2.24/src/debug.cc libv8-2.2.24.8/src/debug.cc
  CommandMessage::CommandMessage() : text_(Vector<uint16_t>::empty()),
                                     client_data_(NULL) {
  }
-diff -Nur libv8-2.2.24/src/debug.h libv8-2.2.24.8/src/debug.h
+diff -Nur libv8-2.2.24/src/debug.h libv8-2.2.24.9/src/debug.h
 --- libv8-2.2.24/src/debug.h	2010-07-05 13:01:40.955149000 +0200
-+++ libv8-2.2.24.8/src/debug.h	2010-07-14 11:01:13.356453000 +0200
++++ libv8-2.2.24.9/src/debug.h	2010-07-14 11:01:13.356453000 +0200
 @@ -566,18 +566,21 @@
    EventDetailsImpl(DebugEvent event,
                     Handle<JSObject> exec_state,
@@ -913,10 +1079,286 @@ diff -Nur libv8-2.2.24/src/debug.h libv8-2.2.24.8/src/debug.h
    friend class EnterDebugger;
  };
  
-diff -Nur libv8-2.2.24/src/ia32/codegen-ia32.cc libv8-2.2.24.8/src/ia32/codegen-ia32.cc
+diff -Nur libv8-2.2.24/src/full-codegen.cc libv8-2.2.24.9/src/full-codegen.cc
+--- libv8-2.2.24/src/full-codegen.cc	2010-06-14 09:35:38.748847000 +0200
++++ libv8-2.2.24.9/src/full-codegen.cc	2010-08-10 08:39:13.055445000 +0200
+@@ -857,6 +857,8 @@
+     EmitIsNonNegativeSmi(expr->arguments());
+   } else if (strcmp("_IsObject", *name->ToCString()) == 0) {
+     EmitIsObject(expr->arguments());
++  } else if (strcmp("_IsSpecObject", *name->ToCString()) == 0) {
++    EmitIsSpecObject(expr->arguments());
+   } else if (strcmp("_IsUndetectableObject", *name->ToCString()) == 0) {
+     EmitIsUndetectableObject(expr->arguments());
+   } else if (strcmp("_IsFunction", *name->ToCString()) == 0) {
+diff -Nur libv8-2.2.24/src/full-codegen.h libv8-2.2.24.9/src/full-codegen.h
+--- libv8-2.2.24/src/full-codegen.h	2010-06-14 09:35:38.748847000 +0200
++++ libv8-2.2.24.9/src/full-codegen.h	2010-08-10 08:39:13.055445000 +0200
+@@ -402,6 +402,7 @@
+   void EmitIsSmi(ZoneList<Expression*>* arguments);
+   void EmitIsNonNegativeSmi(ZoneList<Expression*>* arguments);
+   void EmitIsObject(ZoneList<Expression*>* arguments);
++  void EmitIsSpecObject(ZoneList<Expression*>* arguments);
+   void EmitIsUndetectableObject(ZoneList<Expression*>* arguments);
+   void EmitIsFunction(ZoneList<Expression*>* arguments);
+   void EmitIsArray(ZoneList<Expression*>* arguments);
+diff -Nur libv8-2.2.24/src/globals.h libv8-2.2.24.9/src/globals.h
+--- libv8-2.2.24/src/globals.h	2010-07-13 22:58:03.257819000 +0200
++++ libv8-2.2.24.9/src/globals.h	2010-08-06 10:35:31.115479000 +0200
+@@ -642,11 +642,14 @@
+ #if defined(__GNUC__) && !defined(DEBUG)
+ #if (__GNUC__ >= 4)
+ #define INLINE(header) inline header  __attribute__((always_inline))
++#define NO_INLINE(header) header __attribute__((noinline))
+ #else
+ #define INLINE(header) inline __attribute__((always_inline)) header
++#define NO_INLINE(header) __attribute__((noinline)) header
+ #endif
+ #else
+ #define INLINE(header) inline header
++#define NO_INLINE(header) header
+ #endif
+ 
+ // Feature flags bit positions. They are mostly based on the CPUID spec.
+diff -Nur libv8-2.2.24/src/heap.cc libv8-2.2.24.9/src/heap.cc
+--- libv8-2.2.24/src/heap.cc	2010-07-13 22:58:03.257819000 +0200
++++ libv8-2.2.24.9/src/heap.cc	2010-08-05 20:35:53.566473000 +0200
+@@ -4111,7 +4111,7 @@
+ }
+ 
+ 
+-void Heap::RecordStats(HeapStats* stats) {
++void Heap::RecordStats(HeapStats* stats, bool take_snapshot) {
+   *stats->start_marker = 0xDECADE00;
+   *stats->end_marker = 0xDECADE01;
+   *stats->new_space_size = new_space_.Size();
+@@ -4128,6 +4128,23 @@
+   *stats->cell_space_capacity = cell_space_->Capacity();
+   *stats->lo_space_size = lo_space_->Size();
+   GlobalHandles::RecordStats(stats);
++  *stats->memory_allocator_size = MemoryAllocator::Size();
++  *stats->memory_allocator_capacity =
++      MemoryAllocator::Size() + MemoryAllocator::Available();
++  if (take_snapshot) {
++    HeapIterator iterator;
++    for (HeapObject* obj = iterator.next();
++         obj != NULL;
++         obj = iterator.next()) {
++      // Note: snapshot won't be precise because IsFreeListNode returns true
++      // for any bytearray.
++      if (FreeListNode::IsFreeListNode(obj)) continue;
++      InstanceType type = obj->map()->instance_type();
++      ASSERT(0 <= type && type <= LAST_TYPE);
++      stats->objects_per_type[type]++;
++      stats->size_per_type[type] += obj->Size();
++    }
++  }
+ }
+ 
+ 
+diff -Nur libv8-2.2.24/src/heap.h libv8-2.2.24.9/src/heap.h
+--- libv8-2.2.24/src/heap.h	2010-07-13 22:58:03.257819000 +0200
++++ libv8-2.2.24.9/src/heap.h	2010-08-06 10:35:31.115479000 +0200
+@@ -981,7 +981,7 @@
+   static RootListIndex RootIndexForExternalArrayType(
+       ExternalArrayType array_type);
+ 
+-  static void RecordStats(HeapStats* stats);
++  static void RecordStats(HeapStats* stats, bool take_snapshot = false);
+ 
+   static Scavenger GetScavenger(int instance_type, int instance_size);
+ 
+@@ -1195,12 +1195,12 @@
+   static bool CreateInitialMaps();
+   static bool CreateInitialObjects();
+ 
+-  // These four Create*EntryStub functions are here because of a gcc-4.4 bug
+-  // that assigns wrong vtable entries.
+-  static void CreateCEntryStub();
+-  static void CreateJSEntryStub();
+-  static void CreateJSConstructEntryStub();
+-  static void CreateRegExpCEntryStub();
++  // These four Create*EntryStub functions are here and forced to not be inlined
++  // because of a gcc-4.4 bug that assigns wrong vtable entries.
++  NO_INLINE(static void CreateCEntryStub());
++  NO_INLINE(static void CreateJSEntryStub());
++  NO_INLINE(static void CreateJSConstructEntryStub());
++  NO_INLINE(static void CreateRegExpCEntryStub());
+ 
+   static void CreateFixedStubs();
+ 
+@@ -1324,26 +1324,30 @@
+ 
+ class HeapStats {
+  public:
+-  int* start_marker;
+-  int* new_space_size;
+-  int* new_space_capacity;
+-  int* old_pointer_space_size;
+-  int* old_pointer_space_capacity;
+-  int* old_data_space_size;
+-  int* old_data_space_capacity;
+-  int* code_space_size;
+-  int* code_space_capacity;
+-  int* map_space_size;
+-  int* map_space_capacity;
+-  int* cell_space_size;
+-  int* cell_space_capacity;
+-  int* lo_space_size;
+-  int* global_handle_count;
+-  int* weak_global_handle_count;
+-  int* pending_global_handle_count;
+-  int* near_death_global_handle_count;
+-  int* destroyed_global_handle_count;
+-  int* end_marker;
++  int* start_marker;                    //  0
++  int* new_space_size;                  //  1
++  int* new_space_capacity;              //  2
++  int* old_pointer_space_size;          //  3
++  int* old_pointer_space_capacity;      //  4
++  int* old_data_space_size;             //  5
++  int* old_data_space_capacity;         //  6
++  int* code_space_size;                 //  7
++  int* code_space_capacity;             //  8
++  int* map_space_size;                  //  9
++  int* map_space_capacity;              // 10
++  int* cell_space_size;                 // 11
++  int* cell_space_capacity;             // 12
++  int* lo_space_size;                   // 13
++  int* global_handle_count;             // 14
++  int* weak_global_handle_count;        // 15
++  int* pending_global_handle_count;     // 16
++  int* near_death_global_handle_count;  // 17
++  int* destroyed_global_handle_count;   // 18
++  int* memory_allocator_size;           // 19
++  int* memory_allocator_capacity;       // 20
++  int* objects_per_type;                // 21
++  int* size_per_type;                   // 22
++  int* end_marker;                      // 23
+ };
+ 
+ 
+diff -Nur libv8-2.2.24/src/heap-inl.h libv8-2.2.24.9/src/heap-inl.h
+--- libv8-2.2.24/src/heap-inl.h	2010-06-14 09:35:38.748847000 +0200
++++ libv8-2.2.24.9/src/heap-inl.h	2010-08-05 20:35:53.566473000 +0200
+@@ -390,7 +390,7 @@
+     Object* __object__ = FUNCTION_CALL;                                   \
+     if (!__object__->IsFailure()) RETURN_VALUE;                           \
+     if (__object__->IsOutOfMemoryFailure()) {                             \
+-      v8::internal::V8::FatalProcessOutOfMemory("CALL_AND_RETRY_0");      \
++      v8::internal::V8::FatalProcessOutOfMemory("CALL_AND_RETRY_0", true);\
+     }                                                                     \
+     if (!__object__->IsRetryAfterGC()) RETURN_EMPTY;                      \
+     Heap::CollectGarbage(Failure::cast(__object__)->requested(),          \
+@@ -398,7 +398,7 @@
+     __object__ = FUNCTION_CALL;                                           \
+     if (!__object__->IsFailure()) RETURN_VALUE;                           \
+     if (__object__->IsOutOfMemoryFailure()) {                             \
+-      v8::internal::V8::FatalProcessOutOfMemory("CALL_AND_RETRY_1");      \
++      v8::internal::V8::FatalProcessOutOfMemory("CALL_AND_RETRY_1", true);\
+     }                                                                     \
+     if (!__object__->IsRetryAfterGC()) RETURN_EMPTY;                      \
+     Counters::gc_last_resort_from_handles.Increment();                    \
+@@ -411,7 +411,7 @@
+     if (__object__->IsOutOfMemoryFailure() ||                             \
+         __object__->IsRetryAfterGC()) {                                   \
+       /* TODO(1181417): Fix this. */                                      \
+-      v8::internal::V8::FatalProcessOutOfMemory("CALL_AND_RETRY_2");      \
++      v8::internal::V8::FatalProcessOutOfMemory("CALL_AND_RETRY_2", true);\
+     }                                                                     \
+     RETURN_EMPTY;                                                         \
+   } while (false)
+diff -Nur libv8-2.2.24/src/ia32/assembler-ia32.cc libv8-2.2.24.9/src/ia32/assembler-ia32.cc
+--- libv8-2.2.24/src/ia32/assembler-ia32.cc	2010-07-13 22:58:03.257819000 +0200
++++ libv8-2.2.24.9/src/ia32/assembler-ia32.cc	2010-08-05 17:01:05.985678000 +0200
+@@ -158,7 +158,8 @@
+ 
+ const int RelocInfo::kApplyMask =
+   RelocInfo::kCodeTargetMask | 1 << RelocInfo::RUNTIME_ENTRY |
+-    1 << RelocInfo::JS_RETURN | 1 << RelocInfo::INTERNAL_REFERENCE;
++    1 << RelocInfo::JS_RETURN | 1 << RelocInfo::INTERNAL_REFERENCE |
++    1 << RelocInfo::DEBUG_BREAK_SLOT;
+ 
+ 
+ bool RelocInfo::IsCodedSpecially() {
+diff -Nur libv8-2.2.24/src/ia32/assembler-ia32-inl.h libv8-2.2.24.9/src/ia32/assembler-ia32-inl.h
+--- libv8-2.2.24/src/ia32/assembler-ia32-inl.h	2010-06-23 11:06:43.415766000 +0200
++++ libv8-2.2.24.9/src/ia32/assembler-ia32-inl.h	2010-08-05 17:01:05.985678000 +0200
+@@ -121,32 +121,33 @@
+ 
+ 
+ Address RelocInfo::call_address() {
+-  ASSERT(IsPatchedReturnSequence());
++  ASSERT((IsJSReturn(rmode()) && IsPatchedReturnSequence()) ||
++         (IsDebugBreakSlot(rmode()) && IsPatchedDebugBreakSlotSequence()));
+   return Assembler::target_address_at(pc_ + 1);
+ }
+ 
+ 
+ void RelocInfo::set_call_address(Address target) {
+-  ASSERT(IsPatchedReturnSequence());
++  ASSERT((IsJSReturn(rmode()) && IsPatchedReturnSequence()) ||
++         (IsDebugBreakSlot(rmode()) && IsPatchedDebugBreakSlotSequence()));
+   Assembler::set_target_address_at(pc_ + 1, target);
+ }
+ 
+ 
+ Object* RelocInfo::call_object() {
+-  ASSERT(IsPatchedReturnSequence());
+   return *call_object_address();
+ }
+ 
+ 
+-Object** RelocInfo::call_object_address() {
+-  ASSERT(IsPatchedReturnSequence());
+-  return reinterpret_cast<Object**>(pc_ + 1);
++void RelocInfo::set_call_object(Object* target) {
++  *call_object_address() = target;
+ }
+ 
+ 
+-void RelocInfo::set_call_object(Object* target) {
+-  ASSERT(IsPatchedReturnSequence());
+-  *call_object_address() = target;
++Object** RelocInfo::call_object_address() {
++  ASSERT((IsJSReturn(rmode()) && IsPatchedReturnSequence()) ||
++         (IsDebugBreakSlot(rmode()) && IsPatchedDebugBreakSlotSequence()));
++  return reinterpret_cast<Object**>(pc_ + 1);
+ }
+ 
+ 
+diff -Nur libv8-2.2.24/src/ia32/codegen-ia32.cc libv8-2.2.24.9/src/ia32/codegen-ia32.cc
 --- libv8-2.2.24/src/ia32/codegen-ia32.cc	2010-07-13 22:58:03.257819000 +0200
-+++ libv8-2.2.24.8/src/ia32/codegen-ia32.cc	2010-07-15 11:58:47.142927000 +0200
-@@ -11635,6 +11635,8 @@
++++ libv8-2.2.24.9/src/ia32/codegen-ia32.cc	2010-08-10 08:39:13.055445000 +0200
+@@ -6406,6 +6406,27 @@
+ }
+ 
+ 
++  void CodeGenerator::GenerateIsSpecObject(ZoneList<Expression*>* args) {
++  // This generates a fast version of:
++  // (typeof(arg) === 'object' || %_ClassOf(arg) == 'RegExp' ||
++  // typeof(arg) == function).
++  // It includes undetectable objects (as opposed to IsObject).
++  ASSERT(args->length() == 1);
++  Load(args->at(0));
++  Result value = frame_->Pop();
++  value.ToRegister();
++  ASSERT(value.is_valid());
++  __ test(value.reg(), Immediate(kSmiTagMask));
++  destination()->false_target()->Branch(equal);
++
++  // Check that this is an object.
++  frame_->Spill(value.reg());
++  __ CmpObjectType(value.reg(), FIRST_JS_OBJECT_TYPE, value.reg());
++  value.Unuse();
++  destination()->Split(above_equal);
++}
++
++
+ void CodeGenerator::GenerateIsFunction(ZoneList<Expression*>* args) {
+   // This generates a fast version of:
+   // (%_ClassOf(arg) === 'Function')
+@@ -11635,6 +11656,8 @@
  
  
  void CompareStub::Generate(MacroAssembler* masm) {
@@ -925,7 +1367,7 @@ diff -Nur libv8-2.2.24/src/ia32/codegen-ia32.cc libv8-2.2.24.8/src/ia32/codegen-
    Label check_unequal_objects, done;
  
    // NOTICE! This code is only reached after a smi-fast-case check, so
-@@ -12528,8 +12530,10 @@
+@@ -12528,8 +12551,10 @@
    // Encode the three parameters in a unique 16 bit value. To avoid duplicate
    // stubs the never NaN NaN condition is only taken into account if the
    // condition is equals.
@@ -937,7 +1379,7 @@ diff -Nur libv8-2.2.24/src/ia32/codegen-ia32.cc libv8-2.2.24.8/src/ia32/codegen-
           | StrictField::encode(strict_)
           | NeverNanNanField::encode(cc_ == equal ? never_nan_nan_ : false)
           | IncludeNumberCompareField::encode(include_number_compare_);
-@@ -12539,6 +12543,8 @@
+@@ -12539,6 +12564,8 @@
  // Unfortunately you have to run without snapshots to see most of these
  // names in the profile since most compare stubs end up in the snapshot.
  const char* CompareStub::GetName() {
@@ -946,9 +1388,50 @@ diff -Nur libv8-2.2.24/src/ia32/codegen-ia32.cc libv8-2.2.24.8/src/ia32/codegen-
    if (name_ != NULL) return name_;
    const int kMaxNameLength = 100;
    name_ = Bootstrapper::AllocateAutoDeletedArray(kMaxNameLength);
-diff -Nur libv8-2.2.24/src/ia32/stub-cache-ia32.cc libv8-2.2.24.8/src/ia32/stub-cache-ia32.cc
+diff -Nur libv8-2.2.24/src/ia32/codegen-ia32.h libv8-2.2.24.9/src/ia32/codegen-ia32.h
+--- libv8-2.2.24/src/ia32/codegen-ia32.h	2010-06-14 09:35:38.748847000 +0200
++++ libv8-2.2.24.9/src/ia32/codegen-ia32.h	2010-08-10 08:39:13.055445000 +0200
+@@ -621,6 +621,7 @@
+   void GenerateIsArray(ZoneList<Expression*>* args);
+   void GenerateIsRegExp(ZoneList<Expression*>* args);
+   void GenerateIsObject(ZoneList<Expression*>* args);
++  void GenerateIsSpecObject(ZoneList<Expression*>* args);
+   void GenerateIsFunction(ZoneList<Expression*>* args);
+   void GenerateIsUndetectableObject(ZoneList<Expression*>* args);
+ 
+diff -Nur libv8-2.2.24/src/ia32/full-codegen-ia32.cc libv8-2.2.24.9/src/ia32/full-codegen-ia32.cc
+--- libv8-2.2.24/src/ia32/full-codegen-ia32.cc	2010-07-13 22:58:03.257819000 +0200
++++ libv8-2.2.24.9/src/ia32/full-codegen-ia32.cc	2010-08-10 08:39:13.055445000 +0200
+@@ -1985,6 +1985,26 @@
+ }
+ 
+ 
++void FullCodeGenerator::EmitIsSpecObject(ZoneList<Expression*>* args) {
++  ASSERT(args->length() == 1);
++
++  VisitForValue(args->at(0), kAccumulator);
++
++  Label materialize_true, materialize_false;
++  Label* if_true = NULL;
++  Label* if_false = NULL;
++  PrepareTest(&materialize_true, &materialize_false, &if_true, &if_false);
++
++  __ test(eax, Immediate(kSmiTagMask));
++  __ j(equal, if_false);
++  __ CmpObjectType(eax, FIRST_JS_OBJECT_TYPE, ebx);
++  __ j(above_equal, if_true);
++  __ jmp(if_false);
++
++  Apply(context_, if_true, if_false);
++}
++
++
+ void FullCodeGenerator::EmitIsUndetectableObject(ZoneList<Expression*>* args) {
+   ASSERT(args->length() == 1);
+ 
+diff -Nur libv8-2.2.24/src/ia32/stub-cache-ia32.cc libv8-2.2.24.9/src/ia32/stub-cache-ia32.cc
 --- libv8-2.2.24/src/ia32/stub-cache-ia32.cc	2010-07-13 22:58:03.257819000 +0200
-+++ libv8-2.2.24.8/src/ia32/stub-cache-ia32.cc	2010-07-15 11:58:47.142927000 +0200
++++ libv8-2.2.24.9/src/ia32/stub-cache-ia32.cc	2010-07-15 11:58:47.142927000 +0200
 @@ -184,6 +184,12 @@
        // Stop if found the property.
        __ cmp(entity_name, Handle<String>(name));
@@ -962,9 +1445,48 @@ diff -Nur libv8-2.2.24/src/ia32/stub-cache-ia32.cc libv8-2.2.24.8/src/ia32/stub-
      } else {
        // Give up probing if still not found the undefined value.
        __ j(not_equal, miss_label, not_taken);
-diff -Nur libv8-2.2.24/src/objects.cc libv8-2.2.24.8/src/objects.cc
+diff -Nur libv8-2.2.24/src/macros.py libv8-2.2.24.9/src/macros.py
+--- libv8-2.2.24/src/macros.py	2010-07-07 14:22:46.872819000 +0200
++++ libv8-2.2.24.9/src/macros.py	2010-08-10 08:39:13.055445000 +0200
+@@ -115,7 +115,8 @@
+ # Macro for ECMAScript 5 queries of the type:
+ # "Type(O) is object."
+ # This is the same as being either a function or an object in V8 terminology.
+-macro IS_SPEC_OBJECT_OR_NULL(arg) = (%_IsObject(arg) || %_IsFunction(arg));
++# In addition, an undetectable object is also included by this.
++macro IS_SPEC_OBJECT(arg) = (%_IsSpecObject(arg));
+ 
+ # Inline macros. Use %IS_VAR to make sure arg is evaluated only once.
+ macro NUMBER_IS_NAN(arg) = (!%_IsSmi(%IS_VAR(arg)) && !(arg == arg));
+diff -Nur libv8-2.2.24/src/mips/codegen-mips.cc libv8-2.2.24.9/src/mips/codegen-mips.cc
+--- libv8-2.2.24/src/mips/codegen-mips.cc	2010-05-21 14:58:28.267409000 +0200
++++ libv8-2.2.24.9/src/mips/codegen-mips.cc	2010-08-10 08:39:13.055445000 +0200
+@@ -907,6 +907,11 @@
+ }
+ 
+ 
++void CodeGenerator::GenerateIsSpecObject(ZoneList<Expression*>* args) {
++  UNIMPLEMENTED_MIPS();
++}
++
++
+ void CodeGenerator::GenerateIsFunction(ZoneList<Expression*>* args) {
+   UNIMPLEMENTED_MIPS();
+ }
+diff -Nur libv8-2.2.24/src/mips/codegen-mips.h libv8-2.2.24.9/src/mips/codegen-mips.h
+--- libv8-2.2.24/src/mips/codegen-mips.h	2010-04-12 13:30:10.188963000 +0200
++++ libv8-2.2.24.9/src/mips/codegen-mips.h	2010-08-10 08:39:13.055445000 +0200
+@@ -355,6 +355,7 @@
+   void GenerateRandomHeapNumber(ZoneList<Expression*>* args);
+ 
+   void GenerateIsObject(ZoneList<Expression*>* args);
++  void GenerateIsSpecObject(ZoneList<Expression*>* args);
+   void GenerateIsFunction(ZoneList<Expression*>* args);
+   void GenerateIsUndetectableObject(ZoneList<Expression*>* args);
+   void GenerateStringAdd(ZoneList<Expression*>* args);
+diff -Nur libv8-2.2.24/src/objects.cc libv8-2.2.24.9/src/objects.cc
 --- libv8-2.2.24/src/objects.cc	2010-07-13 22:58:03.257819000 +0200
-+++ libv8-2.2.24.8/src/objects.cc	2010-07-23 14:48:36.795540000 +0200
++++ libv8-2.2.24.9/src/objects.cc	2010-08-05 20:23:43.901392000 +0200
 @@ -2966,7 +2966,8 @@
          break;
      }
@@ -985,9 +1507,18 @@ diff -Nur libv8-2.2.24/src/objects.cc libv8-2.2.24.8/src/objects.cc
    }
  
    return this;
-diff -Nur libv8-2.2.24/src/runtime.cc libv8-2.2.24.8/src/runtime.cc
+@@ -4736,7 +4738,7 @@
+   }
+ 
+   if (lhs->IsFlat()) {
+-    if (IsAsciiRepresentation()) {
++    if (lhs->IsAsciiRepresentation()) {
+       Vector<const char> vec1 = lhs->ToAsciiVector();
+       if (rhs->IsFlat()) {
+         if (rhs->IsAsciiRepresentation()) {
+diff -Nur libv8-2.2.24/src/runtime.cc libv8-2.2.24.9/src/runtime.cc
 --- libv8-2.2.24/src/runtime.cc	2010-07-13 22:58:03.257819000 +0200
-+++ libv8-2.2.24.8/src/runtime.cc	2010-07-27 16:23:04.567279000 +0200
++++ libv8-2.2.24.9/src/runtime.cc	2010-07-27 16:23:04.567279000 +0200
 @@ -9344,6 +9344,13 @@
      }
      Debug::SetBreakPoint(shared, break_point_object_arg, &position);
@@ -1002,21 +1533,305 @@ diff -Nur libv8-2.2.24/src/runtime.cc libv8-2.2.24.8/src/runtime.cc
      return Smi::FromInt(position);
    }
    return  Heap::undefined_value();
-diff -Nur libv8-2.2.24/src/version.cc libv8-2.2.24.8/src/version.cc
+diff -Nur libv8-2.2.24/src/runtime.js libv8-2.2.24.9/src/runtime.js
+--- libv8-2.2.24/src/runtime.js	2010-07-13 22:58:03.257819000 +0200
++++ libv8-2.2.24.9/src/runtime.js	2010-08-10 08:39:13.055445000 +0200
+@@ -80,7 +80,7 @@
+     } else {
+       // x is not a number, boolean, null or undefined.
+       if (y == null) return 1;  // not equal
+-      if (IS_SPEC_OBJECT_OR_NULL(y)) {
++      if (IS_SPEC_OBJECT(y)) {
+         return %_ObjectEquals(x, y) ? 0 : 1;
+       }
+ 
+@@ -345,7 +345,7 @@
+ 
+ // ECMA-262, section 11.8.7, page 54.
+ function IN(x) {
+-  if (x == null || !IS_SPEC_OBJECT_OR_NULL(x)) {
++  if (!IS_SPEC_OBJECT(x)) {
+     throw %MakeTypeError('invalid_in_operator_use', [this, x]);
+   }
+   return %_IsNonNegativeSmi(this) ? %HasElement(x, this) : %HasProperty(x, %ToString(this));
+@@ -363,13 +363,13 @@
+   }
+ 
+   // If V is not an object, return false.
+-  if (IS_NULL(V) || !IS_SPEC_OBJECT_OR_NULL(V)) {
++  if (!IS_SPEC_OBJECT(V)) {
+     return 1;
+   }
+ 
+   // Get the prototype of F; if it is not an object, throw an error.
+   var O = F.prototype;
+-  if (IS_NULL(O) || !IS_SPEC_OBJECT_OR_NULL(O)) {
++  if (!IS_SPEC_OBJECT(O)) {
+     throw %MakeTypeError('instanceof_nonobject_proto', [O]);
+   }
+ 
+@@ -483,8 +483,7 @@
+   // Fast case check.
+   if (IS_STRING(x)) return x;
+   // Normal behavior.
+-  if (!IS_SPEC_OBJECT_OR_NULL(x)) return x;
+-  if (x == null) return x;  // check for null, undefined
++  if (!IS_SPEC_OBJECT(x)) return x;
+   if (hint == NO_HINT) hint = (IS_DATE(x)) ? STRING_HINT : NUMBER_HINT;
+   return (hint == NUMBER_HINT) ? %DefaultNumber(x) : %DefaultString(x);
+ }
+@@ -583,13 +582,10 @@
+ // Returns if the given x is a primitive value - not an object or a
+ // function.
+ function IsPrimitive(x) {
+-  if (!IS_SPEC_OBJECT_OR_NULL(x)) {
+-    return true;
+-  } else {
+-    // Even though the type of null is "object", null is still
+-    // considered a primitive value.
+-    return IS_NULL(x);
+-  }
++  // Even though the type of null is "object", null is still
++  // considered a primitive value. IS_SPEC_OBJECT handles this correctly
++  // (i.e., it will return false if x is null).
++  return !IS_SPEC_OBJECT(x);
+ }
+ 
+ 
+diff -Nur libv8-2.2.24/src/v8.h libv8-2.2.24.9/src/v8.h
+--- libv8-2.2.24/src/v8.h	2010-04-12 13:30:10.188963000 +0200
++++ libv8-2.2.24.9/src/v8.h	2010-08-05 20:35:53.566473000 +0200
+@@ -92,7 +92,8 @@
+   static void SetFatalError();
+ 
+   // Report process out of memory. Implementation found in api.cc.
+-  static void FatalProcessOutOfMemory(const char* location);
++  static void FatalProcessOutOfMemory(const char* location,
++                                      bool take_snapshot = false);
+ 
+   // Random number generation support. Not cryptographically safe.
+   static uint32_t Random();
+diff -Nur libv8-2.2.24/src/v8natives.js libv8-2.2.24.9/src/v8natives.js
+--- libv8-2.2.24/src/v8natives.js	2010-07-13 22:58:03.257819000 +0200
++++ libv8-2.2.24.9/src/v8natives.js	2010-08-10 08:39:13.055445000 +0200
+@@ -225,16 +225,14 @@
+ 
+ // ECMA-262 - 15.2.4.6
+ function ObjectIsPrototypeOf(V) {
+-  if (!IS_SPEC_OBJECT_OR_NULL(V) && !IS_UNDETECTABLE(V)) return false;
++  if (!IS_SPEC_OBJECT(V)) return false;
+   return %IsInPrototypeChain(this, V);
+ }
+ 
+ 
+ // ECMA-262 - 15.2.4.6
+ function ObjectPropertyIsEnumerable(V) {
+-  if (this == null) return false;
+-  if (!IS_SPEC_OBJECT_OR_NULL(this)) return false;
+-  return %IsPropertyEnumerable(this, ToString(V));
++  return %IsPropertyEnumerable(ToObject(this), ToString(V));
+ }
+ 
+ 
+@@ -279,8 +277,7 @@
+ 
+ 
+ function ObjectKeys(obj) {
+-  if ((!IS_SPEC_OBJECT_OR_NULL(obj) || IS_NULL_OR_UNDEFINED(obj)) &&
+-      !IS_UNDETECTABLE(obj))
++  if (!IS_SPEC_OBJECT(obj))
+     throw MakeTypeError("obj_ctor_property_non_object", ["keys"]);
+   return %LocalKeys(obj);
+ }
+@@ -329,7 +326,7 @@
+ 
+ // ES5 8.10.5.
+ function ToPropertyDescriptor(obj) {
+-  if (!IS_SPEC_OBJECT_OR_NULL(obj)) {
++  if (!IS_SPEC_OBJECT(obj)) {
+     throw MakeTypeError("property_desc_object", [obj]);
+   }
+   var desc = new PropertyDescriptor();
+@@ -626,8 +623,7 @@
+ 
+ // ES5 section 15.2.3.2.
+ function ObjectGetPrototypeOf(obj) {
+-  if ((!IS_SPEC_OBJECT_OR_NULL(obj) || IS_NULL_OR_UNDEFINED(obj)) &&
+-      !IS_UNDETECTABLE(obj))
++  if (!IS_SPEC_OBJECT(obj))
+     throw MakeTypeError("obj_ctor_property_non_object", ["getPrototypeOf"]);
+   return obj.__proto__;
+ }
+@@ -635,8 +631,7 @@
+ 
+ // ES5 section 15.2.3.3
+ function ObjectGetOwnPropertyDescriptor(obj, p) {
+-  if ((!IS_SPEC_OBJECT_OR_NULL(obj) || IS_NULL_OR_UNDEFINED(obj)) &&
+-      !IS_UNDETECTABLE(obj))
++  if (!IS_SPEC_OBJECT(obj))
+     throw MakeTypeError("obj_ctor_property_non_object", ["getOwnPropertyDescriptor"]);
+   var desc = GetOwnProperty(obj, p);
+   return FromPropertyDescriptor(desc);
+@@ -645,8 +640,7 @@
+ 
+ // ES5 section 15.2.3.4.
+ function ObjectGetOwnPropertyNames(obj) {
+-  if ((!IS_SPEC_OBJECT_OR_NULL(obj) || IS_NULL_OR_UNDEFINED(obj)) &&
+-      !IS_UNDETECTABLE(obj))
++  if (!IS_SPEC_OBJECT(obj))
+     throw MakeTypeError("obj_ctor_property_non_object", ["getOwnPropertyNames"]);
+ 
+   // Find all the indexed properties.
+@@ -698,7 +692,7 @@
+ 
+ // ES5 section 15.2.3.5.
+ function ObjectCreate(proto, properties) {
+-  if (!IS_SPEC_OBJECT_OR_NULL(proto)) {
++  if (!IS_SPEC_OBJECT(proto) && proto !== null) {
+     throw MakeTypeError("proto_object_or_null", [proto]);
+   }
+   var obj = new $Object();
+@@ -710,8 +704,7 @@
+ 
+ // ES5 section 15.2.3.6.
+ function ObjectDefineProperty(obj, p, attributes) {
+-  if ((!IS_SPEC_OBJECT_OR_NULL(obj) || IS_NULL_OR_UNDEFINED(obj)) &&
+-      !IS_UNDETECTABLE(obj)) {
++  if (!IS_SPEC_OBJECT(obj)) {
+     throw MakeTypeError("obj_ctor_property_non_object", ["defineProperty"]);
+   }
+   var name = ToString(p);
+@@ -723,8 +716,7 @@
+ 
+ // ES5 section 15.2.3.7.
+ function ObjectDefineProperties(obj, properties) {
+-  if ((!IS_SPEC_OBJECT_OR_NULL(obj) || IS_NULL_OR_UNDEFINED(obj)) &&
+-     !IS_UNDETECTABLE(obj))
++  if (!IS_SPEC_OBJECT(obj))
+     throw MakeTypeError("obj_ctor_property_non_object", ["defineProperties"]);
+   var props = ToObject(properties);
+   var key_values = [];
+@@ -745,10 +737,25 @@
+ }
+ 
+ 
++// ES5 section 15.2.3.8.
++function ObjectSeal(obj) {
++  if (!IS_SPEC_OBJECT(obj)) {
++    throw MakeTypeError("obj_ctor_property_non_object", ["seal"]);
++  }
++  var names = ObjectGetOwnPropertyNames(obj);
++  for (var key in names) {
++    var name = names[key];
++    var desc = GetOwnProperty(obj, name);
++    if (desc.isConfigurable()) desc.setConfigurable(false);
++    DefineOwnProperty(obj, name, desc, true);
++  }  
++  return ObjectPreventExtension(obj);
++}
++
++
+ // ES5 section 15.2.3.9.
+ function ObjectFreeze(obj) {
+-  if ((!IS_SPEC_OBJECT_OR_NULL(obj) || IS_NULL_OR_UNDEFINED(obj)) &&
+-      !IS_UNDETECTABLE(obj)) {
++  if (!IS_SPEC_OBJECT(obj)) {
+     throw MakeTypeError("obj_ctor_property_non_object", ["freeze"]);
+   }
+   var names = ObjectGetOwnPropertyNames(obj);
+@@ -759,14 +766,13 @@
+     if (desc.isConfigurable()) desc.setConfigurable(false);
+     DefineOwnProperty(obj, name, desc, true);
+   }  
+-  ObjectPreventExtension(obj);
++  return ObjectPreventExtension(obj);
+ }
+ 
+ 
+ // ES5 section 15.2.3.10
+ function ObjectPreventExtension(obj) {
+-  if ((!IS_SPEC_OBJECT_OR_NULL(obj) || IS_NULL_OR_UNDEFINED(obj)) &&
+-      !IS_UNDETECTABLE(obj)) {
++  if (!IS_SPEC_OBJECT(obj)) {
+     throw MakeTypeError("obj_ctor_property_non_object", ["preventExtension"]);
+   }
+   %PreventExtensions(obj);
+@@ -774,18 +780,35 @@
+ }
+ 
+ 
++// ES5 section 15.2.3.11
++function ObjectIsSealed(obj) {
++  if (!IS_SPEC_OBJECT(obj)) {
++    throw MakeTypeError("obj_ctor_property_non_object", ["isSealed"]);
++  }
++  var names = ObjectGetOwnPropertyNames(obj);
++  for (var key in names) {
++    var name = names[key];
++    var desc = GetOwnProperty(obj, name);
++    if (desc.isConfigurable()) return false;
++  }
++  if (!ObjectIsExtensible(obj)) {
++    return true;
++  }
++  return false;
++}
++
++
+ // ES5 section 15.2.3.12
+ function ObjectIsFrozen(obj) {
+-  if ((!IS_SPEC_OBJECT_OR_NULL(obj) || IS_NULL_OR_UNDEFINED(obj)) &&
+-      !IS_UNDETECTABLE(obj)) {
++  if (!IS_SPEC_OBJECT(obj)) {
+     throw MakeTypeError("obj_ctor_property_non_object", ["isFrozen"]);
+   }
+   var names = ObjectGetOwnPropertyNames(obj);
+   for (var key in names) {
+     var name = names[key];
+     var desc = GetOwnProperty(obj, name);
+-    if (IsDataDescriptor(desc) && desc.writable) return false;
+-    if (desc.configurable) return false;
++    if (IsDataDescriptor(desc) && desc.isWritable()) return false;
++    if (desc.isConfigurable()) return false;
+   }
+   if (!ObjectIsExtensible(obj)) {
+     return true;
+@@ -796,8 +819,7 @@
+ 
+ // ES5 section 15.2.3.13
+ function ObjectIsExtensible(obj) {
+-  if ((!IS_SPEC_OBJECT_OR_NULL(obj) || IS_NULL_OR_UNDEFINED(obj)) &&
+-      !IS_UNDETECTABLE(obj)) {
++  if (!IS_SPEC_OBJECT(obj)) {
+     throw MakeTypeError("obj_ctor_property_non_object", ["preventExtension"]);
+   }
+   return %IsExtensible(obj);
+@@ -843,7 +865,9 @@
+     "getOwnPropertyNames", ObjectGetOwnPropertyNames,
+     "isExtensible", ObjectIsExtensible,
+     "isFrozen", ObjectIsFrozen,
+-    "preventExtensions", ObjectPreventExtension
++    "isSealed", ObjectIsSealed,
++    "preventExtensions", ObjectPreventExtension,
++    "seal", ObjectSeal
+   ));
+ }
+ 
+diff -Nur libv8-2.2.24/src/version.cc libv8-2.2.24.9/src/version.cc
 --- libv8-2.2.24/src/version.cc	2010-07-13 22:58:03.257819000 +0200
-+++ libv8-2.2.24.8/src/version.cc	2010-07-30 12:18:18.121784000 +0200
++++ libv8-2.2.24.9/src/version.cc	2010-08-10 08:39:13.055445000 +0200
 @@ -35,7 +35,7 @@
  #define MAJOR_VERSION     2
  #define MINOR_VERSION     2
  #define BUILD_NUMBER      24
 -#define PATCH_LEVEL       0
-+#define PATCH_LEVEL       8
++#define PATCH_LEVEL       14
  #define CANDIDATE_VERSION false
  
  // Define SONAME to have the SCons build the put a specific SONAME into the
-diff -Nur libv8-2.2.24/src/x64/assembler-x64.cc libv8-2.2.24.8/src/x64/assembler-x64.cc
+diff -Nur libv8-2.2.24/src/x64/assembler-x64.cc libv8-2.2.24.9/src/x64/assembler-x64.cc
 --- libv8-2.2.24/src/x64/assembler-x64.cc	2010-07-13 22:58:03.257819000 +0200
-+++ libv8-2.2.24.8/src/x64/assembler-x64.cc	2010-07-28 08:55:53.407150000 +0200
++++ libv8-2.2.24.9/src/x64/assembler-x64.cc	2010-08-05 17:01:05.985678000 +0200
 @@ -2529,10 +2529,10 @@
    EnsureSpace ensure_space(this);
    last_pc_ = pc_;
@@ -1043,9 +1858,77 @@ diff -Nur libv8-2.2.24/src/x64/assembler-x64.cc libv8-2.2.24.8/src/x64/assembler
  }
  
  
-diff -Nur libv8-2.2.24/src/x64/codegen-x64.cc libv8-2.2.24.8/src/x64/codegen-x64.cc
+@@ -2945,8 +2945,7 @@
+ 
+ 
+ const int RelocInfo::kApplyMask = RelocInfo::kCodeTargetMask |
+-                                  1 << RelocInfo::INTERNAL_REFERENCE |
+-                                  1 << RelocInfo::JS_RETURN;
++                                  1 << RelocInfo::INTERNAL_REFERENCE;
+ 
+ 
+ bool RelocInfo::IsCodedSpecially() {
+diff -Nur libv8-2.2.24/src/x64/assembler-x64-inl.h libv8-2.2.24.9/src/x64/assembler-x64-inl.h
+--- libv8-2.2.24/src/x64/assembler-x64-inl.h	2010-06-23 11:06:43.415766000 +0200
++++ libv8-2.2.24.9/src/x64/assembler-x64-inl.h	2010-08-05 17:01:05.985678000 +0200
+@@ -201,14 +201,6 @@
+     Memory::Address_at(pc_) += static_cast<int32_t>(delta);
+   } else if (IsCodeTarget(rmode_)) {
+     Memory::int32_at(pc_) -= static_cast<int32_t>(delta);
+-  } else if (rmode_ == JS_RETURN && IsPatchedReturnSequence()) {
+-    // Special handling of js_return when a break point is set (call
+-    // instruction has been inserted).
+-    Memory::int32_at(pc_ + 1) -= static_cast<int32_t>(delta);  // relocate entry
+-  } else if (rmode_ == DEBUG_BREAK_SLOT && IsPatchedDebugBreakSlotSequence()) {
+-    // Special handling of debug break slot when a break point is set (call
+-    // instruction has been inserted).
+-    Memory::int32_at(pc_ + 1) -= static_cast<int32_t>(delta);  // relocate entry
+   }
+ }
+ 
+@@ -303,33 +295,34 @@
+ 
+ 
+ Address RelocInfo::call_address() {
+-  ASSERT(IsPatchedReturnSequence());
++  ASSERT((IsJSReturn(rmode()) && IsPatchedReturnSequence()) ||
++         (IsDebugBreakSlot(rmode()) && IsPatchedDebugBreakSlotSequence()));
+   return Memory::Address_at(
+       pc_ + Assembler::kRealPatchReturnSequenceAddressOffset);
+ }
+ 
+ 
+ void RelocInfo::set_call_address(Address target) {
+-  ASSERT(IsPatchedReturnSequence());
++  ASSERT((IsJSReturn(rmode()) && IsPatchedReturnSequence()) ||
++         (IsDebugBreakSlot(rmode()) && IsPatchedDebugBreakSlotSequence()));
+   Memory::Address_at(pc_ + Assembler::kRealPatchReturnSequenceAddressOffset) =
+       target;
+ }
+ 
+ 
+ Object* RelocInfo::call_object() {
+-  ASSERT(IsPatchedReturnSequence());
+   return *call_object_address();
+ }
+ 
+ 
+ void RelocInfo::set_call_object(Object* target) {
+-  ASSERT(IsPatchedReturnSequence());
+   *call_object_address() = target;
+ }
+ 
+ 
+ Object** RelocInfo::call_object_address() {
+-  ASSERT(IsPatchedReturnSequence());
++  ASSERT((IsJSReturn(rmode()) && IsPatchedReturnSequence()) ||
++         (IsDebugBreakSlot(rmode()) && IsPatchedDebugBreakSlotSequence()));
+   return reinterpret_cast<Object**>(
+       pc_ + Assembler::kPatchReturnSequenceAddressOffset);
+ }
+diff -Nur libv8-2.2.24/src/x64/codegen-x64.cc libv8-2.2.24.9/src/x64/codegen-x64.cc
 --- libv8-2.2.24/src/x64/codegen-x64.cc	2010-07-13 22:58:03.257819000 +0200
-+++ libv8-2.2.24.8/src/x64/codegen-x64.cc	2010-07-15 11:58:47.142927000 +0200
++++ libv8-2.2.24.9/src/x64/codegen-x64.cc	2010-08-10 08:39:13.055445000 +0200
 @@ -3428,49 +3428,56 @@
      CodeForStatementPosition(node);
      Slot* loop_var_slot = loop_var->slot();
@@ -1132,7 +2015,33 @@ diff -Nur libv8-2.2.24/src/x64/codegen-x64.cc libv8-2.2.24.8/src/x64/codegen-x64
    }
    if (node->break_target()->is_linked()) {
      node->break_target()->Bind();
-@@ -10094,6 +10101,8 @@
+@@ -5673,6 +5680,25 @@
+ }
+ 
+ 
++void CodeGenerator::GenerateIsSpecObject(ZoneList<Expression*>* args) {
++  // This generates a fast version of:
++  // (typeof(arg) === 'object' || %_ClassOf(arg) == 'RegExp' ||
++  // typeof(arg) == function).
++  // It includes undetectable objects (as opposed to IsObject).
++  ASSERT(args->length() == 1);
++  Load(args->at(0));
++  Result value = frame_->Pop();
++  value.ToRegister();
++  ASSERT(value.is_valid());
++  Condition is_smi = masm_->CheckSmi(value.reg());
++  destination()->false_target()->Branch(is_smi);
++  // Check that this is an object.
++  __ CmpObjectType(value.reg(), FIRST_JS_OBJECT_TYPE, kScratchRegister);
++  value.Unuse();
++  destination()->Split(above_equal);
++}
++
++
+ void CodeGenerator::GenerateIsFunction(ZoneList<Expression*>* args) {
+   // This generates a fast version of:
+   // (%_ClassOf(arg) === 'Function')
+@@ -10094,6 +10120,8 @@
  
  
  void CompareStub::Generate(MacroAssembler* masm) {
@@ -1141,7 +2050,7 @@ diff -Nur libv8-2.2.24/src/x64/codegen-x64.cc libv8-2.2.24.8/src/x64/codegen-x64
    Label check_unequal_objects, done;
    // The compare stub returns a positive, negative, or zero 64-bit integer
    // value in rax, corresponding to result of comparing the two inputs.
-@@ -10942,8 +10951,10 @@
+@@ -10942,8 +10970,10 @@
    // Encode the three parameters in a unique 16 bit value. To avoid duplicate
    // stubs the never NaN NaN condition is only taken into account if the
    // condition is equals.
@@ -1153,7 +2062,7 @@ diff -Nur libv8-2.2.24/src/x64/codegen-x64.cc libv8-2.2.24.8/src/x64/codegen-x64
           | StrictField::encode(strict_)
           | NeverNanNanField::encode(cc_ == equal ? never_nan_nan_ : false)
           | IncludeNumberCompareField::encode(include_number_compare_);
-@@ -10953,6 +10964,8 @@
+@@ -10953,6 +10983,8 @@
  // Unfortunately you have to run without snapshots to see most of these
  // names in the profile since most compare stubs end up in the snapshot.
  const char* CompareStub::GetName() {
@@ -1162,9 +2071,20 @@ diff -Nur libv8-2.2.24/src/x64/codegen-x64.cc libv8-2.2.24.8/src/x64/codegen-x64
    if (name_ != NULL) return name_;
    const int kMaxNameLength = 100;
    name_ = Bootstrapper::AllocateAutoDeletedArray(kMaxNameLength);
-diff -Nur libv8-2.2.24/src/x64/disasm-x64.cc libv8-2.2.24.8/src/x64/disasm-x64.cc
+diff -Nur libv8-2.2.24/src/x64/codegen-x64.h libv8-2.2.24.9/src/x64/codegen-x64.h
+--- libv8-2.2.24/src/x64/codegen-x64.h	2010-07-05 13:01:40.955149000 +0200
++++ libv8-2.2.24.9/src/x64/codegen-x64.h	2010-08-10 08:39:13.055445000 +0200
+@@ -578,6 +578,7 @@
+   void GenerateIsArray(ZoneList<Expression*>* args);
+   void GenerateIsRegExp(ZoneList<Expression*>* args);
+   void GenerateIsObject(ZoneList<Expression*>* args);
++  void GenerateIsSpecObject(ZoneList<Expression*>* args);
+   void GenerateIsFunction(ZoneList<Expression*>* args);
+   void GenerateIsUndetectableObject(ZoneList<Expression*>* args);
+ 
+diff -Nur libv8-2.2.24/src/x64/disasm-x64.cc libv8-2.2.24.9/src/x64/disasm-x64.cc
 --- libv8-2.2.24/src/x64/disasm-x64.cc	2010-06-30 11:09:34.790111000 +0200
-+++ libv8-2.2.24.8/src/x64/disasm-x64.cc	2010-07-28 08:55:53.407150000 +0200
++++ libv8-2.2.24.9/src/x64/disasm-x64.cc	2010-07-28 08:55:53.407150000 +0200
 @@ -1019,10 +1019,10 @@
                         NameOfXMMRegister(regop));
          current += PrintRightOperand(current);
@@ -1180,9 +2100,38 @@ diff -Nur libv8-2.2.24/src/x64/disasm-x64.cc libv8-2.2.24.8/src/x64/disasm-x64.c
        } else {
          const char* mnemonic = "?";
          if (opcode == 0x57) {
-diff -Nur libv8-2.2.24/src/x64/stub-cache-x64.cc libv8-2.2.24.8/src/x64/stub-cache-x64.cc
+diff -Nur libv8-2.2.24/src/x64/full-codegen-x64.cc libv8-2.2.24.9/src/x64/full-codegen-x64.cc
+--- libv8-2.2.24/src/x64/full-codegen-x64.cc	2010-07-13 22:58:03.257819000 +0200
++++ libv8-2.2.24.9/src/x64/full-codegen-x64.cc	2010-08-10 08:39:13.055445000 +0200
+@@ -1991,6 +1991,25 @@
+ }
+ 
+ 
++void FullCodeGenerator::EmitIsSpecObject(ZoneList<Expression*>* args) {
++  ASSERT(args->length() == 1);
++
++  VisitForValue(args->at(0), kAccumulator);
++
++  Label materialize_true, materialize_false;
++  Label* if_true = NULL;
++  Label* if_false = NULL;
++  PrepareTest(&materialize_true, &materialize_false, &if_true, &if_false);
++
++  __ JumpIfSmi(rax, if_false);
++  __ CmpObjectType(rax, FIRST_JS_OBJECT_TYPE, rbx);
++  __ j(above_equal, if_true);
++  __ jmp(if_false);
++
++  Apply(context_, if_true, if_false);
++}
++
++
+ void FullCodeGenerator::EmitIsUndetectableObject(ZoneList<Expression*>* args) {
+   ASSERT(args->length() == 1);
+ 
+diff -Nur libv8-2.2.24/src/x64/stub-cache-x64.cc libv8-2.2.24.9/src/x64/stub-cache-x64.cc
 --- libv8-2.2.24/src/x64/stub-cache-x64.cc	2010-07-13 22:58:03.257819000 +0200
-+++ libv8-2.2.24.8/src/x64/stub-cache-x64.cc	2010-07-15 11:58:47.142927000 +0200
++++ libv8-2.2.24.9/src/x64/stub-cache-x64.cc	2010-07-15 11:58:47.142927000 +0200
 @@ -164,6 +164,12 @@
        // Stop if found the property.
        __ Cmp(entity_name, Handle<String>(name));
@@ -1196,10 +2145,117 @@ diff -Nur libv8-2.2.24/src/x64/stub-cache-x64.cc libv8-2.2.24.8/src/x64/stub-cac
      } else {
        // Give up probing if still not found the undefined value.
        __ j(not_equal, miss_label);
-diff -Nur libv8-2.2.24/test/cctest/test-debug.cc libv8-2.2.24.8/test/cctest/test-debug.cc
+diff -Nur libv8-2.2.24/test/cctest/test-debug.cc libv8-2.2.24.9/test/cctest/test-debug.cc
 --- libv8-2.2.24/test/cctest/test-debug.cc	2010-07-05 13:01:40.955149000 +0200
-+++ libv8-2.2.24.8/test/cctest/test-debug.cc	2010-07-14 11:01:13.356453000 +0200
-@@ -6650,4 +6650,69 @@
++++ libv8-2.2.24.9/test/cctest/test-debug.cc	2010-08-05 17:01:05.985678000 +0200
+@@ -1244,7 +1244,9 @@
+ 
+ // Call the function three times with different garbage collections in between
+ // and make sure that the break point survives.
+-static void CallAndGC(v8::Local<v8::Object> recv, v8::Local<v8::Function> f) {
++static void CallAndGC(v8::Local<v8::Object> recv,
++                      v8::Local<v8::Function> f,
++                      bool force_compaction) {
+   break_point_hit_count = 0;
+ 
+   for (int i = 0; i < 3; i++) {
+@@ -1258,15 +1260,14 @@
+     CHECK_EQ(2 + i * 3, break_point_hit_count);
+ 
+     // Mark sweep (and perhaps compact) and call function.
+-    Heap::CollectAllGarbage(false);
++    Heap::CollectAllGarbage(force_compaction);
+     f->Call(recv, 0, NULL);
+     CHECK_EQ(3 + i * 3, break_point_hit_count);
+   }
+ }
+ 
+ 
+-// Test that a break point can be set at a return store location.
+-TEST(BreakPointSurviveGC) {
++static void TestBreakPointSurviveGC(bool force_compaction) {
+   break_point_hit_count = 0;
+   v8::HandleScope scope;
+   DebugLocalContext env;
+@@ -1276,30 +1277,65 @@
+   v8::Local<v8::Function> foo;
+ 
+   // Test IC store break point with garbage collection.
+-  foo = CompileFunction(&env, "function foo(){bar=0;}", "foo");
+-  SetBreakPoint(foo, 0);
+-  CallAndGC(env->Global(), foo);
++  {
++    v8::Local<v8::Function> bar =
++        CompileFunction(&env, "function foo(){}", "foo");
++    foo = CompileFunction(&env, "function foo(){bar=0;}", "foo");
++    SetBreakPoint(foo, 0);
++  }
++  CallAndGC(env->Global(), foo, force_compaction);
+ 
+   // Test IC load break point with garbage collection.
+-  foo = CompileFunction(&env, "bar=1;function foo(){var x=bar;}", "foo");
+-  SetBreakPoint(foo, 0);
+-  CallAndGC(env->Global(), foo);
++  {
++    v8::Local<v8::Function> bar =
++        CompileFunction(&env, "function foo(){}", "foo");
++    foo = CompileFunction(&env, "bar=1;function foo(){var x=bar;}", "foo");
++    SetBreakPoint(foo, 0);
++  }
++  CallAndGC(env->Global(), foo, force_compaction);
+ 
+   // Test IC call break point with garbage collection.
+-  foo = CompileFunction(&env, "function bar(){};function foo(){bar();}", "foo");
+-  SetBreakPoint(foo, 0);
+-  CallAndGC(env->Global(), foo);
++  {
++    v8::Local<v8::Function> bar =
++        CompileFunction(&env, "function foo(){}", "foo");
++    foo = CompileFunction(&env,
++                          "function bar(){};function foo(){bar();}",
++                          "foo");
++    SetBreakPoint(foo, 0);
++  }
++  CallAndGC(env->Global(), foo, force_compaction);
+ 
+   // Test return break point with garbage collection.
+-  foo = CompileFunction(&env, "function foo(){}", "foo");
+-  SetBreakPoint(foo, 0);
+-  CallAndGC(env->Global(), foo);
++  {
++    v8::Local<v8::Function> bar =
++        CompileFunction(&env, "function foo(){}", "foo");
++    foo = CompileFunction(&env, "function foo(){}", "foo");
++    SetBreakPoint(foo, 0);
++  }
++  CallAndGC(env->Global(), foo, force_compaction);
++
++  // Test non IC break point with garbage collection.
++  {
++    v8::Local<v8::Function> bar =
++        CompileFunction(&env, "function foo(){}", "foo");
++    foo = CompileFunction(&env, "function foo(){var bar=0;}", "foo");
++    SetBreakPoint(foo, 0);
++  }
++  CallAndGC(env->Global(), foo, force_compaction);
++
+ 
+   v8::Debug::SetDebugEventListener(NULL);
+   CheckDebuggerUnloaded();
+ }
+ 
+ 
++// Test that a break point can be set at a return store location.
++TEST(BreakPointSurviveGC) {
++  TestBreakPointSurviveGC(false);
++  TestBreakPointSurviveGC(true);
++}
++
++
+ // Test that break points can be set using the global Debug object.
+ TEST(BreakPointThroughJavaScript) {
+   break_point_hit_count = 0;
+@@ -6650,4 +6686,69 @@
    CheckDebuggerUnloaded();
  }
  
@@ -1269,9 +2325,30 @@ diff -Nur libv8-2.2.24/test/cctest/test-debug.cc libv8-2.2.24.8/test/cctest/test
 +}
 +
  #endif  // ENABLE_DEBUGGER_SUPPORT
-diff -Nur libv8-2.2.24/test/mjsunit/call-stub.js libv8-2.2.24.8/test/mjsunit/call-stub.js
+diff -Nur libv8-2.2.24/test/es5conform/es5conform.status libv8-2.2.24.9/test/es5conform/es5conform.status
+--- libv8-2.2.24/test/es5conform/es5conform.status	2010-07-13 22:58:03.257819000 +0200
++++ libv8-2.2.24.9/test/es5conform/es5conform.status	2010-08-08 11:52:35.427532000 +0200
+@@ -47,17 +47,6 @@
+ # We do not have a global object called 'global' as required by tests.
+ chapter15/15.1: FAIL_OK
+ 
+-# NOT IMPLEMENTED: seal
+-chapter15/15.2/15.2.3/15.2.3.8: UNIMPLEMENTED
+-# NOT IMPLEMENTED: isSealed
+-chapter15/15.2/15.2.3/15.2.3.11: UNIMPLEMENTED
+-
+-# NOT IMPLEMENTED: seal
+-chapter15/15.2/15.2.3/15.2.3.3/15.2.3.3-4-20: UNIMPLEMENTED
+-
+-# NOT IMPLEMENTED: isSealed
+-chapter15/15.2/15.2.3/15.2.3.3/15.2.3.3-4-23: UNIMPLEMENTED
+-
+ # NOT IMPLEMENTED: bind
+ chapter15/15.2/15.2.3/15.2.3.3/15.2.3.3-4-38: UNIMPLEMENTED
+ 
+diff -Nur libv8-2.2.24/test/mjsunit/call-stub.js libv8-2.2.24.9/test/mjsunit/call-stub.js
 --- libv8-2.2.24/test/mjsunit/call-stub.js	2010-07-05 13:01:40.955149000 +0200
-+++ libv8-2.2.24.8/test/mjsunit/call-stub.js	2010-07-15 11:58:47.142927000 +0200
++++ libv8-2.2.24.9/test/mjsunit/call-stub.js	2010-07-15 11:58:47.142927000 +0200
 @@ -49,3 +49,18 @@
    }
    assertEquals(i < 50 || i >= 70 ? 1 : 2, h.m());
@@ -1291,9 +2368,9 @@ diff -Nur libv8-2.2.24/test/mjsunit/call-stub.js libv8-2.2.24.8/test/mjsunit/cal
 +  }
 +  assertEquals(i < 50 || i >= 70 ? 1 : 2, h.wwwww());
 +}
-diff -Nur libv8-2.2.24/test/mjsunit/debug-setbreakpoint.js libv8-2.2.24.8/test/mjsunit/debug-setbreakpoint.js
+diff -Nur libv8-2.2.24/test/mjsunit/debug-setbreakpoint.js libv8-2.2.24.9/test/mjsunit/debug-setbreakpoint.js
 --- libv8-2.2.24/test/mjsunit/debug-setbreakpoint.js	2010-06-30 11:09:34.790111000 +0200
-+++ libv8-2.2.24.8/test/mjsunit/debug-setbreakpoint.js	2010-07-27 16:23:04.567279000 +0200
++++ libv8-2.2.24.9/test/mjsunit/debug-setbreakpoint.js	2010-07-27 16:23:04.567279000 +0200
 @@ -192,3 +192,26 @@
  sourceUrlFunc();
  
@@ -1321,9 +2398,242 @@ diff -Nur libv8-2.2.24/test/mjsunit/debug-setbreakpoint.js libv8-2.2.24.8/test/m
 +// we run this code while the script function is being activated on stack.
 +eval('SetBreakpointInI1Script()\nfunction i1(){}\n\n\n\nfunction i2(){}\n');
 +
-diff -Nur libv8-2.2.24/test/mjsunit/regress/regress-784.js libv8-2.2.24.8/test/mjsunit/regress/regress-784.js
+diff -Nur libv8-2.2.24/test/mjsunit/object-freeze.js libv8-2.2.24.9/test/mjsunit/object-freeze.js
+--- libv8-2.2.24/test/mjsunit/object-freeze.js	2010-07-13 22:58:03.257819000 +0200
++++ libv8-2.2.24.9/test/mjsunit/object-freeze.js	2010-08-08 11:52:35.427532000 +0200
+@@ -172,3 +172,26 @@
+ Object.preventExtensions(obj3);
+ 
+ assertTrue(Object.isFrozen(obj3));
++
++
++// Make sure that an object that has only non-configurable, but one
++// writable property, is not classified as frozen.
++var obj4 = {};
++Object.defineProperty(obj4, 'x', {configurable: false, writable: true});
++Object.defineProperty(obj4, 'y', {configurable: false, writable: false});
++Object.preventExtensions(obj4);
++
++assertFalse(Object.isFrozen(obj4));
++
++// Make sure that an object that has only non-writable, but one
++// configurable property, is not classified as frozen.
++var obj5 = {};
++Object.defineProperty(obj5, 'x', {configurable: true, writable: false});
++Object.defineProperty(obj5, 'y', {configurable: false, writable: false});
++Object.preventExtensions(obj5);
++
++assertFalse(Object.isFrozen(obj5));
++
++// Make sure that Object.freeze returns the frozen object.
++var obj6 = {}
++assertTrue(obj6 === Object.freeze(obj6))
+diff -Nur libv8-2.2.24/test/mjsunit/object-seal.js libv8-2.2.24.9/test/mjsunit/object-seal.js
+--- libv8-2.2.24/test/mjsunit/object-seal.js	1970-01-01 01:00:00.000000000 +0100
++++ libv8-2.2.24.9/test/mjsunit/object-seal.js	2010-08-08 11:52:35.427532000 +0200
+@@ -0,0 +1,199 @@
++// Copyright 2010 the V8 project authors. All rights reserved.
++// Redistribution and use in source and binary forms, with or without
++// modification, are permitted provided that the following conditions are
++// met:
++//
++//     * Redistributions of source code must retain the above copyright
++//       notice, this list of conditions and the following disclaimer.
++//     * Redistributions in binary form must reproduce the above
++//       copyright notice, this list of conditions and the following
++//       disclaimer in the documentation and/or other materials provided
++//       with the distribution.
++//     * Neither the name of Google Inc. nor the names of its
++//       contributors may be used to endorse or promote products derived
++//       from this software without specific prior written permission.
++//
++// THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
++// "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
++// LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
++// A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
++// OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
++// SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
++// LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
++// DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
++// THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
++// (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
++// OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
++
++// Tests the Object.seal and Object.isSealed methods - ES 15.2.3.9 and
++// ES 15.2.3.12
++
++
++// Test that we throw an error if an object is not passed as argument.
++var non_objects = new Array(undefined, null, 1, -1, 0, 42.43);
++for (var key in non_objects) {
++  try {
++    Object.seal(non_objects[key]);
++    assertUnreachable();
++  } catch(e) {
++    assertTrue(/Object.seal called on non-object/.test(e));
++  }
++}
++
++for (var key in non_objects) {
++  try {
++    Object.isSealed(non_objects[key]);
++    assertUnreachable();
++  } catch(e) {
++    assertTrue(/Object.isSealed called on non-object/.test(e));
++  }
++}
++
++// Test normal data properties.
++var obj = { x: 42, z: 'foobar' };
++var desc = Object.getOwnPropertyDescriptor(obj, 'x');
++assertTrue(desc.writable);
++assertTrue(desc.configurable);
++assertEquals(42, desc.value);
++
++desc = Object.getOwnPropertyDescriptor(obj, 'z');
++assertTrue(desc.writable);
++assertTrue(desc.configurable);
++assertEquals('foobar', desc.value);
++
++assertTrue(Object.isExtensible(obj));
++assertFalse(Object.isSealed(obj));
++
++Object.seal(obj);
++
++// Make sure we are no longer extensible.
++assertFalse(Object.isExtensible(obj));
++assertTrue(Object.isSealed(obj));
++
++// We should not be frozen, since we are still able to
++// update values.
++assertFalse(Object.isFrozen(obj));
++
++// We should not allow new properties to be added.
++try {
++   obj.foo = 42;
++   assertUnreachable();
++} catch(e) {
++  assertTrue(/object is not extensible/.test(e));
++}
++
++desc = Object.getOwnPropertyDescriptor(obj, 'x');
++assertTrue(desc.writable);
++assertFalse(desc.configurable);
++assertEquals(42, desc.value);
++
++desc = Object.getOwnPropertyDescriptor(obj, 'z');
++assertTrue(desc.writable);
++assertFalse(desc.configurable);
++assertEquals("foobar", desc.value);
++
++// Since writable is not affected by seal we should still be able to
++// update the values.
++obj.x = "43";
++assertEquals(43, obj.x);
++
++// Test on accessors.
++var obj2 = {};
++function get() { return 43; };
++function set() {};
++Object.defineProperty(obj2, 'x', { get: get, set: set, configurable: true });
++
++desc = Object.getOwnPropertyDescriptor(obj2, 'x');
++assertTrue(desc.configurable);
++assertEquals(undefined, desc.value);
++assertEquals(set, desc.set);
++assertEquals(get, desc.get);
++
++assertTrue(Object.isExtensible(obj2));
++assertFalse(Object.isSealed(obj2));
++Object.seal(obj2);
++
++// Since this is an accessor property the object is now effectively both
++// sealed and frozen (accessors has no writable attribute).
++assertTrue(Object.isFrozen(obj2));
++assertFalse(Object.isExtensible(obj2));
++assertTrue(Object.isSealed(obj2));
++
++desc = Object.getOwnPropertyDescriptor(obj2, 'x');
++assertFalse(desc.configurable);
++assertEquals(undefined, desc.value);
++assertEquals(set, desc.set);
++assertEquals(get, desc.get);
++
++try {
++  obj2.foo = 42;
++  assertUnreachable();
++} catch(e) {
++  assertTrue(/object is not extensible/.test(e));
++}
++
++
++// Test seal on arrays.
++var arr = new Array(42,43);
++
++desc = Object.getOwnPropertyDescriptor(arr, '0');
++assertTrue(desc.configurable);
++assertTrue(desc.writable);
++assertEquals(42, desc.value);
++
++desc = Object.getOwnPropertyDescriptor(arr, '1');
++assertTrue(desc.configurable);
++assertTrue(desc.writable);
++assertEquals(43, desc.value);
++
++assertTrue(Object.isExtensible(arr));
++assertFalse(Object.isSealed(arr));
++Object.seal(arr);
++assertTrue(Object.isSealed(arr));
++assertFalse(Object.isExtensible(arr));
++// Since the values in the array is still writable this object 
++// is not frozen.
++assertFalse(Object.isFrozen(arr));
++
++desc = Object.getOwnPropertyDescriptor(arr, '0');
++assertFalse(desc.configurable);
++assertTrue(desc.writable);
++assertEquals(42, desc.value);
++
++desc = Object.getOwnPropertyDescriptor(arr, '1');
++assertFalse(desc.configurable);
++assertTrue(desc.writable);
++assertEquals(43, desc.value);
++
++arr[0] = 'foo';
++
++// We should be able to overwrite the existing value.
++assertEquals('foo', arr[0]);
++
++
++// Test that isSealed returns the correct value even if configurable
++// has been set to false on all properties manually and the extensible
++// flag has also been set to false manually.
++var obj3 = { x: 42, y: 'foo' };
++
++assertFalse(Object.isFrozen(obj3));
++
++Object.defineProperty(obj3, 'x', {configurable: false, writable: true});
++Object.defineProperty(obj3, 'y', {configurable: false, writable: false});
++Object.preventExtensions(obj3);
++
++assertTrue(Object.isSealed(obj3));
++
++
++// Make sure that an object that has a configurable property
++// is not classified as sealed.
++var obj4 = {};
++Object.defineProperty(obj4, 'x', {configurable: true, writable: false});
++Object.defineProperty(obj4, 'y', {configurable: false, writable: false});
++Object.preventExtensions(obj4);
++
++assertFalse(Object.isSealed(obj4));
++
++// Make sure that Object.seal returns the sealed object.
++var obj4 = {}
++assertTrue(obj4 === Object.seal(obj4))
+diff -Nur libv8-2.2.24/test/mjsunit/regress/regress-784.js libv8-2.2.24.9/test/mjsunit/regress/regress-784.js
 --- libv8-2.2.24/test/mjsunit/regress/regress-784.js	1970-01-01 01:00:00.000000000 +0100
-+++ libv8-2.2.24.8/test/mjsunit/regress/regress-784.js	2010-07-28 15:36:30.144289000 +0200
++++ libv8-2.2.24.9/test/mjsunit/regress/regress-784.js	2010-07-28 15:36:30.144289000 +0200
 @@ -0,0 +1,42 @@
 +// Copyright 2010 the V8 project authors. All rights reserved.
 +// Redistribution and use in source and binary forms, with or without
@@ -1367,9 +2677,9 @@ diff -Nur libv8-2.2.24/test/mjsunit/regress/regress-784.js libv8-2.2.24.8/test/m
 +
 +foo();
 +foo("Hello", "There");
-diff -Nur libv8-2.2.24/test/mjsunit/regress/regress-r4998.js libv8-2.2.24.8/test/mjsunit/regress/regress-r4998.js
+diff -Nur libv8-2.2.24/test/mjsunit/regress/regress-r4998.js libv8-2.2.24.9/test/mjsunit/regress/regress-r4998.js
 --- libv8-2.2.24/test/mjsunit/regress/regress-r4998.js	1970-01-01 01:00:00.000000000 +0100
-+++ libv8-2.2.24.8/test/mjsunit/regress/regress-r4998.js	2010-07-14 16:37:29.889223000 +0200
++++ libv8-2.2.24.9/test/mjsunit/regress/regress-r4998.js	2010-07-14 16:37:29.889223000 +0200
 @@ -0,0 +1,94 @@
 +// Copyright 2010 the V8 project authors. All rights reserved.
 +// Redistribution and use in source and binary forms, with or without
@@ -1465,9 +2775,9 @@ diff -Nur libv8-2.2.24/test/mjsunit/regress/regress-r4998.js libv8-2.2.24.8/test
 +}
 +
 +aliasing();
-diff -Nur libv8-2.2.24/tools/js2c.py libv8-2.2.24.8/tools/js2c.py
+diff -Nur libv8-2.2.24/tools/js2c.py libv8-2.2.24.9/tools/js2c.py
 --- libv8-2.2.24/tools/js2c.py	2010-07-07 14:22:46.872819000 +0200
-+++ libv8-2.2.24.8/tools/js2c.py	2010-07-30 12:18:18.121784000 +0200
++++ libv8-2.2.24.9/tools/js2c.py	2010-07-30 12:18:18.121784000 +0200
 @@ -275,8 +275,8 @@
    debugger_ids = []
    modules = []
