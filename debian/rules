@@ -26,6 +26,7 @@ CXXFLAGS += -fno-strict-aliasing
 CFLAGS += -fno-strict-aliasing
 export CFLAGS
 export CXXFLAGS
+# this is needed to avoid buggy behavior when compiled with gcc 44
 export GCC_VERSION=44
 
 DEB_SCONS_OPTIONS          := library=shared soname=on shlibtype=hidden
