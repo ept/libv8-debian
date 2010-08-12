@@ -26,6 +26,7 @@ CXXFLAGS += -fno-strict-aliasing
 CFLAGS += -fno-strict-aliasing
 export CFLAGS
 export CXXFLAGS
+export GCC_VERSION=44
 
 DEB_SCONS_OPTIONS          := library=shared soname=on shlibtype=hidden
 DEB_SCONS_INSTALL_OPTIONS  := $(DEB_SCONS_OPTIONS) DESTDIR=$(DEB_DESTDIR)
