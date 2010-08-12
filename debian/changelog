@@ -1,10 +1,13 @@
 libv8 (2.2.24-5) unstable; urgency=low
 
-  * Apply upstream patches from 2.2.24.8 (2.2 branch)
-  * Standards-Version 3.9.1
+  * Standards-Version 3.9.1. Nothing had to be changed to comply.
   * Change priority to optional. (Closes: #591148)
+    chromium-browser is optional, v8 was extra.
+  * Compile with GCC_VERSION=44. (Closes: #584562)
+    With that option, v8 pass all tests, and debugging within
+    chromium-inspector works nicely.
 
- -- Jérémy Lal <kapouer@melix.org>  Sat, 31 Jul 2010 19:10:18 +0200
+ -- Jérémy Lal <kapouer@melix.org>  Thu, 12 Aug 2010 14:34:39 +0200
 
 libv8 (2.2.24-4) unstable; urgency=low
 
