@@ -1,3 +1,11 @@
+libv8 (2.3.9-1) unstable; urgency=low
+
+  * New upstream release, followed the procedure of README.source to update.
+  * Removed patch issue3037008_6001.diff, applied upstream.
+  * Removed part of 0002-armel-build.patch, applied upstream.
+
+ -- Jérémy Lal <kapouer@melix.org>  Wed, 18 Aug 2010 10:10:27 +0200
+
 libv8 (2.2.24-5) unstable; urgency=low
 
   * Standards-Version 3.9.1. Nothing had to be changed to comply.

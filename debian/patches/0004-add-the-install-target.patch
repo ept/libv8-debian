@@ -2,7 +2,7 @@ add the install target, it is missing from the shipped source
 
 --- a/SConstruct
 +++ b/SConstruct
-@@ -784,6 +784,7 @@
+@@ -779,6 +779,7 @@
    result.Add('mode', 'compilation mode (debug, release)', 'release')
    result.Add('sample', 'build sample (shell, process, lineprocessor)', '')
    result.Add('cache', 'directory to use for scons build cache', '')
@@ -10,7 +10,7 @@ add the install target, it is missing from the shipped source
    result.Add('env', 'override environment settings (NAME0:value0,NAME1:value1,...)', '')
    result.Add('importenv', 'import environment settings (NAME0,NAME1,...)', '')
    for (name, option) in SIMPLE_OPTIONS.iteritems():
-@@ -1130,8 +1131,27 @@
+@@ -1125,8 +1126,27 @@
    env.Alias('sample', samples)
    env.Alias('d8', d8s)
  
