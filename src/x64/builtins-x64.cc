@@ -310,7 +310,7 @@ void Builtins::Generate_FunctionCall(MacroAssembler* masm) {
   __ movsxlq(rbx,
              FieldOperand(rdx,
                           SharedFunctionInfo::kFormalParameterCountOffset));
-  __ movq(rdx, FieldOperand(rdx, SharedFunctionInfo::kCodeOffset));
+  __ movq(rdx, FieldOperand(rdi, JSFunction::kCodeOffset));
   __ lea(rdx, FieldOperand(rdx, Code::kHeaderSize));
   __ cmpq(rax, rbx);
   __ j(not_equal,
@@ -895,8 +895,8 @@ void Builtins::Generate_JSConstructCall(MacroAssembler* masm) {
   __ lea(rbx, FieldOperand(rbx, Code::kHeaderSize));
   __ jmp(rbx);
 
-  // edi: called object
-  // eax: number of arguments
+  // rdi: called object
+  // rax: number of arguments
   __ bind(&non_function_call);
   // CALL_NON_FUNCTION expects the non-function constructor as receiver
   // (instead of the original receiver from the call site).  The receiver is
@@ -1289,6 +1289,26 @@ void Builtins::Generate_JSEntryTrampoline(MacroAssembler* masm) {
 
 void Builtins::Generate_JSConstructEntryTrampoline(MacroAssembler* masm) {
   Generate_JSEntryTrampolineHelper(masm, true);
+}
+
+
+void Builtins::Generate_LazyCompile(MacroAssembler* masm) {
+  // Enter an internal frame.
+  __ EnterInternalFrame();
+
+  // Push a copy of the function onto the stack.
+  __ push(rdi);
+
+  __ push(rdi);  // Function is also the parameter to the runtime call.
+  __ CallRuntime(Runtime::kLazyCompile, 1);
+  __ pop(rdi);
+
+  // Tear down temporary frame.
+  __ LeaveInternalFrame();
+
+  // Do a tail-call of the compiled function.
+  __ lea(rcx, FieldOperand(rax, Code::kHeaderSize));
+  __ jmp(rcx);
 }
 
 } }  // namespace v8::internal

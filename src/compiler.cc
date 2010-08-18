@@ -33,7 +33,6 @@
 #include "compiler.h"
 #include "data-flow.h"
 #include "debug.h"
-#include "fast-codegen.h"
 #include "flow-graph.h"
 #include "full-codegen.h"
 #include "liveedit.h"
@@ -120,14 +119,9 @@ static Handle<Code> MakeCode(Handle<Context> context, CompilationInfo* info) {
   //
   //  --full-compiler enables the dedicated backend for code we expect to be
   //    run once
-  //  --fast-compiler enables a speculative optimizing backend (for
-  //    non-run-once code)
   //
   // The normal choice of backend can be overridden with the flags
-  // --always-full-compiler and --always-fast-compiler, which are mutually
-  // incompatible.
-  CHECK(!FLAG_always_full_compiler || !FLAG_always_fast_compiler);
-
+  // --always-full-compiler.
   Handle<SharedFunctionInfo> shared = info->shared_info();
   bool is_run_once = (shared.is_null())
       ? info->scope()->is_global_scope()
@@ -141,13 +135,6 @@ static Handle<Code> MakeCode(Handle<Context> context, CompilationInfo* info) {
     if (checker.has_supported_syntax()) {
       return FullCodeGenerator::MakeCode(info);
     }
-  } else if (FLAG_always_fast_compiler ||
-             (FLAG_fast_compiler && !is_run_once)) {
-    FastCodeGenSyntaxChecker checker;
-    checker.Check(info);
-    if (checker.has_supported_syntax()) {
-      return FastCodeGenerator::MakeCode(info);
-    }
   }
 
   return CodeGenerator::MakeCode(info);
@@ -160,7 +147,7 @@ Handle<Code> MakeCodeForLiveEdit(CompilationInfo* info) {
   Handle<Code> code = MakeCode(context, info);
   if (!info->shared_info().is_null()) {
     info->shared_info()->set_scope_info(
-        *ScopeInfo<>::CreateHeapObject(info->scope()));
+        *SerializedScopeInfo::Create(info->scope()));
   }
   return code;
 }
@@ -262,7 +249,7 @@ static Handle<SharedFunctionInfo> MakeFunctionInfo(bool is_global,
           lit->name(),
           lit->materialized_literal_count(),
           code,
-          ScopeInfo<>::CreateHeapObject(info.scope()));
+          SerializedScopeInfo::Create(info.scope()));
 
   ASSERT_EQ(RelocInfo::kNoPosition, lit->function_token_position());
   Compiler::SetFunctionInfo(result, lit, true, script);
@@ -449,8 +436,12 @@ bool Compiler::CompileLazy(CompilationInfo* info) {
                             code);
 
   // Update the shared function info with the compiled code and the scope info.
+  // Please note, that the order of the sharedfunction initialization is
+  // important since set_scope_info might trigger a GC, causing the ASSERT
+  // below to be invalid if the code was flushed. By settting the code
+  // object last we avoid this.
+  shared->set_scope_info(*SerializedScopeInfo::Create(info->scope()));
   shared->set_code(*code);
-  shared->set_scope_info(*ScopeInfo<>::CreateHeapObject(info->scope()));
 
   // Set the expected number of properties for instances.
   SetExpectedNofPropertiesFromEstimate(shared, lit->expected_property_count());
@@ -463,6 +454,7 @@ bool Compiler::CompileLazy(CompilationInfo* info) {
 
   // Check the function has compiled code.
   ASSERT(shared->is_compiled());
+  shared->set_code_age(0);
   return true;
 }
 
@@ -485,12 +477,12 @@ Handle<SharedFunctionInfo> Compiler::BuildFunctionInfo(FunctionLiteral* literal,
   bool allow_lazy = literal->AllowsLazyCompilation() &&
       !LiveEditFunctionTracker::IsActive();
 
-  Handle<Object> scope_info(ScopeInfo<>::EmptyHeapObject());
+  Handle<SerializedScopeInfo> scope_info(SerializedScopeInfo::Empty());
 
   // Generate code
   Handle<Code> code;
   if (FLAG_lazy && allow_lazy) {
-    code = ComputeLazyCompile(literal->num_parameters());
+    code = Handle<Code>(Builtins::builtin(Builtins::LazyCompile));
   } else {
     // The bodies of function literals have not yet been visited by
     // the AST optimizer/analyzer.
@@ -524,7 +516,6 @@ Handle<SharedFunctionInfo> Compiler::BuildFunctionInfo(FunctionLiteral* literal,
     // the static helper function MakeCode.
     CompilationInfo info(literal, script, false);
 
-    CHECK(!FLAG_always_full_compiler || !FLAG_always_fast_compiler);
     bool is_run_once = literal->try_full_codegen();
     bool is_compiled = false;
 
@@ -536,16 +527,6 @@ Handle<SharedFunctionInfo> Compiler::BuildFunctionInfo(FunctionLiteral* literal,
       checker.Check(literal);
       if (checker.has_supported_syntax()) {
         code = FullCodeGenerator::MakeCode(&info);
-        is_compiled = true;
-      }
-    } else if (FLAG_always_fast_compiler ||
-               (FLAG_fast_compiler && !is_run_once)) {
-      // Since we are not lazily compiling we do not have a receiver to
-      // specialize for.
-      FastCodeGenSyntaxChecker checker;
-      checker.Check(&info);
-      if (checker.has_supported_syntax()) {
-        code = FastCodeGenerator::MakeCode(&info);
         is_compiled = true;
       }
     }
@@ -568,7 +549,7 @@ Handle<SharedFunctionInfo> Compiler::BuildFunctionInfo(FunctionLiteral* literal,
                               literal->start_position(),
                               script,
                               code);
-    scope_info = ScopeInfo<>::CreateHeapObject(info.scope());
+    scope_info = SerializedScopeInfo::Create(info.scope());
   }
 
   // Create a shared function info object.

@@ -108,8 +108,6 @@
             'conditions': [
               [ 'gcc_version==44', {
                 'cflags': [
-                  # Avoid gcc 4.4 strict aliasing issues in dtoa.c
-                  '-fno-strict-aliasing',
                   # Avoid crashes with gcc 4.4 in the v8 test suite.
                   '-fno-tree-vrp',
                 ],
@@ -181,6 +179,11 @@
           'defines': [
             'BUILDING_V8_SHARED'
           ],
+          'direct_dependent_settings': {
+            'defines': [
+              'USING_V8_SHARED',
+            ],
+          },
         },
         {
           'type': 'none',
@@ -333,7 +336,6 @@
         '../../src/execution.h',
         '../../src/factory.cc',
         '../../src/factory.h',
-        '../../src/fast-codegen.h',
         '../../src/fast-dtoa.cc',
         '../../src/fast-dtoa.h',
         '../../src/flag-definitions.h',
@@ -393,6 +395,8 @@
         '../../src/natives.h',
         '../../src/objects-debug.cc',
         '../../src/objects-inl.h',
+        '../../src/objects-visiting.cc',
+        '../../src/objects-visiting.h',
         '../../src/objects.cc',
         '../../src/objects.h',
         '../../src/oprofile-agent.h',
@@ -482,7 +486,6 @@
             '../../src/arm',
           ],
           'sources': [
-            '../../src/fast-codegen.cc',
             '../../src/jump-target-light.h',
             '../../src/jump-target-light-inl.h',
             '../../src/jump-target-light.cc',
@@ -499,7 +502,6 @@
             '../../src/arm/cpu-arm.cc',
             '../../src/arm/debug-arm.cc',
             '../../src/arm/disasm-arm.cc',
-            '../../src/arm/fast-codegen-arm.cc',
             '../../src/arm/frames-arm.cc',
             '../../src/arm/frames-arm.h',
             '../../src/arm/full-codegen-arm.cc',
@@ -544,8 +546,6 @@
             '../../src/ia32/cpu-ia32.cc',
             '../../src/ia32/debug-ia32.cc',
             '../../src/ia32/disasm-ia32.cc',
-            '../../src/ia32/fast-codegen-ia32.cc',
-            '../../src/ia32/fast-codegen-ia32.h',
             '../../src/ia32/frames-ia32.cc',
             '../../src/ia32/frames-ia32.h',
             '../../src/ia32/full-codegen-ia32.cc',
@@ -566,7 +566,6 @@
             '../../src/x64',
           ],
           'sources': [
-            '../../src/fast-codegen.cc',
             '../../src/jump-target-heavy.h',
             '../../src/jump-target-heavy-inl.h',
             '../../src/jump-target-heavy.cc',
@@ -581,7 +580,6 @@
             '../../src/x64/cpu-x64.cc',
             '../../src/x64/debug-x64.cc',
             '../../src/x64/disasm-x64.cc',
-            '../../src/x64/fast-codegen-x64.cc',
             '../../src/x64/frames-x64.cc',
             '../../src/x64/frames-x64.h',
             '../../src/x64/full-codegen-x64.cc',
@@ -737,11 +735,6 @@
         ['OS=="win"', {
           # This could be gotten by not setting chromium_code, if that's OK.
           'defines': ['_CRT_SECURE_NO_WARNINGS'],
-        }],
-        ['OS=="win" and component=="shared_library"', {
-          'defines': [
-            'USING_V8_SHARED',
-          ],
         }],
       ],
     },

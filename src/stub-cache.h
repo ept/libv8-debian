@@ -210,9 +210,6 @@ class StubCache : public AllStatic {
   static Object* ComputeCallDebugPrepareStepIn(int argc, Code::Kind kind);
 #endif
 
-  static Object* ComputeLazyCompile(int argc);
-
-
   // Update cache for entry hash(name, map).
   static Code* Set(String* name, Map* map, Code* code);
 
@@ -336,10 +333,6 @@ Object* CallInterceptorProperty(Arguments args);
 Object* KeyedLoadPropertyWithInterceptor(Arguments args);
 
 
-// Support function for computing call IC miss stubs.
-Handle<Code> ComputeCallMiss(int argc, Code::Kind kind);
-
-
 // The stub compiler compiles stubs for the stub cache.
 class StubCompiler BASE_EMBEDDED {
  public:
@@ -361,7 +354,6 @@ class StubCompiler BASE_EMBEDDED {
   Object* CompileCallDebugBreak(Code::Flags flags);
   Object* CompileCallDebugPrepareStepIn(Code::Flags flags);
 #endif
-  Object* CompileLazyCompile(Code::Flags flags);
 
   // Static functions for generating parts of stubs.
   static void GenerateLoadGlobalFunctionPrototype(MacroAssembler* masm,
@@ -688,7 +680,9 @@ class CallStubCompiler: public StubCompiler {
 
   void GenerateNameCheck(String* name, Label* miss);
 
-  void GenerateMissBranch();
+  // Generates a jump to CallIC miss stub. Returns Failure if the jump cannot
+  // be generated.
+  Object* GenerateMissBranch();
 };
 
 

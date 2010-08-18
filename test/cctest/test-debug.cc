@@ -1175,11 +1175,11 @@ TEST(BreakPointReturn) {
   foo->Call(env->Global(), 0, NULL);
   CHECK_EQ(1, break_point_hit_count);
   CHECK_EQ(0, last_source_line);
-  CHECK_EQ(16, last_source_column);
+  CHECK_EQ(15, last_source_column);
   foo->Call(env->Global(), 0, NULL);
   CHECK_EQ(2, break_point_hit_count);
   CHECK_EQ(0, last_source_line);
-  CHECK_EQ(16, last_source_column);
+  CHECK_EQ(15, last_source_column);
 
   // Run without breakpoints.
   ClearBreakPoint(bp);
@@ -1244,7 +1244,9 @@ TEST(GCDuringBreakPointProcessing) {
 
 // Call the function three times with different garbage collections in between
 // and make sure that the break point survives.
-static void CallAndGC(v8::Local<v8::Object> recv, v8::Local<v8::Function> f) {
+static void CallAndGC(v8::Local<v8::Object> recv,
+                      v8::Local<v8::Function> f,
+                      bool force_compaction) {
   break_point_hit_count = 0;
 
   for (int i = 0; i < 3; i++) {
@@ -1258,15 +1260,14 @@ static void CallAndGC(v8::Local<v8::Object> recv, v8::Local<v8::Function> f) {
     CHECK_EQ(2 + i * 3, break_point_hit_count);
 
     // Mark sweep (and perhaps compact) and call function.
-    Heap::CollectAllGarbage(false);
+    Heap::CollectAllGarbage(force_compaction);
     f->Call(recv, 0, NULL);
     CHECK_EQ(3 + i * 3, break_point_hit_count);
   }
 }
 
 
-// Test that a break point can be set at a return store location.
-TEST(BreakPointSurviveGC) {
+static void TestBreakPointSurviveGC(bool force_compaction) {
   break_point_hit_count = 0;
   v8::HandleScope scope;
   DebugLocalContext env;
@@ -1276,27 +1277,62 @@ TEST(BreakPointSurviveGC) {
   v8::Local<v8::Function> foo;
 
   // Test IC store break point with garbage collection.
-  foo = CompileFunction(&env, "function foo(){bar=0;}", "foo");
-  SetBreakPoint(foo, 0);
-  CallAndGC(env->Global(), foo);
+  {
+    v8::Local<v8::Function> bar =
+        CompileFunction(&env, "function foo(){}", "foo");
+    foo = CompileFunction(&env, "function foo(){bar=0;}", "foo");
+    SetBreakPoint(foo, 0);
+  }
+  CallAndGC(env->Global(), foo, force_compaction);
 
   // Test IC load break point with garbage collection.
-  foo = CompileFunction(&env, "bar=1;function foo(){var x=bar;}", "foo");
-  SetBreakPoint(foo, 0);
-  CallAndGC(env->Global(), foo);
+  {
+    v8::Local<v8::Function> bar =
+        CompileFunction(&env, "function foo(){}", "foo");
+    foo = CompileFunction(&env, "bar=1;function foo(){var x=bar;}", "foo");
+    SetBreakPoint(foo, 0);
+  }
+  CallAndGC(env->Global(), foo, force_compaction);
 
   // Test IC call break point with garbage collection.
-  foo = CompileFunction(&env, "function bar(){};function foo(){bar();}", "foo");
-  SetBreakPoint(foo, 0);
-  CallAndGC(env->Global(), foo);
+  {
+    v8::Local<v8::Function> bar =
+        CompileFunction(&env, "function foo(){}", "foo");
+    foo = CompileFunction(&env,
+                          "function bar(){};function foo(){bar();}",
+                          "foo");
+    SetBreakPoint(foo, 0);
+  }
+  CallAndGC(env->Global(), foo, force_compaction);
 
   // Test return break point with garbage collection.
-  foo = CompileFunction(&env, "function foo(){}", "foo");
-  SetBreakPoint(foo, 0);
-  CallAndGC(env->Global(), foo);
+  {
+    v8::Local<v8::Function> bar =
+        CompileFunction(&env, "function foo(){}", "foo");
+    foo = CompileFunction(&env, "function foo(){}", "foo");
+    SetBreakPoint(foo, 0);
+  }
+  CallAndGC(env->Global(), foo, force_compaction);
+
+  // Test non IC break point with garbage collection.
+  {
+    v8::Local<v8::Function> bar =
+        CompileFunction(&env, "function foo(){}", "foo");
+    foo = CompileFunction(&env, "function foo(){var bar=0;}", "foo");
+    SetBreakPoint(foo, 0);
+  }
+  CallAndGC(env->Global(), foo, force_compaction);
+
 
   v8::Debug::SetDebugEventListener(NULL);
   CheckDebuggerUnloaded();
+}
+
+
+// Test that a break point can be set at a return store location.
+TEST(BreakPointSurviveGC) {
+  TestBreakPointSurviveGC(false);
+  TestBreakPointSurviveGC(true);
 }
 
 
@@ -2641,6 +2677,65 @@ TEST(DebugStepNamedLoadLoop) {
 
   v8::Debug::SetDebugEventListener(NULL);
   CheckDebuggerUnloaded();
+}
+
+
+static void DoDebugStepNamedStoreLoop(int expected, bool full_compiler = true) {
+  v8::HandleScope scope;
+  DebugLocalContext env;
+
+  // Register a debug event listener which steps and counts before compiling the
+  // function to ensure the full compiler is used.
+  if (full_compiler) {
+    v8::Debug::SetDebugEventListener(DebugEventStep);
+  }
+
+  // Create a function for testing stepping of named store.
+  v8::Local<v8::Function> foo = CompileFunction(
+      &env,
+      "function foo() {\n"
+          "  var a = {a:1};\n"
+          "  for (var i = 0; i < 10; i++) {\n"
+          "    a.a = 2\n"
+          "  }\n"
+          "}\n",
+          "foo");
+
+  // Call function without any break points to ensure inlining is in place.
+  foo->Call(env->Global(), 0, NULL);
+
+  // Register a debug event listener which steps and counts after compiling the
+  // function to ensure the optimizing compiler is used.
+  if (!full_compiler) {
+    v8::Debug::SetDebugEventListener(DebugEventStep);
+  }
+
+  // Setup break point and step through the function.
+  SetBreakPoint(foo, 3);
+  step_action = StepNext;
+  break_point_hit_count = 0;
+  foo->Call(env->Global(), 0, NULL);
+
+  // With stepping all expected break locations are hit.
+  CHECK_EQ(expected, break_point_hit_count);
+
+  v8::Debug::SetDebugEventListener(NULL);
+  CheckDebuggerUnloaded();
+}
+
+
+// Test of the stepping mechanism for named load in a loop.
+TEST(DebugStepNamedStoreLoopFull) {
+  // With the full compiler it is possible to break on the for statement.
+  DoDebugStepNamedStoreLoop(22);
+}
+
+
+// Test of the stepping mechanism for named load in a loop.
+TEST(DebugStepNamedStoreLoopOptimizing) {
+  // With the optimizing compiler it is not possible to break on the for
+  // statement as it uses a local variable thus no IC's.
+  DoDebugStepNamedStoreLoop(11, false);
 }
 
 
@@ -6647,6 +6742,71 @@ TEST(DebugEventContext) {
   expected_context.Clear();
   v8::Debug::SetDebugEventListener(NULL);
   expected_context_data = v8::Handle<v8::Value>();
+  CheckDebuggerUnloaded();
+}
+
+
+static void* expected_break_data;
+static bool was_debug_break_called;
+static bool was_debug_event_called;
+static void DebugEventBreakDataChecker(const v8::Debug::EventDetails& details) {
+  if (details.GetEvent() == v8::BreakForCommand) {
+    CHECK_EQ(expected_break_data, details.GetClientData());
+    was_debug_event_called = true;
+  } else if (details.GetEvent() == v8::Break) {
+    was_debug_break_called = true;
+  }
+}
+
+// Check that event details contain context where debug event occured.
+TEST(DebugEventBreakData) {
+  v8::HandleScope scope;
+  DebugLocalContext env;
+  v8::Debug::SetDebugEventListener2(DebugEventBreakDataChecker);
+
+  TestClientData::constructor_call_counter = 0;
+  TestClientData::destructor_call_counter = 0;
+
+  expected_break_data = NULL;
+  was_debug_event_called = false;
+  was_debug_break_called = false;
+  v8::Debug::DebugBreakForCommand();
+  v8::Script::Compile(v8::String::New("(function(x){return x;})(1);"))->Run();
+  CHECK(was_debug_event_called);
+  CHECK(!was_debug_break_called);
+
+  TestClientData* data1 = new TestClientData();
+  expected_break_data = data1;
+  was_debug_event_called = false;
+  was_debug_break_called = false;
+  v8::Debug::DebugBreakForCommand(data1);
+  v8::Script::Compile(v8::String::New("(function(x){return x+1;})(1);"))->Run();
+  CHECK(was_debug_event_called);
+  CHECK(!was_debug_break_called);
+
+  expected_break_data = NULL;
+  was_debug_event_called = false;
+  was_debug_break_called = false;
+  v8::Debug::DebugBreak();
+  v8::Script::Compile(v8::String::New("(function(x){return x+2;})(1);"))->Run();
+  CHECK(!was_debug_event_called);
+  CHECK(was_debug_break_called);
+
+  TestClientData* data2 = new TestClientData();
+  expected_break_data = data2;
+  was_debug_event_called = false;
+  was_debug_break_called = false;
+  v8::Debug::DebugBreak();
+  v8::Debug::DebugBreakForCommand(data2);
+  v8::Script::Compile(v8::String::New("(function(x){return x+3;})(1);"))->Run();
+  CHECK(was_debug_event_called);
+  CHECK(was_debug_break_called);
+
+  CHECK_EQ(2, TestClientData::constructor_call_counter);
+  CHECK_EQ(TestClientData::constructor_call_counter,
+           TestClientData::destructor_call_counter);
+
+  v8::Debug::SetDebugEventListener(NULL);
   CheckDebuggerUnloaded();
 }
 

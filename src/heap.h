@@ -55,6 +55,7 @@ namespace internal {
   V(Map, heap_number_map, HeapNumberMap)                                       \
   V(Map, global_context_map, GlobalContextMap)                                 \
   V(Map, fixed_array_map, FixedArrayMap)                                       \
+  V(Map, fixed_cow_array_map, FixedCOWArrayMap)                                \
   V(Object, no_interceptor_result_sentinel, NoInterceptorResultSentinel)       \
   V(Map, meta_map, MetaMap)                                                    \
   V(Object, termination_exception, TerminationException)                       \
@@ -981,9 +982,7 @@ class Heap : public AllStatic {
   static RootListIndex RootIndexForExternalArrayType(
       ExternalArrayType array_type);
 
-  static void RecordStats(HeapStats* stats);
-
-  static Scavenger GetScavenger(int instance_type, int instance_size);
+  static void RecordStats(HeapStats* stats, bool take_snapshot = false);
 
   // Copy block of memory from src to dst. Size of block should be aligned
   // by pointer size.
@@ -1195,12 +1194,12 @@ class Heap : public AllStatic {
   static bool CreateInitialMaps();
   static bool CreateInitialObjects();
 
-  // These four Create*EntryStub functions are here because of a gcc-4.4 bug
-  // that assigns wrong vtable entries.
-  static void CreateCEntryStub();
-  static void CreateJSEntryStub();
-  static void CreateJSConstructEntryStub();
-  static void CreateRegExpCEntryStub();
+  // These four Create*EntryStub functions are here and forced to not be inlined
+  // because of a gcc-4.4 bug that assigns wrong vtable entries.
+  NO_INLINE(static void CreateCEntryStub());
+  NO_INLINE(static void CreateJSEntryStub());
+  NO_INLINE(static void CreateJSConstructEntryStub());
+  NO_INLINE(static void CreateRegExpCEntryStub());
 
   static void CreateFixedStubs();
 
@@ -1258,10 +1257,6 @@ class Heap : public AllStatic {
   static Object* InitializeNumberStringCache();
   // Flush the number to string cache.
   static void FlushNumberStringCache();
-
-  // Flush code from functions we do not expect to use again. The code will
-  // be replaced with a lazy compilable version.
-  static void FlushCode();
 
   static void UpdateSurvivalRateTrend(int start_new_space_size);
 
@@ -1324,26 +1319,34 @@ class Heap : public AllStatic {
 
 class HeapStats {
  public:
-  int* start_marker;
-  int* new_space_size;
-  int* new_space_capacity;
-  int* old_pointer_space_size;
-  int* old_pointer_space_capacity;
-  int* old_data_space_size;
-  int* old_data_space_capacity;
-  int* code_space_size;
-  int* code_space_capacity;
-  int* map_space_size;
-  int* map_space_capacity;
-  int* cell_space_size;
-  int* cell_space_capacity;
-  int* lo_space_size;
-  int* global_handle_count;
-  int* weak_global_handle_count;
-  int* pending_global_handle_count;
-  int* near_death_global_handle_count;
-  int* destroyed_global_handle_count;
-  int* end_marker;
+  static const int kStartMarker = 0xDECADE00;
+  static const int kEndMarker = 0xDECADE01;
+
+  int* start_marker;                    //  0
+  int* new_space_size;                  //  1
+  int* new_space_capacity;              //  2
+  int* old_pointer_space_size;          //  3
+  int* old_pointer_space_capacity;      //  4
+  int* old_data_space_size;             //  5
+  int* old_data_space_capacity;         //  6
+  int* code_space_size;                 //  7
+  int* code_space_capacity;             //  8
+  int* map_space_size;                  //  9
+  int* map_space_capacity;              // 10
+  int* cell_space_size;                 // 11
+  int* cell_space_capacity;             // 12
+  int* lo_space_size;                   // 13
+  int* global_handle_count;             // 14
+  int* weak_global_handle_count;        // 15
+  int* pending_global_handle_count;     // 16
+  int* near_death_global_handle_count;  // 17
+  int* destroyed_global_handle_count;   // 18
+  int* memory_allocator_size;           // 19
+  int* memory_allocator_capacity;       // 20
+  int* objects_per_type;                // 21
+  int* size_per_type;                   // 22
+  int* os_error;                        // 23
+  int* end_marker;                      // 24
 };
 
 
@@ -1721,7 +1724,9 @@ class GCTracer BASE_EMBEDDED {
       EXTERNAL,
       MC_MARK,
       MC_SWEEP,
+      MC_SWEEP_NEWSPACE,
       MC_COMPACT,
+      MC_FLUSH_CODE,
       kNumberOfScopes
     };
 

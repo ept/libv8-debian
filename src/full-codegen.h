@@ -89,11 +89,6 @@ class BreakableStatementChecker: public AstVisitor {
 
 class FullCodeGenerator: public AstVisitor {
  public:
-  enum Mode {
-    PRIMARY,
-    SECONDARY
-  };
-
   explicit FullCodeGenerator(MacroAssembler* masm)
       : masm_(masm),
         info_(NULL),
@@ -106,7 +101,7 @@ class FullCodeGenerator: public AstVisitor {
 
   static Handle<Code> MakeCode(CompilationInfo* info);
 
-  void Generate(CompilationInfo* info, Mode mode);
+  void Generate(CompilationInfo* info);
 
  private:
   class Breakable;
@@ -402,11 +397,14 @@ class FullCodeGenerator: public AstVisitor {
   void EmitIsSmi(ZoneList<Expression*>* arguments);
   void EmitIsNonNegativeSmi(ZoneList<Expression*>* arguments);
   void EmitIsObject(ZoneList<Expression*>* arguments);
+  void EmitIsSpecObject(ZoneList<Expression*>* arguments);
   void EmitIsUndetectableObject(ZoneList<Expression*>* arguments);
   void EmitIsFunction(ZoneList<Expression*>* arguments);
   void EmitIsArray(ZoneList<Expression*>* arguments);
   void EmitIsRegExp(ZoneList<Expression*>* arguments);
   void EmitIsConstructCall(ZoneList<Expression*>* arguments);
+  void EmitIsStringWrapperSafeForDefaultValueOf(
+      ZoneList<Expression*>* arguments);
   void EmitObjectEquals(ZoneList<Expression*>* arguments);
   void EmitArguments(ZoneList<Expression*>* arguments);
   void EmitArgumentsLength(ZoneList<Expression*>* arguments);
@@ -431,6 +429,7 @@ class FullCodeGenerator: public AstVisitor {
   void EmitRegExpConstructResult(ZoneList<Expression*>* arguments);
   void EmitSwapElements(ZoneList<Expression*>* arguments);
   void EmitGetFromCache(ZoneList<Expression*>* arguments);
+  void EmitIsRegExpEquivalent(ZoneList<Expression*>* arguments);
 
   // Platform-specific code for loading variables.
   void EmitVariableLoad(Variable* expr, Expression::Context context);

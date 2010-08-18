@@ -98,8 +98,10 @@ void MacroAssembler::InNewSpace(Register object,
 }
 
 
-void MacroAssembler::RecordWrite(Register object, int offset,
-                                 Register value, Register scratch) {
+void MacroAssembler::RecordWrite(Register object,
+                                 int offset,
+                                 Register value,
+                                 Register scratch) {
   // The compiled code assumes that record write doesn't change the
   // context register, so we check that none of the clobbered
   // registers are esi.
@@ -371,7 +373,13 @@ void MacroAssembler::AbortIfNotNumber(Register object) {
 
 void MacroAssembler::AbortIfNotSmi(Register object) {
   test(object, Immediate(kSmiTagMask));
-  Assert(equal, "Operand not a smi");
+  Assert(equal, "Operand is not a smi");
+}
+
+
+void MacroAssembler::AbortIfSmi(Register object) {
+  test(object, Immediate(kSmiTagMask));
+  Assert(not_equal, "Operand is a smi");
 }
 
 
@@ -670,20 +678,33 @@ void MacroAssembler::AllocateInNewSpace(int object_size,
   // Load address of new object into result.
   LoadAllocationTopHelper(result, result_end, scratch, flags);
 
+  Register top_reg = result_end.is_valid() ? result_end : result;
+
   // Calculate new top and bail out if new space is exhausted.
   ExternalReference new_space_allocation_limit =
       ExternalReference::new_space_allocation_limit_address();
-  lea(result_end, Operand(result, object_size));
-  cmp(result_end, Operand::StaticVariable(new_space_allocation_limit));
+
+  if (top_reg.is(result)) {
+    add(Operand(top_reg), Immediate(object_size));
+  } else {
+    lea(top_reg, Operand(result, object_size));
+  }
+  cmp(top_reg, Operand::StaticVariable(new_space_allocation_limit));
   j(above, gc_required, not_taken);
 
-  // Tag result if requested.
-  if ((flags & TAG_OBJECT) != 0) {
-    lea(result, Operand(result, kHeapObjectTag));
-  }
-
   // Update allocation top.
-  UpdateAllocationTopHelper(result_end, scratch);
+  UpdateAllocationTopHelper(top_reg, scratch);
+
+  // Tag result if requested.
+  if (top_reg.is(result)) {
+    if ((flags & TAG_OBJECT) != 0) {
+      sub(Operand(result), Immediate(object_size - kHeapObjectTag));
+    } else {
+      sub(Operand(result), Immediate(object_size));
+    }
+  } else if ((flags & TAG_OBJECT) != 0) {
+    add(Operand(result), Immediate(kHeapObjectTag));
+  }
 }
 
 
@@ -1050,16 +1071,6 @@ void MacroAssembler::CallRuntime(Runtime::Function* f, int num_arguments) {
 }
 
 
-void MacroAssembler::CallExternalReference(ExternalReference ref,
-                                           int num_arguments) {
-  mov(eax, Immediate(num_arguments));
-  mov(ebx, Immediate(ref));
-
-  CEntryStub stub(1);
-  CallStub(&stub);
-}
-
-
 Object* MacroAssembler::TryCallRuntime(Runtime::Function* f,
                                        int num_arguments) {
   if (f->nargs >= 0 && f->nargs != num_arguments) {
@@ -1077,6 +1088,16 @@ Object* MacroAssembler::TryCallRuntime(Runtime::Function* f,
   mov(ebx, Immediate(ExternalReference(f)));
   CEntryStub ces(1);
   return TryCallStub(&ces);
+}
+
+
+void MacroAssembler::CallExternalReference(ExternalReference ref,
+                                           int num_arguments) {
+  mov(eax, Immediate(num_arguments));
+  mov(ebx, Immediate(ref));
+
+  CEntryStub stub(1);
+  CallStub(&stub);
 }
 
 
@@ -1104,8 +1125,7 @@ void MacroAssembler::PushHandleScope(Register scratch) {
   ExternalReference extensions_address =
       ExternalReference::handle_scope_extensions_address();
   mov(scratch, Operand::StaticVariable(extensions_address));
-  ASSERT_EQ(0, kSmiTag);
-  shl(scratch, kSmiTagSize);
+  SmiTag(scratch);
   push(scratch);
   mov(Operand::StaticVariable(extensions_address), Immediate(0));
   // Push next and limit pointers which will be wordsize aligned and
@@ -1129,16 +1149,14 @@ Object* MacroAssembler::PopHandleScopeHelper(Register saved,
   mov(scratch, Operand::StaticVariable(extensions_address));
   cmp(Operand(scratch), Immediate(0));
   j(equal, &write_back);
-  // Calling a runtime function messes with registers so we save and
-  // restore any one we're asked not to change
-  if (saved.is_valid()) push(saved);
+  push(saved);
   if (gc_allowed) {
     CallRuntime(Runtime::kDeleteHandleScopeExtensions, 0);
   } else {
     result = TryCallRuntime(Runtime::kDeleteHandleScopeExtensions, 0);
     if (result->IsFailure()) return result;
   }
-  if (saved.is_valid()) pop(saved);
+  pop(saved);
 
   bind(&write_back);
   ExternalReference limit_address =
@@ -1148,7 +1166,7 @@ Object* MacroAssembler::PopHandleScopeHelper(Register saved,
         ExternalReference::handle_scope_next_address();
   pop(Operand::StaticVariable(next_address));
   pop(scratch);
-  shr(scratch, kSmiTagSize);
+  SmiUntag(scratch);
   mov(Operand::StaticVariable(extensions_address), scratch);
 
   return result;
@@ -1280,7 +1298,7 @@ void MacroAssembler::InvokeFunction(Register fun,
   mov(esi, FieldOperand(edi, JSFunction::kContextOffset));
   mov(ebx, FieldOperand(edx, SharedFunctionInfo::kFormalParameterCountOffset));
   SmiUntag(ebx);
-  mov(edx, FieldOperand(edx, SharedFunctionInfo::kCodeOffset));
+  mov(edx, FieldOperand(edi, JSFunction::kCodeOffset));
   lea(edx, FieldOperand(edx, Code::kHeaderSize));
 
   ParameterCount expected(ebx);
@@ -1332,8 +1350,7 @@ void MacroAssembler::GetBuiltinEntry(Register target, Builtins::JavaScript id) {
     // Make sure the code objects in the builtins object and in the
     // builtin function are the same.
     push(target);
-    mov(target, FieldOperand(edi, JSFunction::kSharedFunctionInfoOffset));
-    mov(target, FieldOperand(target, SharedFunctionInfo::kCodeOffset));
+    mov(target, FieldOperand(edi, JSFunction::kCodeOffset));
     cmp(target, Operand(esp, 0));
     Assert(equal, "Builtin code object changed");
     pop(target);
@@ -1447,6 +1464,21 @@ void MacroAssembler::Assert(Condition cc, const char* msg) {
 }
 
 
+void MacroAssembler::AssertFastElements(Register elements) {
+  if (FLAG_debug_code) {
+    Label ok;
+    cmp(FieldOperand(elements, HeapObject::kMapOffset),
+        Immediate(Factory::fixed_array_map()));
+    j(equal, &ok);
+    cmp(FieldOperand(elements, HeapObject::kMapOffset),
+        Immediate(Factory::fixed_cow_array_map()));
+    j(equal, &ok);
+    Abort("JSObject with fast elements map has slow elements");
+    bind(&ok);
+  }
+}
+
+
 void MacroAssembler::Check(Condition cc, const char* msg) {
   Label L;
   j(cc, &L, taken);
@@ -1495,6 +1527,59 @@ void MacroAssembler::Abort(const char* msg) {
   CallRuntime(Runtime::kAbort, 2);
   // will not return here
   int3();
+}
+
+
+void MacroAssembler::JumpIfNotNumber(Register reg,
+                                     TypeInfo info,
+                                     Label* on_not_number) {
+  if (FLAG_debug_code) AbortIfSmi(reg);
+  if (!info.IsNumber()) {
+    cmp(FieldOperand(reg, HeapObject::kMapOffset),
+        Factory::heap_number_map());
+    j(not_equal, on_not_number);
+  }
+}
+
+
+void MacroAssembler::ConvertToInt32(Register dst,
+                                    Register source,
+                                    Register scratch,
+                                    TypeInfo info,
+                                    Label* on_not_int32) {
+  if (FLAG_debug_code) {
+    AbortIfSmi(source);
+    AbortIfNotNumber(source);
+  }
+  if (info.IsInteger32()) {
+    cvttsd2si(dst, FieldOperand(source, HeapNumber::kValueOffset));
+  } else {
+    Label done;
+    bool push_pop = (scratch.is(no_reg) && dst.is(source));
+    ASSERT(!scratch.is(source));
+    if (push_pop) {
+      push(dst);
+      scratch = dst;
+    }
+    if (scratch.is(no_reg)) scratch = dst;
+    cvttsd2si(scratch, FieldOperand(source, HeapNumber::kValueOffset));
+    cmp(scratch, 0x80000000u);
+    if (push_pop) {
+      j(not_equal, &done);
+      pop(dst);
+      jmp(on_not_int32);
+    } else {
+      j(equal, on_not_int32);
+    }
+
+    bind(&done);
+    if (push_pop) {
+      add(Operand(esp), Immediate(kPointerSize));  // Pop.
+    }
+    if (!scratch.is(dst)) {
+      mov(dst, scratch);
+    }
+  }
 }
 
 

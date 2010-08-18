@@ -184,6 +184,12 @@ static void GenerateDictionaryNegativeLookup(MacroAssembler* masm,
       // Stop if found the property.
       __ cmp(entity_name, Handle<String>(name));
       __ j(equal, miss_label, not_taken);
+
+      // Check if the entry name is not a symbol.
+      __ mov(entity_name, FieldOperand(entity_name, HeapObject::kMapOffset));
+      __ test_b(FieldOperand(entity_name, Map::kInstanceTypeOffset),
+                kIsSymbolMask);
+      __ j(zero, miss_label, not_taken);
     } else {
       // Give up probing if still not found the undefined value.
       __ j(not_equal, miss_label, not_taken);
@@ -1027,24 +1033,23 @@ bool StubCompiler::GenerateLoadCallback(JSObject* object,
 
   // Check that the maps haven't changed.
   Register reg =
-      CheckPrototypes(object, receiver, holder,
-                      scratch1, scratch2, scratch3, name, miss);
+      CheckPrototypes(object, receiver, holder, scratch1,
+                      scratch2, scratch3, name, miss);
 
   Handle<AccessorInfo> callback_handle(callback);
 
-  Register other = reg.is(scratch1) ? scratch2 : scratch1;
   __ EnterInternalFrame();
-  __ PushHandleScope(other);
-  // Push the stack address where the list of arguments ends
-  __ mov(other, esp);
-  __ sub(Operand(other), Immediate(2 * kPointerSize));
-  __ push(other);
+  __ PushHandleScope(scratch2);
+  // Push the stack address where the list of arguments ends.
+  __ mov(scratch2, esp);
+  __ sub(Operand(scratch2), Immediate(2 * kPointerSize));
+  __ push(scratch2);
   __ push(receiver);  // receiver
   __ push(reg);  // holder
   // Push data from AccessorInfo.
   if (Heap::InNewSpace(callback_handle->data())) {
-    __ mov(other, Immediate(callback_handle));
-    __ push(FieldOperand(other, AccessorInfo::kDataOffset));
+    __ mov(scratch2, Immediate(callback_handle));
+    __ push(FieldOperand(scratch2, AccessorInfo::kDataOffset));
   } else {
     __ push(Immediate(Handle<Object>(callback_handle->data())));
   }
@@ -1071,7 +1076,7 @@ bool StubCompiler::GenerateLoadCallback(JSObject* object,
   }
 
   // We need to avoid using eax since that now holds the result.
-  Register tmp = other.is(eax) ? reg : other;
+  Register tmp = scratch2.is(eax) ? reg : scratch2;
   // Emitting PopHandleScope may try to allocate.  Do not allow the
   // assembler to perform a garbage collection but instead return a
   // failure object.
@@ -1250,30 +1255,6 @@ void StubCompiler::GenerateLoadInterceptor(JSObject* object,
 }
 
 
-// TODO(1241006): Avoid having lazy compile stubs specialized by the
-// number of arguments. It is not needed anymore.
-Object* StubCompiler::CompileLazyCompile(Code::Flags flags) {
-  // Enter an internal frame.
-  __ EnterInternalFrame();
-
-  // Push a copy of the function onto the stack.
-  __ push(edi);
-
-  __ push(edi);  // function is also the parameter to the runtime call
-  __ CallRuntime(Runtime::kLazyCompile, 1);
-  __ pop(edi);
-
-  // Tear down temporary frame.
-  __ LeaveInternalFrame();
-
-  // Do a tail-call of the compiled function.
-  __ lea(ecx, FieldOperand(eax, Code::kHeaderSize));
-  __ jmp(Operand(ecx));
-
-  return GetCodeWithFlags(flags, "LazyCompileStub");
-}
-
-
 void CallStubCompiler::GenerateNameCheck(String* name, Label* miss) {
   if (kind_ == Code::KEYED_CALL_IC) {
     __ cmp(Operand(ecx), Immediate(Handle<String>(name)));
@@ -1282,9 +1263,11 @@ void CallStubCompiler::GenerateNameCheck(String* name, Label* miss) {
 }
 
 
-void CallStubCompiler::GenerateMissBranch() {
-  Handle<Code> ic = ComputeCallMiss(arguments().immediate(), kind_);
-  __ jmp(ic, RelocInfo::CODE_TARGET);
+Object* CallStubCompiler::GenerateMissBranch() {
+  Object* obj = StubCache::ComputeCallMiss(arguments().immediate(), kind_);
+  if (obj->IsFailure()) return obj;
+  __ jmp(Handle<Code>(Code::cast(obj)), RelocInfo::CODE_TARGET);
+  return obj;
 }
 
 
@@ -1335,7 +1318,8 @@ Object* CallStubCompiler::CompileCallField(JSObject* object,
 
   // Handle call cache miss.
   __ bind(&miss);
-  GenerateMissBranch();
+  Object* obj = GenerateMissBranch();
+  if (obj->IsFailure()) return obj;
 
   // Return the generated code.
   return GetCode(FIELD, name);
@@ -1382,16 +1366,18 @@ Object* CallStubCompiler::CompileArrayPushCall(Object* object,
     __ mov(eax, FieldOperand(edx, JSArray::kLengthOffset));
     __ ret((argc + 1) * kPointerSize);
   } else {
+    Label call_builtin;
+
     // Get the elements array of the object.
     __ mov(ebx, FieldOperand(edx, JSArray::kElementsOffset));
 
-    // Check that the elements are in fast mode (not dictionary).
+    // Check that the elements are in fast mode and writable.
     __ cmp(FieldOperand(ebx, HeapObject::kMapOffset),
            Immediate(Factory::fixed_array_map()));
-    __ j(not_equal, &miss);
+    __ j(not_equal, &call_builtin);
 
     if (argc == 1) {  // Otherwise fall through to call builtin.
-      Label call_builtin, exit, with_write_barrier, attempt_to_grow_elements;
+      Label exit, with_write_barrier, attempt_to_grow_elements;
 
       // Get the array's length into eax and calculate new length.
       __ mov(eax, FieldOperand(edx, JSArray::kLengthOffset));
@@ -1472,17 +1458,17 @@ Object* CallStubCompiler::CompileArrayPushCall(Object* object,
 
       // Elements are in new space, so write barrier is not required.
       __ ret((argc + 1) * kPointerSize);
-
-      __ bind(&call_builtin);
     }
 
+    __ bind(&call_builtin);
     __ TailCallExternalReference(ExternalReference(Builtins::c_ArrayPush),
                                  argc + 1,
                                  1);
   }
 
   __ bind(&miss);
-  GenerateMissBranch();
+  Object* obj = GenerateMissBranch();
+  if (obj->IsFailure()) return obj;
 
   // Return the generated code.
   return GetCode(function);
@@ -1526,10 +1512,10 @@ Object* CallStubCompiler::CompileArrayPopCall(Object* object,
   // Get the elements array of the object.
   __ mov(ebx, FieldOperand(edx, JSArray::kElementsOffset));
 
-  // Check that the elements are in fast mode (not dictionary).
+  // Check that the elements are in fast mode and writable.
   __ cmp(FieldOperand(ebx, HeapObject::kMapOffset),
          Immediate(Factory::fixed_array_map()));
-  __ j(not_equal, &miss);
+  __ j(not_equal, &call_builtin);
 
   // Get the array's length into ecx and calculate new length.
   __ mov(ecx, FieldOperand(edx, JSArray::kLengthOffset));
@@ -1565,7 +1551,8 @@ Object* CallStubCompiler::CompileArrayPopCall(Object* object,
                                1);
 
   __ bind(&miss);
-  GenerateMissBranch();
+  Object* obj = GenerateMissBranch();
+  if (obj->IsFailure()) return obj;
 
   // Return the generated code.
   return GetCode(function);
@@ -1585,6 +1572,9 @@ Object* CallStubCompiler::CompileStringCharCodeAtCall(Object* object,
   //  -- esp[(argc + 1) * 4] : receiver
   // -----------------------------------
 
+  // If object is not a string, bail out to regular call.
+  if (!object->IsString()) return Heap::undefined_value();
+
   const int argc = arguments().immediate();
 
   Label miss;
@@ -1595,6 +1585,7 @@ Object* CallStubCompiler::CompileStringCharCodeAtCall(Object* object,
   GenerateDirectLoadGlobalFunctionPrototype(masm(),
                                             Context::STRING_FUNCTION_INDEX,
                                             eax);
+  ASSERT(object != holder);
   CheckPrototypes(JSObject::cast(object->GetPrototype()), eax, holder,
                   ebx, edx, edi, name, &miss);
 
@@ -1628,8 +1619,8 @@ Object* CallStubCompiler::CompileStringCharCodeAtCall(Object* object,
   __ ret((argc + 1) * kPointerSize);
 
   __ bind(&miss);
-
-  GenerateMissBranch();
+  Object* obj = GenerateMissBranch();
+  if (obj->IsFailure()) return obj;
 
   // Return the generated code.
   return GetCode(function);
@@ -1649,6 +1640,9 @@ Object* CallStubCompiler::CompileStringCharAtCall(Object* object,
   //  -- esp[(argc + 1) * 4] : receiver
   // -----------------------------------
 
+  // If object is not a string, bail out to regular call.
+  if (!object->IsString()) return Heap::undefined_value();
+
   const int argc = arguments().immediate();
 
   Label miss;
@@ -1660,6 +1654,7 @@ Object* CallStubCompiler::CompileStringCharAtCall(Object* object,
   GenerateDirectLoadGlobalFunctionPrototype(masm(),
                                             Context::STRING_FUNCTION_INDEX,
                                             eax);
+  ASSERT(object != holder);
   CheckPrototypes(JSObject::cast(object->GetPrototype()), eax, holder,
                   ebx, edx, edi, name, &miss);
 
@@ -1695,9 +1690,8 @@ Object* CallStubCompiler::CompileStringCharAtCall(Object* object,
   __ ret((argc + 1) * kPointerSize);
 
   __ bind(&miss);
-  // Restore function name in ecx.
-
-  GenerateMissBranch();
+  Object* obj = GenerateMissBranch();
+  if (obj->IsFailure()) return obj;
 
   // Return the generated code.
   return GetCode(function);
@@ -1851,7 +1845,8 @@ Object* CallStubCompiler::CompileCallConstant(Object* object,
     FreeSpaceForFastApiCall(masm(), eax);
   }
   __ bind(&miss_in_smi_check);
-  GenerateMissBranch();
+  Object* obj = GenerateMissBranch();
+  if (obj->IsFailure()) return obj;
 
   // Return the generated code.
   return GetCode(function);
@@ -1915,7 +1910,8 @@ Object* CallStubCompiler::CompileCallInterceptor(JSObject* object,
 
   // Handle load cache miss.
   __ bind(&miss);
-  GenerateMissBranch();
+  Object* obj = GenerateMissBranch();
+  if (obj->IsFailure()) return obj;
 
   // Return the generated code.
   return GetCode(INTERCEPTOR, name);
@@ -2000,7 +1996,8 @@ Object* CallStubCompiler::CompileCallGlobal(JSObject* object,
   // Handle call cache miss.
   __ bind(&miss);
   __ IncrementCounter(&Counters::call_global_inline_miss, 1);
-  GenerateMissBranch();
+  Object* obj = GenerateMissBranch();
+  if (obj->IsFailure()) return obj;
 
   // Return the generated code.
   return GetCode(NORMAL, name);

@@ -358,6 +358,10 @@ class CodeGenerator: public AstVisitor {
     return FieldOperand(array, index_as_smi, times_half_pointer_size, offset);
   }
 
+  static Operand ContextOperand(Register context, int index) {
+    return Operand(context, Context::SlotOffset(index));
+  }
+
  private:
   // Construction/Destruction
   explicit CodeGenerator(MacroAssembler* masm);
@@ -429,10 +433,6 @@ class CodeGenerator: public AstVisitor {
 
   // The following are used by class Reference.
   void LoadReference(Reference* ref);
-
-  static Operand ContextOperand(Register context, int index) {
-    return Operand(context, Context::SlotOffset(index));
-  }
 
   Operand SlotOperand(Slot* slot, Register tmp);
 
@@ -519,15 +519,33 @@ class CodeGenerator: public AstVisitor {
   void GenericBinaryOperation(BinaryOperation* expr,
                               OverwriteMode overwrite_mode);
 
+  // Emits code sequence that jumps to a JumpTarget if the inputs
+  // are both smis.  Cannot be in MacroAssembler because it takes
+  // advantage of TypeInfo to skip unneeded checks.
+  // Allocates a temporary register, possibly spilling from the frame,
+  // if it needs to check both left and right.
+  void JumpIfBothSmiUsingTypeInfo(Result* left,
+                                  Result* right,
+                                  JumpTarget* both_smi);
+
   // Emits code sequence that jumps to deferred code if the inputs
   // are not both smis.  Cannot be in MacroAssembler because it takes
-  // advantage of TypeInfo to skip unneeded checks.
+  // a deferred code object.
   void JumpIfNotBothSmiUsingTypeInfo(Register left,
                                      Register right,
                                      Register scratch,
                                      TypeInfo left_info,
                                      TypeInfo right_info,
                                      DeferredCode* deferred);
+
+  // Emits code sequence that jumps to the label if the inputs
+  // are not both smis.
+  void JumpIfNotBothSmiUsingTypeInfo(Register left,
+                                     Register right,
+                                     Register scratch,
+                                     TypeInfo left_info,
+                                     TypeInfo right_info,
+                                     Label* on_non_smi);
 
   // If possible, combine two constant smi values using op to produce
   // a smi result, and push it on the virtual frame, all at compile time.
@@ -560,6 +578,17 @@ class CodeGenerator: public AstVisitor {
                   Condition cc,
                   bool strict,
                   ControlDestination* destination);
+
+  // If at least one of the sides is a constant smi, generate optimized code.
+  void ConstantSmiComparison(Condition cc,
+                             bool strict,
+                             ControlDestination* destination,
+                             Result* left_side,
+                             Result* right_side,
+                             bool left_side_constant_smi,
+                             bool right_side_constant_smi,
+                             bool is_loop_condition);
+
   void GenerateInlineNumberComparison(Result* left_side,
                                       Result* right_side,
                                       Condition cc,
@@ -615,14 +644,17 @@ class CodeGenerator: public AstVisitor {
   // Instantiate the function based on the shared function info.
   Result InstantiateFunction(Handle<SharedFunctionInfo> function_info);
 
-  // Support for type checks.
+  // Support for types.
   void GenerateIsSmi(ZoneList<Expression*>* args);
   void GenerateIsNonNegativeSmi(ZoneList<Expression*>* args);
   void GenerateIsArray(ZoneList<Expression*>* args);
   void GenerateIsRegExp(ZoneList<Expression*>* args);
   void GenerateIsObject(ZoneList<Expression*>* args);
+  void GenerateIsSpecObject(ZoneList<Expression*>* args);
   void GenerateIsFunction(ZoneList<Expression*>* args);
   void GenerateIsUndetectableObject(ZoneList<Expression*>* args);
+  void GenerateIsStringWrapperSafeForDefaultValueOf(
+      ZoneList<Expression*>* args);
 
   // Support for construct call checks.
   void GenerateIsConstructCall(ZoneList<Expression*>* args);
@@ -688,6 +720,9 @@ class CodeGenerator: public AstVisitor {
   void GenerateMathSin(ZoneList<Expression*>* args);
   void GenerateMathCos(ZoneList<Expression*>* args);
   void GenerateMathSqrt(ZoneList<Expression*>* args);
+
+  // Check whether two RegExps are equivalent
+  void GenerateIsRegExpEquivalent(ZoneList<Expression*>* args);
 
   // Simple condition analysis.
   enum ConditionAnalysis {
@@ -775,6 +810,18 @@ class TranscendentalCacheStub: public CodeStub {
   int MinorKey() { return type_; }
   Runtime::FunctionId RuntimeFunction();
   void GenerateOperation(MacroAssembler* masm);
+};
+
+
+class ToBooleanStub: public CodeStub {
+ public:
+  ToBooleanStub() { }
+
+  void Generate(MacroAssembler* masm);
+
+ private:
+  Major MajorKey() { return ToBoolean; }
+  int MinorKey() { return 0; }
 };
 
 

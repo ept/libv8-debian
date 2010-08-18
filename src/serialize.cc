@@ -237,6 +237,10 @@ void ExternalReferenceTable::PopulateTable() {
       DEBUG_ADDRESS,
       Debug::k_debug_break_return_address << kDebugIdShift,
       "Debug::debug_break_return_address()");
+  Add(Debug_Address(Debug::k_restarter_frame_function_pointer).address(),
+      DEBUG_ADDRESS,
+      Debug::k_restarter_frame_function_pointer << kDebugIdShift,
+      "Debug::restarter_frame_function_pointer_address()");
   const char* debug_register_format = "Debug::register_address(%i)";
   int dr_format_length = StrLength(debug_register_format);
   for (int i = 0; i < kNumJSCallerSaved; ++i) {
@@ -360,6 +364,7 @@ void ExternalReferenceTable::PopulateTable() {
       UNCLASSIFIED,
       5,
       "StackGuard::address_of_real_jslimit()");
+#ifndef V8_INTERPRETED_REGEXP
   Add(ExternalReference::address_of_regexp_stack_limit().address(),
       UNCLASSIFIED,
       6,
@@ -376,6 +381,7 @@ void ExternalReferenceTable::PopulateTable() {
       UNCLASSIFIED,
       9,
       "OffsetsVector::static_offsets_vector");
+#endif  // V8_INTERPRETED_REGEXP
   Add(ExternalReference::new_space_start().address(),
       UNCLASSIFIED,
       10,
@@ -476,6 +482,7 @@ ExternalReferenceEncoder::ExternalReferenceEncoder()
 
 uint32_t ExternalReferenceEncoder::Encode(Address key) const {
   int index = IndexOf(key);
+  ASSERT(key == NULL || index >= 0);
   return index >=0 ? ExternalReferenceTable::instance()->code(index) : 0;
 }
 
@@ -673,14 +680,6 @@ void Deserializer::ReadObject(int space_number,
     LOG(SnapshotPositionEvent(address, source_->position()));
   }
   ReadChunk(current, limit, space_number, address);
-
-  if (space == Heap::map_space()) {
-    ASSERT(size == Map::kSize);
-    HeapObject* obj = HeapObject::FromAddress(address);
-    Map* map = reinterpret_cast<Map*>(obj);
-    map->set_scavenger(Heap::GetScavenger(map->instance_type(),
-                                          map->instance_size()));
-  }
 }
 
 

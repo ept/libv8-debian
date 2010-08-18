@@ -236,6 +236,7 @@ size_t OS::AllocateAlignment() {
 void* OS::Allocate(const size_t requested,
                    size_t* allocated,
                    bool is_executable) {
+  // TODO(805): Port randomization of allocated executable memory to Linux.
   const size_t msize = RoundUp(requested, sysconf(_SC_PAGESIZE));
   int prot = PROT_READ | PROT_WRITE | (is_executable ? PROT_EXEC : 0);
   void* mbase = mmap(NULL, msize, prot, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
@@ -289,9 +290,10 @@ void OS::Abort() {
 void OS::DebugBreak() {
 // TODO(lrn): Introduce processor define for runtime system (!= V8_ARCH_x,
 //  which is the architecture of generated code).
-#if (defined(__arm__) || defined(__thumb__)) && \
-    defined(CAN_USE_ARMV5_INSTRUCTIONS)
+#if (defined(__arm__) || defined(__thumb__))
+# if defined(CAN_USE_ARMV5_INSTRUCTIONS)
   asm("bkpt 0");
+# endif
 #elif defined(__mips__)
   asm("break");
 #else

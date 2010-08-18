@@ -226,11 +226,13 @@ TEST(4) {
     double a;
     double b;
     double c;
+    float d;
+    float e;
   } T;
   T t;
 
   // Create a function that accepts &t, and loads, manipulates, and stores
-  // the doubles t.a, t.b, and t.c.
+  // the doubles t.a, t.b, and t.c, and floats t.d, t.e.
   Assembler assm(NULL, 0);
   Label L, C;
 
@@ -252,6 +254,15 @@ TEST(4) {
     __ vmov(d4, r2, r3);
     __ vstr(d4, r4, OFFSET_OF(T, b));
 
+    // Load t.d and t.e, switch values, and store back to the struct.
+    __ vldr(s0, r4, OFFSET_OF(T, d));
+    __ vldr(s1, r4, OFFSET_OF(T, e));
+    __ vmov(s2, s0);
+    __ vmov(s0, s1);
+    __ vmov(s1, s2);
+    __ vstr(s0, r4, OFFSET_OF(T, d));
+    __ vstr(s1, r4, OFFSET_OF(T, e));
+
     __ ldm(ia_w, sp, r4.bit() | fp.bit() | pc.bit());
 
     CodeDesc desc;
@@ -267,8 +278,12 @@ TEST(4) {
     t.a = 1.5;
     t.b = 2.75;
     t.c = 17.17;
+    t.d = 4.5;
+    t.e = 9.0;
     Object* dummy = CALL_GENERATED_CODE(f, &t, 0, 0, 0, 0);
     USE(dummy);
+    CHECK_EQ(4.5, t.e);
+    CHECK_EQ(9.0, t.d);
     CHECK_EQ(4.25, t.c);
     CHECK_EQ(4.25, t.b);
     CHECK_EQ(1.5, t.a);
@@ -307,6 +322,40 @@ TEST(5) {
                 CALL_GENERATED_CODE(f, 0xAAAAAAAA, 0, 0, 0, 0));
     ::printf("f() = %d\n", res);
     CHECK_EQ(-7, res);
+  }
+}
+
+
+TEST(6) {
+  // Test saturating instructions.
+  InitializeVM();
+  v8::HandleScope scope;
+
+  Assembler assm(NULL, 0);
+
+  if (CpuFeatures::IsSupported(ARMv7)) {
+    CpuFeatures::Scope scope(ARMv7);
+    __ usat(r1, 8, Operand(r0));           // Sat 0xFFFF to 0-255 = 0xFF.
+    __ usat(r2, 12, Operand(r0, ASR, 9));  // Sat (0xFFFF>>9) to 0-4095 = 0x7F.
+    __ usat(r3, 1, Operand(r0, LSL, 16));  // Sat (0xFFFF<<16) to 0-1 = 0x0.
+    __ add(r0, r1, Operand(r2));
+    __ add(r0, r0, Operand(r3));
+    __ mov(pc, Operand(lr));
+
+    CodeDesc desc;
+    assm.GetCode(&desc);
+    Object* code = Heap::CreateCode(desc,
+                                    Code::ComputeFlags(Code::STUB),
+                                    Handle<Object>(Heap::undefined_value()));
+    CHECK(code->IsCode());
+#ifdef DEBUG
+    Code::cast(code)->Print();
+#endif
+    F1 f = FUNCTION_CAST<F1>(Code::cast(code)->entry());
+    int res = reinterpret_cast<int>(
+                CALL_GENERATED_CODE(f, 0xFFFF, 0, 0, 0, 0));
+    ::printf("f() = %d\n", res);
+    CHECK_EQ(382, res);
   }
 }
 

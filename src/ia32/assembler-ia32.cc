@@ -158,7 +158,8 @@ void Displacement::init(Label* L, Type type) {
 
 const int RelocInfo::kApplyMask =
   RelocInfo::kCodeTargetMask | 1 << RelocInfo::RUNTIME_ENTRY |
-    1 << RelocInfo::JS_RETURN | 1 << RelocInfo::INTERNAL_REFERENCE;
+    1 << RelocInfo::JS_RETURN | 1 << RelocInfo::INTERNAL_REFERENCE |
+    1 << RelocInfo::DEBUG_BREAK_SLOT;
 
 
 bool RelocInfo::IsCodedSpecially() {
@@ -1136,6 +1137,21 @@ void Assembler::rcl(Register dst, uint8_t imm8) {
   } else {
     EMIT(0xC1);
     EMIT(0xD0 | dst.code());
+    EMIT(imm8);
+  }
+}
+
+
+void Assembler::rcr(Register dst, uint8_t imm8) {
+  EnsureSpace ensure_space(this);
+  last_pc_ = pc_;
+  ASSERT(is_uint5(imm8));  // illegal shift count
+  if (imm8 == 1) {
+    EMIT(0xD1);
+    EMIT(0xD8 | dst.code());
+  } else {
+    EMIT(0xC1);
+    EMIT(0xD8 | dst.code());
     EMIT(imm8);
   }
 }
