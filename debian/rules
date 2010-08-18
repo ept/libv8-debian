@@ -41,7 +41,7 @@ clean::
 
 common-post-build-impl::
 	# need to preload freshly compiled lib.
-	LD_PRELOAD=$(CURDIR)/libv8-2.3.9.so $(CURDIR)/tools/test.py --no-build cctest mjsunit
+	LD_PRELOAD=$(CURDIR)/libv8-2.3.9.so $(CURDIR)/tools/test.py --no-build cctest mjsunit message
 
 common-install-impl::
 	cd debian/tmp/usr/lib/ ; \
