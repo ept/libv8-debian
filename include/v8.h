@@ -137,6 +137,9 @@ class Top;
 /**
  * A weak reference callback function.
  *
+ * This callback should either explicitly invoke Dispose on |object| if
+ * V8 wrapper is not needed anymore, or 'revive' it by invocation of MakeWeak.
+ *
  * \param object the weak global object to be reclaimed by the garbage collector
  * \param parameter the value passed in when making the weak global object
  */
@@ -146,9 +149,9 @@ typedef void (*WeakReferenceCallback)(Persistent<Value> object,
 
 // --- H a n d l e s ---
 
-#define TYPE_CHECK(T, S)                              \
-  while (false) {                                     \
-    *(static_cast<T**>(0)) = static_cast<S*>(0);      \
+#define TYPE_CHECK(T, S)                                       \
+  while (false) {                                              \
+    *(static_cast<T* volatile*>(0)) = static_cast<S*>(0);      \
   }
 
 /**
@@ -915,6 +918,11 @@ class Value : public Data {
    * Returns true if this value is a Date.
    */
   V8EXPORT bool IsDate() const;
+
+  /**
+   * Returns true if this value is a RegExp.
+   */
+  V8EXPORT bool IsRegExp() const;
 
   V8EXPORT Local<Boolean> ToBoolean() const;
   V8EXPORT Local<Number> ToNumber() const;
@@ -1816,9 +1824,9 @@ typedef Handle<Value> (*IndexedPropertySetter)(uint32_t index,
 
 /**
  * Returns a non-empty handle if the interceptor intercepts the request.
- * The result is true if the property exists and false otherwise.
+ * The result is an integer encoding property attributes.
  */
-typedef Handle<Boolean> (*IndexedPropertyQuery)(uint32_t index,
+typedef Handle<Integer> (*IndexedPropertyQuery)(uint32_t index,
                                                 const AccessorInfo& info);
 
 /**
@@ -2137,6 +2145,7 @@ class V8EXPORT ObjectTemplate : public Template {
                                  IndexedPropertyDeleter deleter = 0,
                                  IndexedPropertyEnumerator enumerator = 0,
                                  Handle<Value> data = Handle<Value>());
+
   /**
    * Sets the callback to be used when calling instances created from
    * this template as a function.  If no callback is set, instances

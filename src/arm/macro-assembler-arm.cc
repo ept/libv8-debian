@@ -281,6 +281,37 @@ void MacroAssembler::Bfc(Register dst, int lsb, int width, Condition cond) {
 }
 
 
+void MacroAssembler::Usat(Register dst, int satpos, const Operand& src,
+                          Condition cond) {
+  if (!CpuFeatures::IsSupported(ARMv7)) {
+    ASSERT(!dst.is(pc) && !src.rm().is(pc));
+    ASSERT((satpos >= 0) && (satpos <= 31));
+
+    // These asserts are required to ensure compatibility with the ARMv7
+    // implementation.
+    ASSERT((src.shift_op() == ASR) || (src.shift_op() == LSL));
+    ASSERT(src.rs().is(no_reg));
+
+    Label done;
+    int satval = (1 << satpos) - 1;
+
+    if (cond != al) {
+      b(NegateCondition(cond), &done);  // Skip saturate if !condition.
+    }
+    if (!(src.is_reg() && dst.is(src.rm()))) {
+      mov(dst, src);
+    }
+    tst(dst, Operand(~satval));
+    b(eq, &done);
+    mov(dst, Operand(0), LeaveCC, mi);  // 0 if negative.
+    mov(dst, Operand(satval), LeaveCC, pl);  // satval if positive.
+    bind(&done);
+  } else {
+    usat(dst, satpos, src, cond);
+  }
+}
+
+
 void MacroAssembler::SmiJumpTable(Register index, Vector<Label*> targets) {
   // Empty the const pool.
   CheckConstPool(true, true);
@@ -726,7 +757,7 @@ void MacroAssembler::InvokeFunction(Register fun,
                       SharedFunctionInfo::kFormalParameterCountOffset));
   mov(expected_reg, Operand(expected_reg, ASR, kSmiTagSize));
   ldr(code_reg,
-      MemOperand(code_reg, SharedFunctionInfo::kCodeOffset - kHeapObjectTag));
+      MemOperand(r1, JSFunction::kCodeOffset - kHeapObjectTag));
   add(code_reg, code_reg, Operand(Code::kHeaderSize - kHeapObjectTag));
 
   ParameterCount expected(expected_reg);
@@ -1477,8 +1508,7 @@ void MacroAssembler::GetBuiltinEntry(Register target, Builtins::JavaScript id) {
     // Make sure the code objects in the builtins object and in the
     // builtin function are the same.
     push(r1);
-    ldr(r1, FieldMemOperand(r1, JSFunction::kSharedFunctionInfoOffset));
-    ldr(r1, FieldMemOperand(r1, SharedFunctionInfo::kCodeOffset));
+    ldr(r1, FieldMemOperand(r1, JSFunction::kCodeOffset));
     cmp(r1, target);
     Assert(eq, "Builtin code object changed");
     pop(r1);
@@ -1533,6 +1563,25 @@ void MacroAssembler::AssertRegisterIsRoot(Register reg,
     LoadRoot(ip, index);
     cmp(reg, ip);
     Check(eq, "Register did not match expected root");
+  }
+}
+
+
+void MacroAssembler::AssertFastElements(Register elements) {
+  if (FLAG_debug_code) {
+    ASSERT(!elements.is(ip));
+    Label ok;
+    push(elements);
+    ldr(elements, FieldMemOperand(elements, HeapObject::kMapOffset));
+    LoadRoot(ip, Heap::kFixedArrayMapRootIndex);
+    cmp(elements, ip);
+    b(eq, &ok);
+    LoadRoot(ip, Heap::kFixedCOWArrayMapRootIndex);
+    cmp(elements, ip);
+    b(eq, &ok);
+    Abort("JSObject with fast elements map has slow elements");
+    bind(&ok);
+    pop(elements);
   }
 }
 
@@ -1625,6 +1674,13 @@ void MacroAssembler::JumpIfEitherSmi(Register reg1,
 }
 
 
+void MacroAssembler::AbortIfSmi(Register object) {
+  ASSERT_EQ(0, kSmiTag);
+  tst(object, Operand(kSmiTagMask));
+  Assert(ne, "Operand is a smi");
+}
+
+
 void MacroAssembler::JumpIfNonSmisNotBothSequentialAsciiStrings(
     Register first,
     Register second,
@@ -1694,6 +1750,34 @@ void MacroAssembler::AllocateHeapNumberWithValue(Register result,
   AllocateHeapNumber(result, scratch1, scratch2, heap_number_map, gc_required);
   sub(scratch1, result, Operand(kHeapObjectTag));
   vstr(value, scratch1, HeapNumber::kValueOffset);
+}
+
+
+// Copies a fixed number of fields of heap objects from src to dst.
+void MacroAssembler::CopyFields(Register dst,
+                                Register src,
+                                RegList temps,
+                                int field_count) {
+  // At least one bit set in the first 15 registers.
+  ASSERT((temps & ((1 << 15) - 1)) != 0);
+  ASSERT((temps & dst.bit()) == 0);
+  ASSERT((temps & src.bit()) == 0);
+  // Primitive implementation using only one temporary register.
+
+  Register tmp = no_reg;
+  // Find a temp register in temps list.
+  for (int i = 0; i < 15; i++) {
+    if ((temps & (1 << i)) != 0) {
+      tmp.set_code(i);
+      break;
+    }
+  }
+  ASSERT(!tmp.is(no_reg));
+
+  for (int i = 0; i < field_count; i++) {
+    ldr(tmp, FieldMemOperand(src, i * kPointerSize));
+    str(tmp, FieldMemOperand(dst, i * kPointerSize));
+  }
 }
 
 

@@ -160,13 +160,22 @@ static Object* DeepCopyBoilerplate(JSObject* boilerplate) {
   switch (copy->GetElementsKind()) {
     case JSObject::FAST_ELEMENTS: {
       FixedArray* elements = FixedArray::cast(copy->elements());
-      for (int i = 0; i < elements->length(); i++) {
-        Object* value = elements->get(i);
-        if (value->IsJSObject()) {
-          JSObject* js_object = JSObject::cast(value);
-          result = DeepCopyBoilerplate(js_object);
-          if (result->IsFailure()) return result;
-          elements->set(i, result);
+      if (elements->map() == Heap::fixed_cow_array_map()) {
+        Counters::cow_arrays_created_runtime.Increment();
+#ifdef DEBUG
+        for (int i = 0; i < elements->length(); i++) {
+          ASSERT(!elements->get(i)->IsJSObject());
+        }
+#endif
+      } else {
+        for (int i = 0; i < elements->length(); i++) {
+          Object* value = elements->get(i);
+          if (value->IsJSObject()) {
+            JSObject* js_object = JSObject::cast(value);
+            result = DeepCopyBoilerplate(js_object);
+            if (result->IsFailure()) return result;
+            elements->set(i, result);
+          }
         }
       }
       break;
@@ -212,23 +221,42 @@ static Handle<Map> ComputeObjectLiteralMap(
     Handle<Context> context,
     Handle<FixedArray> constant_properties,
     bool* is_result_from_cache) {
-  int number_of_properties = constant_properties->length() / 2;
+  int properties_length = constant_properties->length();
+  int number_of_properties = properties_length / 2;
   if (FLAG_canonicalize_object_literal_maps) {
-    // First find prefix of consecutive symbol keys.
+    // Check that there are only symbols and array indices among keys.
     int number_of_symbol_keys = 0;
-    while ((number_of_symbol_keys < number_of_properties) &&
-           (constant_properties->get(number_of_symbol_keys*2)->IsSymbol())) {
-      number_of_symbol_keys++;
+    for (int p = 0; p != properties_length; p += 2) {
+      Object* key = constant_properties->get(p);
+      uint32_t element_index = 0;
+      if (key->IsSymbol()) {
+        number_of_symbol_keys++;
+      } else if (key->ToArrayIndex(&element_index)) {
+        // An index key does not require space in the property backing store.
+        number_of_properties--;
+      } else {
+        // Bail out as a non-symbol non-index key makes caching impossible.
+        // ASSERT to make sure that the if condition after the loop is false.
+        ASSERT(number_of_symbol_keys != number_of_properties);
+        break;
+      }
     }
-    // Based on the number of prefix symbols key we decide whether
-    // to use the map cache in the global context.
+    // If we only have symbols and array indices among keys then we can
+    // use the map cache in the global context.
     const int kMaxKeys = 10;
     if ((number_of_symbol_keys == number_of_properties) &&
         (number_of_symbol_keys < kMaxKeys)) {
       // Create the fixed array with the key.
       Handle<FixedArray> keys = Factory::NewFixedArray(number_of_symbol_keys);
-      for (int i = 0; i < number_of_symbol_keys; i++) {
-        keys->set(i, constant_properties->get(i*2));
+      if (number_of_symbol_keys > 0) {
+        int index = 0;
+        for (int p = 0; p < properties_length; p += 2) {
+          Object* key = constant_properties->get(p);
+          if (key->IsSymbol()) {
+            keys->set(index++, key);
+          }
+        }
+        ASSERT(index == number_of_symbol_keys);
       }
       *is_result_from_cache = true;
       return Factory::ObjectLiteralMapFromCache(context, keys);
@@ -324,18 +352,29 @@ static Handle<Object> CreateArrayLiteralBoilerplate(
       JSFunction::GlobalContextFromLiterals(*literals)->array_function());
   Handle<Object> object = Factory::NewJSObject(constructor);
 
-  Handle<Object> copied_elements = Factory::CopyFixedArray(elements);
+  const bool is_cow = (elements->map() == Heap::fixed_cow_array_map());
+  Handle<FixedArray> copied_elements =
+      is_cow ? elements : Factory::CopyFixedArray(elements);
 
   Handle<FixedArray> content = Handle<FixedArray>::cast(copied_elements);
-  for (int i = 0; i < content->length(); i++) {
-    if (content->get(i)->IsFixedArray()) {
-      // The value contains the constant_properties of a
-      // simple object literal.
-      Handle<FixedArray> fa(FixedArray::cast(content->get(i)));
-      Handle<Object> result =
-        CreateLiteralBoilerplate(literals, fa);
-      if (result.is_null()) return result;
-      content->set(i, *result);
+  if (is_cow) {
+#ifdef DEBUG
+    // Copy-on-write arrays must be shallow (and simple).
+    for (int i = 0; i < content->length(); i++) {
+      ASSERT(!content->get(i)->IsFixedArray());
+    }
+#endif
+  } else {
+    for (int i = 0; i < content->length(); i++) {
+      if (content->get(i)->IsFixedArray()) {
+        // The value contains the constant_properties of a
+        // simple object literal.
+        Handle<FixedArray> fa(FixedArray::cast(content->get(i)));
+        Handle<Object> result =
+            CreateLiteralBoilerplate(literals, fa);
+        if (result.is_null()) return result;
+        content->set(i, *result);
+      }
     }
   }
 
@@ -463,6 +502,10 @@ static Object* Runtime_CreateArrayLiteralShallow(Arguments args) {
     if (boilerplate.is_null()) return Failure::Exception();
     // Update the functions literal and return the boilerplate.
     literals->set(literals_index, *boilerplate);
+  }
+  if (JSObject::cast(*boilerplate)->elements()->map() ==
+      Heap::fixed_cow_array_map()) {
+    Counters::cow_arrays_created_runtime.Increment();
   }
   return Heap::CopyJSObject(JSObject::cast(*boilerplate));
 }
@@ -1608,7 +1651,8 @@ static Object* Runtime_SetCode(Arguments args) {
     }
     // Set the code, scope info, formal parameter count,
     // and the length of the target function.
-    target->set_code(fun->code());
+    target->shared()->set_code(shared->code());
+    target->set_code(shared->code());
     target->shared()->set_scope_info(shared->scope_info());
     target->shared()->set_length(shared->length());
     target->shared()->set_formal_parameter_count(
@@ -6679,9 +6723,13 @@ static Object* Runtime_DateYMDFromTime(Arguments args) {
   int year, month, day;
   DateYMDFromTime(static_cast<int>(floor(t / 86400000)), year, month, day);
 
-  res_array->SetElement(0, Smi::FromInt(year));
-  res_array->SetElement(1, Smi::FromInt(month));
-  res_array->SetElement(2, Smi::FromInt(day));
+  RUNTIME_ASSERT(res_array->elements()->map() == Heap::fixed_array_map());
+  FixedArray* elms = FixedArray::cast(res_array->elements());
+  RUNTIME_ASSERT(elms->length() == 3);
+
+  elms->set(0, Smi::FromInt(year));
+  elms->set(1, Smi::FromInt(month));
+  elms->set(2, Smi::FromInt(day));
 
   return Heap::undefined_value();
 }
@@ -6729,6 +6777,32 @@ static Object* Runtime_NewClosure(Arguments args) {
       : NOT_TENURED;  // Allocate local closures in new space.
   Handle<JSFunction> result =
       Factory::NewFunctionFromSharedFunctionInfo(shared, context, pretenure);
+  return *result;
+}
+
+static Object* Runtime_NewObjectFromBound(Arguments args) {
+  HandleScope scope;
+  ASSERT(args.length() == 2);
+  CONVERT_ARG_CHECKED(JSFunction, function, 0);
+  CONVERT_ARG_CHECKED(JSArray, params, 1);
+
+  RUNTIME_ASSERT(params->HasFastElements());
+  FixedArray* fixed = FixedArray::cast(params->elements());
+
+  int fixed_length = Smi::cast(params->length())->value();
+  SmartPointer<Object**> param_data(NewArray<Object**>(fixed_length));
+  for (int i = 0; i < fixed_length; i++) {
+    Handle<Object> val = Handle<Object>(fixed->get(i));
+    param_data[i] = val.location();
+  }
+
+  bool exception = false;
+  Handle<Object> result = Execution::New(
+      function, fixed_length, *param_data, &exception);
+  if (exception) {
+      return Failure::Exception();
+  }
+  ASSERT(!result.is_null());
   return *result;
 }
 
@@ -6825,7 +6899,7 @@ static Object* Runtime_LazyCompile(Arguments args) {
 
   Handle<JSFunction> function = args.at<JSFunction>(0);
 #ifdef DEBUG
-  if (FLAG_trace_lazy) {
+  if (FLAG_trace_lazy && !function->shared()->is_compiled()) {
     PrintF("[lazy: ");
     function->shared()->name()->Print();
     PrintF("]\n");
@@ -6869,8 +6943,7 @@ static Object* Runtime_NewContext(Arguments args) {
   ASSERT(args.length() == 1);
 
   CONVERT_CHECKED(JSFunction, function, args[0]);
-  int length =
-      ScopeInfo<>::NumberOfContextSlots(function->shared()->scope_info());
+  int length = function->shared()->scope_info()->NumberOfContextSlots();
   Object* result = Heap::AllocateFunctionContext(length, function);
   if (result->IsFailure()) return result;
 
@@ -7544,6 +7617,26 @@ static Object* Runtime_SetNewFunctionAttributes(Arguments args) {
 }
 
 
+static Object* Runtime_AllocateInNewSpace(Arguments args) {
+  // Allocate a block of memory in NewSpace (filled with a filler).
+  // Use as fallback for allocation in generated code when NewSpace
+  // is full.
+  ASSERT(args.length() == 1);
+  CONVERT_ARG_CHECKED(Smi, size_smi, 0);
+  int size = size_smi->value();
+  RUNTIME_ASSERT(IsAligned(size, kPointerSize));
+  RUNTIME_ASSERT(size > 0);
+  static const int kMinFreeNewSpaceAfterGC =
+      Heap::InitialSemiSpaceSize() * 3/4;
+  RUNTIME_ASSERT(size <= kMinFreeNewSpaceAfterGC);
+  Object* allocation = Heap::new_space()->AllocateRaw(size);
+  if (!allocation->IsFailure()) {
+    Heap::CreateFillerObjectAt(HeapObject::cast(allocation)->address(), size);
+  }
+  return allocation;
+}
+
+
 // Push an array unto an array of arrays if it is not already in the
 // array.  Returns true if the element was pushed on the stack and
 // false otherwise.
@@ -7992,7 +8085,8 @@ static Object* Runtime_MoveArrayContents(Arguments args) {
   CONVERT_CHECKED(JSArray, to, args[1]);
   HeapObject* new_elements = from->elements();
   Object* new_map;
-  if (new_elements->map() == Heap::fixed_array_map()) {
+  if (new_elements->map() == Heap::fixed_array_map() ||
+      new_elements->map() == Heap::fixed_cow_array_map()) {
     new_map = to->map()->GetFastElementsMap();
   } else {
     new_map = to->map()->GetSlowElementsMap();
@@ -8492,7 +8586,7 @@ static Object* Runtime_GetFrameDetails(Arguments args) {
 
   // Get scope info and read from it for local variable information.
   Handle<JSFunction> function(JSFunction::cast(it.frame()->function()));
-  Handle<Object> scope_info(function->shared()->scope_info());
+  Handle<SerializedScopeInfo> scope_info(function->shared()->scope_info());
   ScopeInfo<> info(*scope_info);
 
   // Get the context.
@@ -8521,9 +8615,7 @@ static Object* Runtime_GetFrameDetails(Arguments args) {
       }
       ASSERT(context->is_function_context());
       locals->set(i * 2 + 1,
-                  context->get(ScopeInfo<>::ContextSlotIndex(*scope_info,
-                                                             *name,
-                                                             NULL)));
+                  context->get(scope_info->ContextSlotIndex(*name, NULL)));
     }
   }
 
@@ -8663,18 +8755,17 @@ static Object* Runtime_GetFrameDetails(Arguments args) {
 
 
 // Copy all the context locals into an object used to materialize a scope.
-static void CopyContextLocalsToScopeObject(Handle<SharedFunctionInfo> shared,
-                                           ScopeInfo<>& scope_info,
-                                           Handle<Context> context,
-                                           Handle<JSObject> scope_object) {
+static void CopyContextLocalsToScopeObject(
+    Handle<SerializedScopeInfo> serialized_scope_info,
+    ScopeInfo<>& scope_info,
+    Handle<Context> context,
+    Handle<JSObject> scope_object) {
   // Fill all context locals to the context extension.
   for (int i = Context::MIN_CONTEXT_SLOTS;
        i < scope_info.number_of_context_slots();
        i++) {
-    int context_index =
-        ScopeInfo<>::ContextSlotIndex(shared->scope_info(),
-                                      *scope_info.context_slot_name(i),
-                                      NULL);
+    int context_index = serialized_scope_info->ContextSlotIndex(
+        *scope_info.context_slot_name(i), NULL);
 
     // Don't include the arguments shadow (.arguments) context variable.
     if (*scope_info.context_slot_name(i) != Heap::arguments_shadow_symbol()) {
@@ -8691,7 +8782,8 @@ static void CopyContextLocalsToScopeObject(Handle<SharedFunctionInfo> shared,
 static Handle<JSObject> MaterializeLocalScope(JavaScriptFrame* frame) {
   Handle<JSFunction> function(JSFunction::cast(frame->function()));
   Handle<SharedFunctionInfo> shared(function->shared());
-  ScopeInfo<> scope_info(shared->scope_info());
+  Handle<SerializedScopeInfo> serialized_scope_info(shared->scope_info());
+  ScopeInfo<> scope_info(*serialized_scope_info);
 
   // Allocate and initialize a JSObject with all the arguments, stack locals
   // heap locals and extension properties of the debugged function.
@@ -8714,7 +8806,7 @@ static Handle<JSObject> MaterializeLocalScope(JavaScriptFrame* frame) {
   // Third fill all context locals.
   Handle<Context> frame_context(Context::cast(frame->context()));
   Handle<Context> function_context(frame_context->fcontext());
-  CopyContextLocalsToScopeObject(shared, scope_info,
+  CopyContextLocalsToScopeObject(serialized_scope_info, scope_info,
                                  function_context, local_scope);
 
   // Finally copy any properties from the function context extension. This will
@@ -8742,7 +8834,8 @@ static Handle<JSObject> MaterializeClosure(Handle<Context> context) {
   ASSERT(context->is_function_context());
 
   Handle<SharedFunctionInfo> shared(context->closure()->shared());
-  ScopeInfo<> scope_info(shared->scope_info());
+  Handle<SerializedScopeInfo> serialized_scope_info(shared->scope_info());
+  ScopeInfo<> scope_info(*serialized_scope_info);
 
   // Allocate and initialize a JSObject with all the content of theis function
   // closure.
@@ -8750,9 +8843,8 @@ static Handle<JSObject> MaterializeClosure(Handle<Context> context) {
 
   // Check whether the arguments shadow object exists.
   int arguments_shadow_index =
-      ScopeInfo<>::ContextSlotIndex(shared->scope_info(),
-                                    Heap::arguments_shadow_symbol(),
-                                    NULL);
+      shared->scope_info()->ContextSlotIndex(Heap::arguments_shadow_symbol(),
+                                             NULL);
   if (arguments_shadow_index >= 0) {
     // In this case all the arguments are available in the arguments shadow
     // object.
@@ -8766,7 +8858,8 @@ static Handle<JSObject> MaterializeClosure(Handle<Context> context) {
   }
 
   // Fill all context locals to the context extension.
-  CopyContextLocalsToScopeObject(shared, scope_info, context, closure_scope);
+  CopyContextLocalsToScopeObject(serialized_scope_info, scope_info,
+                                 context, closure_scope);
 
   // Finally copy any properties from the function context extension. This will
   // be variables introduced by eval.
@@ -8815,8 +8908,8 @@ class ScopeIterator {
       // created for evaluating top level code and it is not a real local scope.
       // Checking for the existence of .result seems fragile, but the scope info
       // saved with the code object does not otherwise have that information.
-      int index = ScopeInfo<>::StackSlotIndex(function_->shared()->scope_info(),
-                                              Heap::result_symbol());
+      int index = function_->shared()->scope_info()->
+          StackSlotIndex(Heap::result_symbol());
       at_local_ = index < 0;
     } else if (context_->is_function_context()) {
       at_local_ = true;
@@ -9200,6 +9293,17 @@ static Object* Runtime_GetThreadDetails(Arguments args) {
 }
 
 
+// Sets the disable break state
+// args[0]: disable break state
+static Object* Runtime_SetDisableBreak(Arguments args) {
+  HandleScope scope;
+  ASSERT(args.length() == 1);
+  CONVERT_BOOLEAN_CHECKED(disable_break, args[0]);
+  Debug::set_disable_break(disable_break);
+  return  Heap::undefined_value();
+}
+
+
 static Object* Runtime_GetBreakLocations(Arguments args) {
   HandleScope scope;
   ASSERT(args.length() == 1);
@@ -9454,7 +9558,7 @@ static Handle<Context> CopyWithContextChain(Handle<Context> context_chain,
 // Runtime_DebugEvaluate.
 static Handle<Object> GetArgumentsObject(JavaScriptFrame* frame,
                                          Handle<JSFunction> function,
-                                         Handle<Object> scope_info,
+                                         Handle<SerializedScopeInfo> scope_info,
                                          const ScopeInfo<>* sinfo,
                                          Handle<Context> function_context) {
   // Try to find the value of 'arguments' to pass as parameter. If it is not
@@ -9462,15 +9566,14 @@ static Handle<Object> GetArgumentsObject(JavaScriptFrame* frame,
   // does not support eval) then create an 'arguments' object.
   int index;
   if (sinfo->number_of_stack_slots() > 0) {
-    index = ScopeInfo<>::StackSlotIndex(*scope_info, Heap::arguments_symbol());
+    index = scope_info->StackSlotIndex(Heap::arguments_symbol());
     if (index != -1) {
       return Handle<Object>(frame->GetExpression(index));
     }
   }
 
   if (sinfo->number_of_context_slots() > Context::MIN_CONTEXT_SLOTS) {
-    index = ScopeInfo<>::ContextSlotIndex(*scope_info, Heap::arguments_symbol(),
-                                          NULL);
+    index = scope_info->ContextSlotIndex(Heap::arguments_symbol(), NULL);
     if (index != -1) {
       return Handle<Object>(function_context->get(index));
     }
@@ -9521,7 +9624,7 @@ static Object* Runtime_DebugEvaluate(Arguments args) {
   JavaScriptFrameIterator it(id);
   JavaScriptFrame* frame = it.frame();
   Handle<JSFunction> function(JSFunction::cast(frame->function()));
-  Handle<Object> scope_info(function->shared()->scope_info());
+  Handle<SerializedScopeInfo> scope_info(function->shared()->scope_info());
   ScopeInfo<> sinfo(*scope_info);
 
   // Traverse the saved contexts chain to find the active context for the

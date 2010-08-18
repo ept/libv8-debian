@@ -488,7 +488,7 @@ Object* Accessors::FunctionGetLength(Object* object, void*) {
   JSFunction* function = FindInPrototypeChain<JSFunction>(object, &found_it);
   if (!found_it) return Smi::FromInt(0);
   // Check if already compiled.
-  if (!function->is_compiled()) {
+  if (!function->shared()->is_compiled()) {
     // If the function isn't compiled yet, the length is not computed
     // correctly yet. Compile it now and return the right length.
     HandleScope scope;
@@ -549,8 +549,8 @@ Object* Accessors::FunctionGetArguments(Object* object, void*) {
     if (frame->function() != *function) continue;
 
     // If there is an arguments variable in the stack, we return that.
-    int index = ScopeInfo<>::StackSlotIndex(function->shared()->scope_info(),
-                                            Heap::arguments_symbol());
+    int index = function->shared()->scope_info()->
+        StackSlotIndex(Heap::arguments_symbol());
     if (index >= 0) {
       Handle<Object> arguments = Handle<Object>(frame->GetExpression(index));
       if (!arguments->IsTheHole()) return *arguments;

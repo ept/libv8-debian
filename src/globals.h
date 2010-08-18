@@ -326,6 +326,7 @@ class RegExpCompiler;
 class RegExpVisitor;
 class Scope;
 template<class Allocator = FreeStoreAllocationPolicy> class ScopeInfo;
+class SerializedScopeInfo;
 class Script;
 class Slot;
 class Smi;
@@ -506,6 +507,31 @@ union DoubleRepresentation {
 };
 
 
+// Union used for customized checking of the IEEE double types
+// inlined within v8 runtime, rather than going to the underlying
+// platform headers and libraries
+union IeeeDoubleLittleEndianArchType {
+  double d;
+  struct {
+    unsigned int man_low  :32;
+    unsigned int man_high :20;
+    unsigned int exp      :11;
+    unsigned int sign     :1;
+  } bits;
+};
+
+
+union IeeeDoubleBigEndianArchType {
+  double d;
+  struct {
+    unsigned int sign     :1;
+    unsigned int exp      :11;
+    unsigned int man_high :20;
+    unsigned int man_low  :32;
+  } bits;
+};
+
+
 // AccessorCallback
 struct AccessorDescriptor {
   Object* (*getter)(Object* object, void* data);
@@ -642,11 +668,14 @@ F FUNCTION_CAST(Address addr) {
 #if defined(__GNUC__) && !defined(DEBUG)
 #if (__GNUC__ >= 4)
 #define INLINE(header) inline header  __attribute__((always_inline))
+#define NO_INLINE(header) header __attribute__((noinline))
 #else
 #define INLINE(header) inline __attribute__((always_inline)) header
+#define NO_INLINE(header) __attribute__((noinline)) header
 #endif
 #else
 #define INLINE(header) inline header
+#define NO_INLINE(header) header
 #endif
 
 // Feature flags bit positions. They are mostly based on the CPUID spec.

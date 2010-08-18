@@ -452,6 +452,7 @@ static void GenerateKeyedLoadReceiverCheck(MacroAssembler* masm,
 
 
 // Loads an indexed element from a fast case array.
+// If not_fast_array is NULL, doesn't perform the elements map check.
 static void GenerateFastArrayLoad(MacroAssembler* masm,
                                   Register receiver,
                                   Register key,
@@ -468,8 +469,12 @@ static void GenerateFastArrayLoad(MacroAssembler* masm,
   //            we fall through.
 
   __ mov(scratch, FieldOperand(receiver, JSObject::kElementsOffset));
-  // Check that the object is in fast mode (not dictionary).
-  __ CheckMap(scratch, Factory::fixed_array_map(), not_fast_array, true);
+  if (not_fast_array != NULL) {
+    // Check that the object is in fast mode and writable.
+    __ CheckMap(scratch, Factory::fixed_array_map(), not_fast_array, true);
+  } else {
+    __ AssertFastElements(scratch);
+  }
   // Check that the key (index) is within bounds.
   __ cmp(key, FieldOperand(scratch, FixedArray::kLengthOffset));
   __ j(above_equal, out_of_range);
@@ -545,7 +550,7 @@ void KeyedLoadIC::GenerateGeneric(MacroAssembler* masm) {
   //  -- edx    : receiver
   //  -- esp[0] : return address
   // -----------------------------------
-  Label slow, check_string, index_smi, index_string;
+  Label slow, check_string, index_smi, index_string, property_array_property;
   Label check_pixel_array, probe_dictionary, check_number_dictionary;
 
   // Check that the key is a smi.
@@ -558,12 +563,18 @@ void KeyedLoadIC::GenerateGeneric(MacroAssembler* masm) {
   GenerateKeyedLoadReceiverCheck(
       masm, edx, ecx, Map::kHasIndexedInterceptor, &slow);
 
+  // Check the "has fast elements" bit in the receiver's map which is
+  // now in ecx.
+  __ test_b(FieldOperand(ecx, Map::kBitField2Offset),
+            1 << Map::kHasFastElements);
+  __ j(zero, &check_pixel_array, not_taken);
+
   GenerateFastArrayLoad(masm,
                         edx,
                         eax,
                         ecx,
                         eax,
-                        &check_pixel_array,
+                        NULL,
                         &slow);
   __ IncrementCounter(&Counters::keyed_load_generic_smi, 1);
   __ ret(0);
@@ -572,7 +583,7 @@ void KeyedLoadIC::GenerateGeneric(MacroAssembler* masm) {
   // Check whether the elements is a pixel array.
   // edx: receiver
   // eax: key
-  // ecx: elements
+  __ mov(ecx, FieldOperand(edx, JSObject::kElementsOffset));
   __ mov(ebx, eax);
   __ SmiUntag(ebx);
   __ CheckMap(ecx, Factory::pixel_array_map(), &check_number_dictionary, true);
@@ -652,7 +663,7 @@ void KeyedLoadIC::GenerateGeneric(MacroAssembler* masm) {
   __ cmp(eax, Operand::StaticArray(edi, times_1, cache_keys));
   __ j(not_equal, &slow);
 
-  // Get field offset and check that it is an in-object property.
+  // Get field offset.
   // edx     : receiver
   // ebx     : receiver's map
   // eax     : key
@@ -663,12 +674,20 @@ void KeyedLoadIC::GenerateGeneric(MacroAssembler* masm) {
          Operand::StaticArray(ecx, times_pointer_size, cache_field_offsets));
   __ movzx_b(ecx, FieldOperand(ebx, Map::kInObjectPropertiesOffset));
   __ sub(edi, Operand(ecx));
-  __ j(above_equal, &slow);
+  __ j(above_equal, &property_array_property);
 
   // Load in-object property.
   __ movzx_b(ecx, FieldOperand(ebx, Map::kInstanceSizeOffset));
   __ add(ecx, Operand(edi));
   __ mov(eax, FieldOperand(edx, ecx, times_pointer_size, 0));
+  __ IncrementCounter(&Counters::keyed_load_generic_lookup_cache, 1);
+  __ ret(0);
+
+  // Load property array property.
+  __ bind(&property_array_property);
+  __ mov(eax, FieldOperand(edx, JSObject::kPropertiesOffset));
+  __ mov(eax, FieldOperand(eax, edi, times_pointer_size,
+                           FixedArray::kHeaderSize));
   __ IncrementCounter(&Counters::keyed_load_generic_lookup_cache, 1);
   __ ret(0);
 
@@ -959,7 +978,7 @@ void KeyedStoreIC::GenerateGeneric(MacroAssembler* masm) {
   // edx: JSObject
   // ecx: key (a smi)
   __ mov(edi, FieldOperand(edx, JSObject::kElementsOffset));
-  // Check that the object is in fast mode (not dictionary).
+  // Check that the object is in fast mode and writable.
   __ CheckMap(edi, Factory::fixed_array_map(), &check_pixel_array, true);
   __ cmp(ecx, FieldOperand(edi, FixedArray::kLengthOffset));
   __ j(below, &fast, taken);
@@ -1015,8 +1034,8 @@ void KeyedStoreIC::GenerateGeneric(MacroAssembler* masm) {
   __ jmp(&fast);
 
   // Array case: Get the length and the elements array from the JS
-  // array. Check that the array is in fast mode; if it is the
-  // length is always a smi.
+  // array. Check that the array is in fast mode (and writable); if it
+  // is the length is always a smi.
   __ bind(&array);
   // eax: value
   // edx: receiver, a JSArray
@@ -1644,37 +1663,6 @@ void LoadIC::GenerateMiss(MacroAssembler* masm) {
 // One byte opcode for test eax,0xXXXXXXXX.
 static const byte kTestEaxByte = 0xA9;
 
-
-void LoadIC::ClearInlinedVersion(Address address) {
-  // Reset the map check of the inlined inobject property load (if
-  // present) to guarantee failure by holding an invalid map (the null
-  // value).  The offset can be patched to anything.
-  PatchInlinedLoad(address, Heap::null_value(), kMaxInt);
-}
-
-
-void KeyedLoadIC::ClearInlinedVersion(Address address) {
-  // Insert null as the map to check for to make sure the map check fails
-  // sending control flow to the IC instead of the inlined version.
-  PatchInlinedLoad(address, Heap::null_value());
-}
-
-
-void KeyedStoreIC::ClearInlinedVersion(Address address) {
-  // Insert null as the elements map to check for.  This will make
-  // sure that the elements fast-case map check fails so that control
-  // flows to the IC instead of the inlined version.
-  PatchInlinedStore(address, Heap::null_value());
-}
-
-
-void KeyedStoreIC::RestoreInlinedVersion(Address address) {
-  // Restore the fast-case elements map check so that the inlined
-  // version can be used again.
-  PatchInlinedStore(address, Heap::fixed_array_map());
-}
-
-
 bool LoadIC::PatchInlinedLoad(Address address, Object* map, int offset) {
   // The address of the instruction following the call.
   Address test_instruction_address =
@@ -1699,6 +1687,52 @@ bool LoadIC::PatchInlinedLoad(Address address, Object* map, int offset) {
   Address offset_address =
       test_instruction_address + delta + kOffsetToLoadInstruction + 2;
   *reinterpret_cast<int*>(offset_address) = offset - kHeapObjectTag;
+  return true;
+}
+
+
+bool StoreIC::PatchInlinedStore(Address address, Object* map, int offset) {
+  // The address of the instruction following the call.
+  Address test_instruction_address =
+      address + Assembler::kCallTargetAddressOffset;
+
+  // If the instruction following the call is not a test eax, nothing
+  // was inlined.
+  if (*test_instruction_address != kTestEaxByte) return false;
+
+  // Extract the encoded deltas from the test eax instruction.
+  Address encoded_offsets_address = test_instruction_address + 1;
+  int encoded_offsets = *reinterpret_cast<int*>(encoded_offsets_address);
+  int delta_to_map_check = -(encoded_offsets & 0xFFFF);
+  int delta_to_record_write = encoded_offsets >> 16;
+
+  // Patch the map to check. The map address is the last 4 bytes of
+  // the 7-byte operand-immediate compare instruction.
+  Address map_check_address = test_instruction_address + delta_to_map_check;
+  Address map_address = map_check_address + 3;
+  *(reinterpret_cast<Object**>(map_address)) = map;
+
+  // Patch the offset in the store instruction. The offset is in the
+  // last 4 bytes of a six byte register-to-memory move instruction.
+  Address offset_address =
+      map_check_address + StoreIC::kOffsetToStoreInstruction + 2;
+  // The offset should have initial value (kMaxInt - 1), cleared value
+  // (-1) or we should be clearing the inlined version.
+  ASSERT(*reinterpret_cast<int*>(offset_address) == kMaxInt - 1 ||
+         *reinterpret_cast<int*>(offset_address) == -1 ||
+         (offset == 0 && map == Heap::null_value()));
+  *reinterpret_cast<int*>(offset_address) = offset - kHeapObjectTag;
+
+  // Patch the offset in the write-barrier code. The offset is the
+  // last 4 bytes of a six byte lea instruction.
+  offset_address = map_check_address + delta_to_record_write + 2;
+  // The offset should have initial value (kMaxInt), cleared value
+  // (-1) or we should be clearing the inlined version.
+  ASSERT(*reinterpret_cast<int*>(offset_address) == kMaxInt ||
+         *reinterpret_cast<int*>(offset_address) == -1 ||
+         (offset == 0 && map == Heap::null_value()));
+  *reinterpret_cast<int*>(offset_address) = offset - kHeapObjectTag;
+
   return true;
 }
 
@@ -1814,6 +1848,12 @@ void StoreIC::GenerateMiss(MacroAssembler* masm) {
 }
 
 
+// The offset from the inlined patch site to the start of the inlined
+// store instruction.  It is 7 bytes (test reg, imm) plus 6 bytes (jne
+// slow_label).
+const int StoreIC::kOffsetToStoreInstruction = 13;
+
+
 void StoreIC::GenerateArrayLength(MacroAssembler* masm) {
   // ----------- S t a t e -------------
   //  -- eax    : value
@@ -1843,6 +1883,8 @@ void StoreIC::GenerateArrayLength(MacroAssembler* masm) {
   __ j(not_equal, &miss, not_taken);
 
   // Check that elements are FixedArray.
+  // We rely on StoreIC_ArrayLength below to deal with all types of
+  // fast elements (including COW).
   __ mov(scratch, FieldOperand(receiver, JSArray::kElementsOffset));
   __ CmpObjectType(scratch, FIXED_ARRAY_TYPE, scratch);
   __ j(not_equal, &miss, not_taken);

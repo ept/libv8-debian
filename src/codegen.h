@@ -80,25 +80,6 @@ enum UnaryOverwriteMode { UNARY_OVERWRITE, UNARY_NO_OVERWRITE };
 // Types of uncatchable exceptions.
 enum UncatchableExceptionType { OUT_OF_MEMORY, TERMINATION };
 
-
-#if V8_TARGET_ARCH_IA32
-#include "ia32/codegen-ia32.h"
-#elif V8_TARGET_ARCH_X64
-#include "x64/codegen-x64.h"
-#elif V8_TARGET_ARCH_ARM
-#include "arm/codegen-arm.h"
-#elif V8_TARGET_ARCH_MIPS
-#include "mips/codegen-mips.h"
-#else
-#error Unsupported target architecture.
-#endif
-
-#include "register-allocator.h"
-
-namespace v8 {
-namespace internal {
-
-
 #define INLINE_RUNTIME_FUNCTION_LIST(F) \
   F(IsSmi, 1, 1)                                                             \
   F(IsNonNegativeSmi, 1, 1)                                                  \
@@ -120,6 +101,8 @@ namespace internal {
   F(IsObject, 1, 1)                                                          \
   F(IsFunction, 1, 1)                                                        \
   F(IsUndetectableObject, 1, 1)                                              \
+  F(IsSpecObject, 1, 1)                                                      \
+  F(IsStringWrapperSafeForDefaultValueOf, 1, 1)                              \
   F(StringAdd, 2, 1)                                                         \
   F(SubString, 3, 1)                                                         \
   F(StringCompare, 2, 1)                                                     \
@@ -131,8 +114,26 @@ namespace internal {
   F(MathPow, 2, 1)                                                           \
   F(MathSin, 1, 1)                                                           \
   F(MathCos, 1, 1)                                                           \
-  F(MathSqrt, 1, 1)
+  F(MathSqrt, 1, 1)                                                          \
+  F(IsRegExpEquivalent, 2, 1)
 
+
+#if V8_TARGET_ARCH_IA32
+#include "ia32/codegen-ia32.h"
+#elif V8_TARGET_ARCH_X64
+#include "x64/codegen-x64.h"
+#elif V8_TARGET_ARCH_ARM
+#include "arm/codegen-arm.h"
+#elif V8_TARGET_ARCH_MIPS
+#include "mips/codegen-mips.h"
+#else
+#error Unsupported target architecture.
+#endif
+
+#include "register-allocator.h"
+
+namespace v8 {
+namespace internal {
 
 // Support for "structured" code comments.
 #ifdef DEBUG
@@ -320,6 +321,15 @@ class DeferredCode: public ZoneObject {
 
   void SaveRegisters();
   void RestoreRegisters();
+  void Exit();
+
+  // If this returns true then all registers will be saved for the duration
+  // of the Generate() call.  Otherwise the registers are not saved and the
+  // Generate() call must bracket runtime any runtime calls with calls to
+  // SaveRegisters() and RestoreRegisters().  In this case the Generate
+  // method must also call Exit() in order to return to the non-deferred
+  // code.
+  virtual bool AutoSaveAndRestore() { return true; }
 
  protected:
   MacroAssembler* masm_;
@@ -386,20 +396,33 @@ class FastNewContextStub : public CodeStub {
 
 class FastCloneShallowArrayStub : public CodeStub {
  public:
-  static const int kMaximumLength = 8;
+  // Maximum length of copied elements array.
+  static const int kMaximumClonedLength = 8;
 
-  explicit FastCloneShallowArrayStub(int length) : length_(length) {
-    ASSERT(length >= 0 && length <= kMaximumLength);
+  enum Mode {
+    CLONE_ELEMENTS,
+    COPY_ON_WRITE_ELEMENTS
+  };
+
+  FastCloneShallowArrayStub(Mode mode, int length)
+      : mode_(mode),
+        length_((mode == COPY_ON_WRITE_ELEMENTS) ? 0 : length) {
+    ASSERT(length_ >= 0);
+    ASSERT(length_ <= kMaximumClonedLength);
   }
 
   void Generate(MacroAssembler* masm);
 
  private:
+  Mode mode_;
   int length_;
 
   const char* GetName() { return "FastCloneShallowArrayStub"; }
   Major MajorKey() { return FastCloneShallowArray; }
-  int MinorKey() { return length_; }
+  int MinorKey() {
+    ASSERT(mode_ == 0 || mode_ == 1);
+    return (length_ << 1) | mode_;
+  }
 };
 
 
@@ -461,11 +484,15 @@ class CompareStub: public CodeStub {
   CompareStub(Condition cc,
               bool strict,
               NaNInformation nan_info = kBothCouldBeNaN,
-              bool include_number_compare = true) :
+              bool include_number_compare = true,
+              Register lhs = no_reg,
+              Register rhs = no_reg) :
       cc_(cc),
       strict_(strict),
       never_nan_nan_(nan_info == kCantBothBeNaN),
       include_number_compare_(include_number_compare),
+      lhs_(lhs),
+      rhs_(rhs),
       name_(NULL) { }
 
   void Generate(MacroAssembler* masm);
@@ -483,12 +510,19 @@ class CompareStub: public CodeStub {
   // comparison code is used when the number comparison has been inlined, and
   // the stub will be called if one of the operands is not a number.
   bool include_number_compare_;
+  // Register holding the left hand side of the comparison if the stub gives
+  // a choice, no_reg otherwise.
+  Register lhs_;
+  // Register holding the right hand side of the comparison if the stub gives
+  // a choice, no_reg otherwise.
+  Register rhs_;
 
-  // Encoding of the minor key CCCCCCCCCCCCCCNS.
+  // Encoding of the minor key CCCCCCCCCCCCRCNS.
   class StrictField: public BitField<bool, 0, 1> {};
   class NeverNanNanField: public BitField<bool, 1, 1> {};
   class IncludeNumberCompareField: public BitField<bool, 2, 1> {};
-  class ConditionField: public BitField<int, 3, 13> {};
+  class RegisterField: public BitField<bool, 3, 1> {};
+  class ConditionField: public BitField<int, 4, 12> {};
 
   Major MajorKey() { return Compare; }
 
@@ -507,11 +541,17 @@ class CompareStub: public CodeStub {
 #ifdef DEBUG
   void Print() {
     PrintF("CompareStub (cc %d), (strict %s), "
-           "(never_nan_nan %s), (number_compare %s)\n",
+           "(never_nan_nan %s), (number_compare %s) ",
            static_cast<int>(cc_),
            strict_ ? "true" : "false",
            never_nan_nan_ ? "true" : "false",
            include_number_compare_ ? "included" : "not included");
+
+    if (!lhs_.is(no_reg) && !rhs_.is(no_reg)) {
+      PrintF("(lhs r%d), (rhs r%d)\n", lhs_.code(), rhs_.code());
+    } else {
+      PrintF("\n");
+    }
   }
 #endif
 };
@@ -702,18 +742,6 @@ class CallFunctionStub: public CodeStub {
   static int ExtractArgcFromMinorKey(int minor_key) {
     return ArgcBits::decode(minor_key);
   }
-};
-
-
-class ToBooleanStub: public CodeStub {
- public:
-  ToBooleanStub() { }
-
-  void Generate(MacroAssembler* masm);
-
- private:
-  Major MajorKey() { return ToBoolean; }
-  int MinorKey() { return 0; }
 };
 
 

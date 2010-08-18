@@ -54,100 +54,98 @@ namespace internal {
 //
 // The function builds a JS frame.  Please see JavaScriptFrameConstants in
 // frames-x64.h for its layout.
-void FullCodeGenerator::Generate(CompilationInfo* info, Mode mode) {
+void FullCodeGenerator::Generate(CompilationInfo* info) {
   ASSERT(info_ == NULL);
   info_ = info;
   SetFunctionPosition(function());
   Comment cmnt(masm_, "[ function compiled by full code generator");
 
-  if (mode == PRIMARY) {
-    __ push(rbp);  // Caller's frame pointer.
-    __ movq(rbp, rsp);
-    __ push(rsi);  // Callee's context.
-    __ push(rdi);  // Callee's JS Function.
+  __ push(rbp);  // Caller's frame pointer.
+  __ movq(rbp, rsp);
+  __ push(rsi);  // Callee's context.
+  __ push(rdi);  // Callee's JS Function.
 
-    { Comment cmnt(masm_, "[ Allocate locals");
-      int locals_count = scope()->num_stack_slots();
-      if (locals_count == 1) {
-        __ PushRoot(Heap::kUndefinedValueRootIndex);
-      } else if (locals_count > 1) {
-        __ LoadRoot(rdx, Heap::kUndefinedValueRootIndex);
-        for (int i = 0; i < locals_count; i++) {
-          __ push(rdx);
-        }
+  { Comment cmnt(masm_, "[ Allocate locals");
+    int locals_count = scope()->num_stack_slots();
+    if (locals_count == 1) {
+      __ PushRoot(Heap::kUndefinedValueRootIndex);
+    } else if (locals_count > 1) {
+      __ LoadRoot(rdx, Heap::kUndefinedValueRootIndex);
+      for (int i = 0; i < locals_count; i++) {
+        __ push(rdx);
       }
     }
+  }
 
-    bool function_in_register = true;
+  bool function_in_register = true;
 
-    // Possibly allocate a local context.
-    int heap_slots = scope()->num_heap_slots() - Context::MIN_CONTEXT_SLOTS;
-    if (heap_slots > 0) {
-      Comment cmnt(masm_, "[ Allocate local context");
-      // Argument to NewContext is the function, which is still in rdi.
-      __ push(rdi);
-      if (heap_slots <= FastNewContextStub::kMaximumSlots) {
-        FastNewContextStub stub(heap_slots);
-        __ CallStub(&stub);
-      } else {
-        __ CallRuntime(Runtime::kNewContext, 1);
-      }
-      function_in_register = false;
-      // Context is returned in both rax and rsi.  It replaces the context
-      // passed to us.  It's saved in the stack and kept live in rsi.
-      __ movq(Operand(rbp, StandardFrameConstants::kContextOffset), rsi);
-
-      // Copy any necessary parameters into the context.
-      int num_parameters = scope()->num_parameters();
-      for (int i = 0; i < num_parameters; i++) {
-        Slot* slot = scope()->parameter(i)->slot();
-        if (slot != NULL && slot->type() == Slot::CONTEXT) {
-          int parameter_offset = StandardFrameConstants::kCallerSPOffset +
-                                     (num_parameters - 1 - i) * kPointerSize;
-          // Load parameter from stack.
-          __ movq(rax, Operand(rbp, parameter_offset));
-          // Store it in the context.
-          int context_offset = Context::SlotOffset(slot->index());
-          __ movq(Operand(rsi, context_offset), rax);
-          // Update the write barrier. This clobbers all involved
-          // registers, so we have use a third register to avoid
-          // clobbering rsi.
-          __ movq(rcx, rsi);
-          __ RecordWrite(rcx, context_offset, rax, rbx);
-        }
-      }
-    }
-
-    // Possibly allocate an arguments object.
-    Variable* arguments = scope()->arguments()->AsVariable();
-    if (arguments != NULL) {
-      // Arguments object must be allocated after the context object, in
-      // case the "arguments" or ".arguments" variables are in the context.
-      Comment cmnt(masm_, "[ Allocate arguments object");
-      if (function_in_register) {
-        __ push(rdi);
-      } else {
-        __ push(Operand(rbp, JavaScriptFrameConstants::kFunctionOffset));
-      }
-      // The receiver is just before the parameters on the caller's stack.
-      int offset = scope()->num_parameters() * kPointerSize;
-      __ lea(rdx,
-             Operand(rbp, StandardFrameConstants::kCallerSPOffset + offset));
-      __ push(rdx);
-      __ Push(Smi::FromInt(scope()->num_parameters()));
-      // Arguments to ArgumentsAccessStub:
-      //   function, receiver address, parameter count.
-      // The stub will rewrite receiver and parameter count if the previous
-      // stack frame was an arguments adapter frame.
-      ArgumentsAccessStub stub(ArgumentsAccessStub::NEW_OBJECT);
+  // Possibly allocate a local context.
+  int heap_slots = scope()->num_heap_slots() - Context::MIN_CONTEXT_SLOTS;
+  if (heap_slots > 0) {
+    Comment cmnt(masm_, "[ Allocate local context");
+    // Argument to NewContext is the function, which is still in rdi.
+    __ push(rdi);
+    if (heap_slots <= FastNewContextStub::kMaximumSlots) {
+      FastNewContextStub stub(heap_slots);
       __ CallStub(&stub);
-      // Store new arguments object in both "arguments" and ".arguments" slots.
-      __ movq(rcx, rax);
-      Move(arguments->slot(), rax, rbx, rdx);
-      Slot* dot_arguments_slot =
-          scope()->arguments_shadow()->AsVariable()->slot();
-      Move(dot_arguments_slot, rcx, rbx, rdx);
+    } else {
+      __ CallRuntime(Runtime::kNewContext, 1);
     }
+    function_in_register = false;
+    // Context is returned in both rax and rsi.  It replaces the context
+    // passed to us.  It's saved in the stack and kept live in rsi.
+    __ movq(Operand(rbp, StandardFrameConstants::kContextOffset), rsi);
+
+    // Copy any necessary parameters into the context.
+    int num_parameters = scope()->num_parameters();
+    for (int i = 0; i < num_parameters; i++) {
+      Slot* slot = scope()->parameter(i)->slot();
+      if (slot != NULL && slot->type() == Slot::CONTEXT) {
+        int parameter_offset = StandardFrameConstants::kCallerSPOffset +
+            (num_parameters - 1 - i) * kPointerSize;
+        // Load parameter from stack.
+        __ movq(rax, Operand(rbp, parameter_offset));
+        // Store it in the context.
+        int context_offset = Context::SlotOffset(slot->index());
+        __ movq(Operand(rsi, context_offset), rax);
+        // Update the write barrier. This clobbers all involved
+        // registers, so we have use a third register to avoid
+        // clobbering rsi.
+        __ movq(rcx, rsi);
+        __ RecordWrite(rcx, context_offset, rax, rbx);
+      }
+    }
+  }
+
+  // Possibly allocate an arguments object.
+  Variable* arguments = scope()->arguments()->AsVariable();
+  if (arguments != NULL) {
+    // Arguments object must be allocated after the context object, in
+    // case the "arguments" or ".arguments" variables are in the context.
+    Comment cmnt(masm_, "[ Allocate arguments object");
+    if (function_in_register) {
+      __ push(rdi);
+    } else {
+      __ push(Operand(rbp, JavaScriptFrameConstants::kFunctionOffset));
+    }
+    // The receiver is just before the parameters on the caller's stack.
+    int offset = scope()->num_parameters() * kPointerSize;
+    __ lea(rdx,
+           Operand(rbp, StandardFrameConstants::kCallerSPOffset + offset));
+    __ push(rdx);
+    __ Push(Smi::FromInt(scope()->num_parameters()));
+    // Arguments to ArgumentsAccessStub:
+    //   function, receiver address, parameter count.
+    // The stub will rewrite receiver and parameter count if the previous
+    // stack frame was an arguments adapter frame.
+    ArgumentsAccessStub stub(ArgumentsAccessStub::NEW_OBJECT);
+    __ CallStub(&stub);
+    // Store new arguments object in both "arguments" and ".arguments" slots.
+    __ movq(rcx, rax);
+    Move(arguments->slot(), rax, rbx, rdx);
+    Slot* dot_arguments_slot =
+        scope()->arguments_shadow()->AsVariable()->slot();
+    Move(dot_arguments_slot, rcx, rbx, rdx);
   }
 
   { Comment cmnt(masm_, "[ Declarations");
@@ -207,7 +205,7 @@ void FullCodeGenerator::EmitReturnSequence() {
     Label check_exit_codesize;
     masm_->bind(&check_exit_codesize);
 #endif
-    CodeGenerator::RecordPositions(masm_, function()->end_position());
+    CodeGenerator::RecordPositions(masm_, function()->end_position() - 1);
     __ RecordJSReturn();
     // Do not use the leave instruction here because it is too short to
     // patch with the code required by the debugger.
@@ -1053,7 +1051,7 @@ void FullCodeGenerator::VisitForInStatement(ForInStatement* stmt) {
   __ push(rcx);  // Enumerable.
   __ push(rbx);  // Current entry.
   __ InvokeBuiltin(Builtins::FILTER_KEY, CALL_FUNCTION);
-  __ CompareRoot(rax, Heap::kNullValueRootIndex);
+  __ SmiCompare(rax, Smi::FromInt(0));
   __ j(equal, loop_statement.continue_target());
   __ movq(rbx, rax);
 
@@ -1199,26 +1197,54 @@ void FullCodeGenerator::EmitVariableLoad(Variable* var,
 
 void FullCodeGenerator::VisitRegExpLiteral(RegExpLiteral* expr) {
   Comment cmnt(masm_, "[ RegExpLiteral");
-  Label done;
+  Label materialized;
   // Registers will be used as follows:
   // rdi = JS function.
-  // rbx = literals array.
-  // rax = regexp literal.
+  // rcx = literals array.
+  // rbx = regexp literal.
+  // rax = regexp literal clone.
   __ movq(rdi, Operand(rbp, JavaScriptFrameConstants::kFunctionOffset));
-  __ movq(rbx, FieldOperand(rdi, JSFunction::kLiteralsOffset));
+  __ movq(rcx, FieldOperand(rdi, JSFunction::kLiteralsOffset));
   int literal_offset =
     FixedArray::kHeaderSize + expr->literal_index() * kPointerSize;
-  __ movq(rax, FieldOperand(rbx, literal_offset));
-  __ CompareRoot(rax, Heap::kUndefinedValueRootIndex);
-  __ j(not_equal, &done);
+  __ movq(rbx, FieldOperand(rcx, literal_offset));
+  __ CompareRoot(rbx, Heap::kUndefinedValueRootIndex);
+  __ j(not_equal, &materialized);
+
   // Create regexp literal using runtime function
   // Result will be in rax.
-  __ push(rbx);
+  __ push(rcx);
   __ Push(Smi::FromInt(expr->literal_index()));
   __ Push(expr->pattern());
   __ Push(expr->flags());
   __ CallRuntime(Runtime::kMaterializeRegExpLiteral, 4);
-  __ bind(&done);
+  __ movq(rbx, rax);
+
+  __ bind(&materialized);
+  int size = JSRegExp::kSize + JSRegExp::kInObjectFieldCount * kPointerSize;
+  Label allocated, runtime_allocate;
+  __ AllocateInNewSpace(size, rax, rcx, rdx, &runtime_allocate, TAG_OBJECT);
+  __ jmp(&allocated);
+
+  __ bind(&runtime_allocate);
+  __ push(rbx);
+  __ Push(Smi::FromInt(size));
+  __ CallRuntime(Runtime::kAllocateInNewSpace, 1);
+  __ pop(rbx);
+
+  __ bind(&allocated);
+  // Copy the content into the newly allocated memory.
+  // (Unroll copy loop once for better throughput).
+  for (int i = 0; i < size - kPointerSize; i += 2 * kPointerSize) {
+    __ movq(rdx, FieldOperand(rbx, i));
+    __ movq(rcx, FieldOperand(rbx, i + kPointerSize));
+    __ movq(FieldOperand(rax, i), rdx);
+    __ movq(FieldOperand(rax, i + kPointerSize), rcx);
+  }
+  if ((size % (2 * kPointerSize)) != 0) {
+    __ movq(rdx, FieldOperand(rbx, size - kPointerSize));
+    __ movq(FieldOperand(rax, size - kPointerSize), rdx);
+  }
   Apply(context_, rax);
 }
 
@@ -1304,12 +1330,18 @@ void FullCodeGenerator::VisitArrayLiteral(ArrayLiteral* expr) {
   __ push(FieldOperand(rbx, JSFunction::kLiteralsOffset));
   __ Push(Smi::FromInt(expr->literal_index()));
   __ Push(expr->constant_elements());
-  if (expr->depth() > 1) {
+  if (expr->constant_elements()->map() == Heap::fixed_cow_array_map()) {
+    FastCloneShallowArrayStub stub(
+        FastCloneShallowArrayStub::COPY_ON_WRITE_ELEMENTS, length);
+    __ CallStub(&stub);
+    __ IncrementCounter(&Counters::cow_arrays_created_stub, 1);
+  } else if (expr->depth() > 1) {
     __ CallRuntime(Runtime::kCreateArrayLiteral, 3);
-  } else if (length > FastCloneShallowArrayStub::kMaximumLength) {
+  } else if (length > FastCloneShallowArrayStub::kMaximumClonedLength) {
     __ CallRuntime(Runtime::kCreateArrayLiteralShallow, 3);
   } else {
-    FastCloneShallowArrayStub stub(length);
+    FastCloneShallowArrayStub stub(
+        FastCloneShallowArrayStub::CLONE_ELEMENTS, length);
     __ CallStub(&stub);
   }
 
@@ -1991,6 +2023,25 @@ void FullCodeGenerator::EmitIsObject(ZoneList<Expression*>* args) {
 }
 
 
+void FullCodeGenerator::EmitIsSpecObject(ZoneList<Expression*>* args) {
+  ASSERT(args->length() == 1);
+
+  VisitForValue(args->at(0), kAccumulator);
+
+  Label materialize_true, materialize_false;
+  Label* if_true = NULL;
+  Label* if_false = NULL;
+  PrepareTest(&materialize_true, &materialize_false, &if_true, &if_false);
+
+  __ JumpIfSmi(rax, if_false);
+  __ CmpObjectType(rax, FIRST_JS_OBJECT_TYPE, rbx);
+  __ j(above_equal, if_true);
+  __ jmp(if_false);
+
+  Apply(context_, if_true, if_false);
+}
+
+
 void FullCodeGenerator::EmitIsUndetectableObject(ZoneList<Expression*>* args) {
   ASSERT(args->length() == 1);
 
@@ -2008,6 +2059,25 @@ void FullCodeGenerator::EmitIsUndetectableObject(ZoneList<Expression*>* args) {
   __ j(not_zero, if_true);
   __ jmp(if_false);
 
+  Apply(context_, if_true, if_false);
+}
+
+
+void FullCodeGenerator::EmitIsStringWrapperSafeForDefaultValueOf(
+    ZoneList<Expression*>* args) {
+  ASSERT(args->length() == 1);
+
+  VisitForValue(args->at(0), kAccumulator);
+
+  Label materialize_true, materialize_false;
+  Label* if_true = NULL;
+  Label* if_false = NULL;
+  PrepareTest(&materialize_true, &materialize_false, &if_true, &if_false);
+
+  // Just indicate false, as %_IsStringWrapperSafeForDefaultValueOf() is only
+  // used in a few functions in runtime.js which should not normally be hit by
+  // this compiler.
+  __ jmp(if_false);
   Apply(context_, if_true, if_false);
 }
 
@@ -2621,6 +2691,44 @@ void FullCodeGenerator::EmitGetFromCache(ZoneList<Expression*>* args) {
   __ CallRuntime(Runtime::kGetFromCache, 2);
 
   __ bind(&done);
+  Apply(context_, rax);
+}
+
+
+void FullCodeGenerator::EmitIsRegExpEquivalent(ZoneList<Expression*>* args) {
+  ASSERT_EQ(2, args->length());
+
+  Register right = rax;
+  Register left = rbx;
+  Register tmp = rcx;
+
+  VisitForValue(args->at(0), kStack);
+  VisitForValue(args->at(1), kAccumulator);
+  __ pop(left);
+
+  Label done, fail, ok;
+  __ cmpq(left, right);
+  __ j(equal, &ok);
+  // Fail if either is a non-HeapObject.
+  Condition either_smi = masm()->CheckEitherSmi(left, right, tmp);
+  __ j(either_smi, &fail);
+  __ j(zero, &fail);
+  __ movq(tmp, FieldOperand(left, HeapObject::kMapOffset));
+  __ cmpb(FieldOperand(tmp, Map::kInstanceTypeOffset),
+          Immediate(JS_REGEXP_TYPE));
+  __ j(not_equal, &fail);
+  __ cmpq(tmp, FieldOperand(right, HeapObject::kMapOffset));
+  __ j(not_equal, &fail);
+  __ movq(tmp, FieldOperand(left, JSRegExp::kDataOffset));
+  __ cmpq(tmp, FieldOperand(right, JSRegExp::kDataOffset));
+  __ j(equal, &ok);
+  __ bind(&fail);
+  __ Move(rax, Factory::false_value());
+  __ jmp(&done);
+  __ bind(&ok);
+  __ Move(rax, Factory::true_value());
+  __ bind(&done);
+
   Apply(context_, rax);
 }
 

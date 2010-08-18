@@ -176,6 +176,13 @@ static void GenerateDictionaryNegativeLookup(MacroAssembler* masm,
       __ cmp(entity_name, Operand(Handle<String>(name)));
       __ b(eq, miss_label);
 
+      // Check if the entry name is not a symbol.
+      __ ldr(entity_name, FieldMemOperand(entity_name, HeapObject::kMapOffset));
+      __ ldrb(entity_name,
+              FieldMemOperand(entity_name, Map::kInstanceTypeOffset));
+      __ tst(entity_name, Operand(kIsSymbolMask));
+      __ b(eq, miss_label);
+
       // Restore the properties.
       __ ldr(properties,
              FieldMemOperand(receiver, JSObject::kPropertiesOffset));
@@ -1205,38 +1212,6 @@ void StubCompiler::GenerateLoadInterceptor(JSObject* object,
 }
 
 
-Object* StubCompiler::CompileLazyCompile(Code::Flags flags) {
-  // ----------- S t a t e -------------
-  //  -- r1: function
-  //  -- lr: return address
-  // -----------------------------------
-
-  // Enter an internal frame.
-  __ EnterInternalFrame();
-
-  // Preserve the function.
-  __ push(r1);
-
-  // Push the function on the stack as the argument to the runtime function.
-  __ push(r1);
-  __ CallRuntime(Runtime::kLazyCompile, 1);
-
-  // Calculate the entry point.
-  __ add(r2, r0, Operand(Code::kHeaderSize - kHeapObjectTag));
-
-  // Restore saved function.
-  __ pop(r1);
-
-  // Tear down temporary frame.
-  __ LeaveInternalFrame();
-
-  // Do a tail-call of the compiled function.
-  __ Jump(r2);
-
-  return GetCodeWithFlags(flags, "LazyCompileStub");
-}
-
-
 void CallStubCompiler::GenerateNameCheck(String* name, Label* miss) {
   if (kind_ == Code::KEYED_CALL_IC) {
     __ cmp(r2, Operand(Handle<String>(name)));
@@ -1245,9 +1220,11 @@ void CallStubCompiler::GenerateNameCheck(String* name, Label* miss) {
 }
 
 
-void CallStubCompiler::GenerateMissBranch() {
-  Handle<Code> ic = ComputeCallMiss(arguments().immediate(), kind_);
-  __ Jump(ic, RelocInfo::CODE_TARGET);
+Object* CallStubCompiler::GenerateMissBranch() {
+  Object* obj = StubCache::ComputeCallMiss(arguments().immediate(), kind_);
+  if (obj->IsFailure()) return obj;
+  __ Jump(Handle<Code>(Code::cast(obj)), RelocInfo::CODE_TARGET);
+  return obj;
 }
 
 
@@ -1279,7 +1256,8 @@ Object* CallStubCompiler::CompileCallField(JSObject* object,
 
   // Handle call cache miss.
   __ bind(&miss);
-  GenerateMissBranch();
+  Object* obj = GenerateMissBranch();
+  if (obj->IsFailure()) return obj;
 
   // Return the generated code.
   return GetCode(FIELD, name);
@@ -1319,18 +1297,14 @@ Object* CallStubCompiler::CompileArrayPushCall(Object* object,
   // Check that the maps haven't changed.
   CheckPrototypes(JSObject::cast(object), r1, holder, r3, r0, r4, name, &miss);
 
-  if (object->IsGlobalObject()) {
-    __ ldr(r3, FieldMemOperand(r1, GlobalObject::kGlobalReceiverOffset));
-    __ str(r3, MemOperand(sp, argc * kPointerSize));
-  }
-
   __ TailCallExternalReference(ExternalReference(Builtins::c_ArrayPush),
                                argc + 1,
                                1);
 
   // Handle call cache miss.
   __ bind(&miss);
-  GenerateMissBranch();
+  Object* obj = GenerateMissBranch();
+  if (obj->IsFailure()) return obj;
 
   // Return the generated code.
   return GetCode(function);
@@ -1370,18 +1344,14 @@ Object* CallStubCompiler::CompileArrayPopCall(Object* object,
   // Check that the maps haven't changed.
   CheckPrototypes(JSObject::cast(object), r1, holder, r3, r0, r4, name, &miss);
 
-  if (object->IsGlobalObject()) {
-    __ ldr(r3, FieldMemOperand(r1, GlobalObject::kGlobalReceiverOffset));
-    __ str(r3, MemOperand(sp, argc * kPointerSize));
-  }
-
   __ TailCallExternalReference(ExternalReference(Builtins::c_ArrayPop),
                                argc + 1,
                                1);
 
   // Handle call cache miss.
   __ bind(&miss);
-  GenerateMissBranch();
+  Object* obj = GenerateMissBranch();
+  if (obj->IsFailure()) return obj;
 
   // Return the generated code.
   return GetCode(function);
@@ -1554,7 +1524,8 @@ Object* CallStubCompiler::CompileCallConstant(Object* object,
   }
 
   __ bind(&miss_in_smi_check);
-  GenerateMissBranch();
+  Object* obj = GenerateMissBranch();
+  if (obj->IsFailure()) return obj;
 
   // Return the generated code.
   return GetCode(function);
@@ -1603,7 +1574,8 @@ Object* CallStubCompiler::CompileCallInterceptor(JSObject* object,
 
   // Handle call cache miss.
   __ bind(&miss);
-  GenerateMissBranch();
+  Object* obj = GenerateMissBranch();
+  if (obj->IsFailure()) return obj;
 
   // Return the generated code.
   return GetCode(INTERCEPTOR, name);
@@ -1687,7 +1659,8 @@ Object* CallStubCompiler::CompileCallGlobal(JSObject* object,
   // Handle call cache miss.
   __ bind(&miss);
   __ IncrementCounter(&Counters::call_global_inline_miss, 1, r1, r3);
-  GenerateMissBranch();
+  Object* obj = GenerateMissBranch();
+  if (obj->IsFailure()) return obj;
 
   // Return the generated code.
   return GetCode(NORMAL, name);
