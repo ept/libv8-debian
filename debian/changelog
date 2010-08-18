@@ -4,8 +4,9 @@ libv8 (2.3.9-1) unstable; urgency=low
   * Removed patch issue3037008_6001.diff, applied upstream.
   * Removed part of 0002-armel-build.patch, applied upstream.
   * Remove GCC_VERSION=44, no longer needed.
+  * Runs cctest and mjsunit tests after build.
 
- -- Jérémy Lal <kapouer@melix.org>  Wed, 18 Aug 2010 10:10:27 +0200
+ -- Jérémy Lal <kapouer@melix.org>  Wed, 18 Aug 2010 15:22:07 +0200
 
 libv8 (2.2.24-5) unstable; urgency=low
 
