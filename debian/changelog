@@ -3,6 +3,7 @@ libv8 (2.3.9-1) unstable; urgency=low
   * New upstream release, followed the procedure of README.source to update.
   * Removed patch issue3037008_6001.diff, applied upstream.
   * Removed part of 0002-armel-build.patch, applied upstream.
+  * Remove GCC_VERSION=44, no longer needed.
 
  -- Jérémy Lal <kapouer@melix.org>  Wed, 18 Aug 2010 10:10:27 +0200
 
