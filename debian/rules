@@ -15,7 +15,7 @@ DEBIAN_UPSTREAM_VERSION	:= $(shell echo $(DEBIAN_VERSION) | sed 's/^\(.*\)-[^-]*
 DEBIAN_UPSTREAM_BRANCH	:= $(shell echo $(DEBIAN_UPSTREAM_VERSION) | sed 's/^\([^\.]*\.[^.+~]*\).*$$/\1/')
 DEBIAN_REVISION		:= $(shell echo $(DEBIAN_VERSION) | sed 's/^.*r\([^-]*\).*/\1/')
 
-SONAME			:= 2.3.9
+SONAME			:= 2.3.11
 
 SRC_DIR			:= $(CURDIR)
 DEB_BUILDDIR		:= $(SRC_DIR)
@@ -34,19 +34,19 @@ DEB_SCONS_INSTALL_OPTIONS  := $(DEB_SCONS_OPTIONS) DESTDIR=$(DEB_DESTDIR)
 
 clean::
 	#if [ -f src/version.cc~ ] ; then mv src/version.cc~ src/version.cc ; fi
-	rm -f tools/*.pyc libv8-${SONAME}.so
+	rm -f tools/*.pyc libv8-$(SONAME).so
 	rm -rf obj
 	rm -f test/*/*.pyc
 	rm -f shell
 
 common-post-build-impl::
 	# need to preload freshly compiled lib.
-	LD_PRELOAD=$(CURDIR)/libv8-2.3.9.so $(CURDIR)/tools/test.py --no-build cctest mjsunit message
+	LD_PRELOAD=$(CURDIR)/libv8-$(SONAME).so $(CURDIR)/tools/test.py --no-build cctest mjsunit message
 
 common-install-impl::
 	cd debian/tmp/usr/lib/ ; \
-	mv libv8-${SONAME}*.so libv8.so.${SONAME} ; \
-	ln -s -T libv8.so.${SONAME} libv8.so
+	mv libv8-$(SONAME)*.so libv8.so.$(SONAME) ; \
+	ln -s -T libv8.so.$(SONAME) libv8.so
 
 # Tarball (get-orig-source & get-current-source)
 V8_SVN_URL := http://v8.googlecode.com/svn/branches/$(DEBIAN_UPSTREAM_BRANCH)
