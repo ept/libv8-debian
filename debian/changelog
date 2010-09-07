@@ -1,4 +1,4 @@
-libv8 (2.3.11-1) unstable; urgency=low
+libv8 (2.3.11-1) experimental; urgency=low
 
   * New upstream release, followed the procedure of README.source to update. 
 
