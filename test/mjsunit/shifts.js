@@ -25,56 +25,14 @@
 // (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
 // OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
-#include "v8.h"
+// Flags: --nofull-compiler
 
-#include "ast.h"
+// test a few corners cases with shifts
 
-namespace v8 {
-namespace internal {
+// The result of the shift is not a Smi.
+var s1 = 0x3fffffff;
+assertEquals(0x7fffffff, (s1 << 1) + 1);
 
-BreakableStatement::BreakableStatement(ZoneStringList* labels, Type type)
-    : labels_(labels), type_(type) {
-  ASSERT(labels == NULL || labels->length() > 0);
-}
-
-
-SwitchStatement::SwitchStatement(ZoneStringList* labels)
-    : BreakableStatement(labels, TARGET_FOR_ANONYMOUS),
-      tag_(NULL), cases_(NULL) {
-}
-
-
-IterationStatement::IterationStatement(ZoneStringList* labels)
-    : BreakableStatement(labels, TARGET_FOR_ANONYMOUS),
-      body_(NULL),
-      continue_target_(JumpTarget::BIDIRECTIONAL) {
-}
-
-
-Block::Block(ZoneStringList* labels, int capacity, bool is_initializer_block)
-    : BreakableStatement(labels, TARGET_FOR_NAMED_ONLY),
-      statements_(capacity),
-      is_initializer_block_(is_initializer_block) {
-}
-
-
-ForStatement::ForStatement(ZoneStringList* labels)
-    : IterationStatement(labels),
-      init_(NULL),
-      cond_(NULL),
-      next_(NULL),
-      may_have_function_literal_(true),
-      loop_variable_(NULL) {
-}
-
-
-ForInStatement::ForInStatement(ZoneStringList* labels)
-    : IterationStatement(labels), each_(NULL), enumerable_(NULL) {
-}
-
-
-DoWhileStatement::DoWhileStatement(ZoneStringList* labels)
-    : IterationStatement(labels), cond_(NULL), condition_position_(-1) {
-}
-
-} }  // namespace v8::internal
+// The result of the shift is not a Smi.
+var s2 = -1;
+assertEquals(0xffffffff, (s2 >>> 0));
