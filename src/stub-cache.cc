@@ -1186,25 +1186,43 @@ void StubCompiler::LookupPostInterceptor(JSObject* holder,
 
 Object* LoadStubCompiler::GetCode(PropertyType type, String* name) {
   Code::Flags flags = Code::ComputeMonomorphicFlags(Code::LOAD_IC, type);
-  return GetCodeWithFlags(flags, name);
+  Object* result = GetCodeWithFlags(flags, name);
+  if (!result->IsFailure()) {
+    PROFILE(CodeCreateEvent(Logger::LOAD_IC_TAG, Code::cast(result), name));
+  }
+  return result;
 }
 
 
 Object* KeyedLoadStubCompiler::GetCode(PropertyType type, String* name) {
   Code::Flags flags = Code::ComputeMonomorphicFlags(Code::KEYED_LOAD_IC, type);
-  return GetCodeWithFlags(flags, name);
+  Object* result = GetCodeWithFlags(flags, name);
+  if (!result->IsFailure()) {
+    PROFILE(
+        CodeCreateEvent(Logger::KEYED_LOAD_IC_TAG, Code::cast(result), name));
+  }
+  return result;
 }
 
 
 Object* StoreStubCompiler::GetCode(PropertyType type, String* name) {
   Code::Flags flags = Code::ComputeMonomorphicFlags(Code::STORE_IC, type);
-  return GetCodeWithFlags(flags, name);
+  Object* result = GetCodeWithFlags(flags, name);
+  if (!result->IsFailure()) {
+    PROFILE(CodeCreateEvent(Logger::STORE_IC_TAG, Code::cast(result), name));
+  }
+  return result;
 }
 
 
 Object* KeyedStoreStubCompiler::GetCode(PropertyType type, String* name) {
   Code::Flags flags = Code::ComputeMonomorphicFlags(Code::KEYED_STORE_IC, type);
-  return GetCodeWithFlags(flags, name);
+  Object* result = GetCodeWithFlags(flags, name);
+  if (!result->IsFailure()) {
+    PROFILE(
+        CodeCreateEvent(Logger::KEYED_STORE_IC_TAG, Code::cast(result), name));
+  }
+  return result;
 }
 
 
@@ -1222,23 +1240,23 @@ CallStubCompiler::CallStubCompiler(int argc,
 Object* CallStubCompiler::CompileCustomCall(int generator_id,
                                             Object* object,
                                             JSObject* holder,
+                                            JSGlobalPropertyCell* cell,
                                             JSFunction* function,
-                                            String* fname,
-                                            CheckType check) {
-    ASSERT(generator_id >= 0 && generator_id < kNumCallGenerators);
-    switch (generator_id) {
-#define CALL_GENERATOR_CASE(ignored1, ignored2, name)          \
-      case k##name##CallGenerator:                             \
-        return CallStubCompiler::Compile##name##Call(object,   \
-                                                     holder,   \
-                                                     function, \
-                                                     fname,    \
-                                                     check);
-      CUSTOM_CALL_IC_GENERATORS(CALL_GENERATOR_CASE)
+                                            String* fname) {
+  ASSERT(generator_id >= 0 && generator_id < kNumCallGenerators);
+  switch (generator_id) {
+#define CALL_GENERATOR_CASE(ignored1, ignored2, name)           \
+    case k##name##CallGenerator:                                \
+      return CallStubCompiler::Compile##name##Call(object,      \
+                                                   holder,      \
+                                                   cell,        \
+                                                   function,    \
+                                                   fname);
+    CUSTOM_CALL_IC_GENERATORS(CALL_GENERATOR_CASE)
 #undef CALL_GENERATOR_CASE
-    }
-    UNREACHABLE();
-    return Heap::undefined_value();
+  }
+  UNREACHABLE();
+  return Heap::undefined_value();
 }
 
 

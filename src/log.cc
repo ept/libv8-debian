@@ -30,6 +30,7 @@
 #include "v8.h"
 
 #include "bootstrapper.h"
+#include "code-stubs.h"
 #include "global-handles.h"
 #include "log.h"
 #include "macro-assembler.h"
@@ -170,7 +171,9 @@ void StackTracer::Trace(TickSample* sample) {
   SafeStackTraceFrameIterator it(sample->fp, sample->sp,
                                  sample->sp, js_entry_sp);
   while (!it.done() && i < TickSample::kMaxFramesCount) {
-    sample->stack[i++] = reinterpret_cast<Address>(it.frame()->function());
+    sample->stack[i++] =
+        reinterpret_cast<Address>(it.frame()->function_slot_object()) -
+            kHeapObjectTag;
     it.Advance();
   }
   sample->frames_count = i;
@@ -868,20 +871,33 @@ void Logger::SnapshotPositionEvent(Address addr, int pos) {
 
 void Logger::FunctionCreateEvent(JSFunction* function) {
 #ifdef ENABLE_LOGGING_AND_PROFILING
+  // This function can be called from GC iterators (during Scavenge,
+  // MC, and MS), so marking bits can be set on objects. That's
+  // why unchecked accessors are used here.
   static Address prev_code = NULL;
   if (!Log::IsEnabled() || !FLAG_log_code) return;
   LogMessageBuilder msg;
   msg.Append("%s,", log_events_[FUNCTION_CREATION_EVENT]);
   msg.AppendAddress(function->address());
   msg.Append(',');
-  msg.AppendAddress(function->code()->address(), prev_code);
-  prev_code = function->code()->address();
+  msg.AppendAddress(function->unchecked_code()->address(), prev_code);
+  prev_code = function->unchecked_code()->address();
   if (FLAG_compress_log) {
     ASSERT(compression_helper_ != NULL);
     if (!compression_helper_->HandleMessage(&msg)) return;
   }
   msg.Append('\n');
   msg.WriteToLogFile();
+#endif
+}
+
+
+void Logger::FunctionCreateEventFromMove(JSFunction* function,
+                                         HeapObject*) {
+#ifdef ENABLE_LOGGING_AND_PROFILING
+  if (function->unchecked_code() != Builtins::builtin(Builtins::LazyCompile)) {
+    FunctionCreateEvent(function);
+  }
 #endif
 }
 
@@ -1266,7 +1282,8 @@ void Logger::LogCodeObject(Object* object) {
       case Code::BINARY_OP_IC:
         // fall through
       case Code::STUB:
-        description = CodeStub::MajorName(code_object->major_key(), true);
+        description =
+            CodeStub::MajorName(CodeStub::GetMajorKey(code_object), true);
         if (description == NULL)
           description = "A stub from the snapshot";
         tag = Logger::STUB_TAG;

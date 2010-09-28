@@ -37,6 +37,7 @@
 #include "top.h"
 #include "utils.h"
 #include "cctest.h"
+#include "parser.h"
 
 static const bool kLogThreading = true;
 
@@ -2936,6 +2937,49 @@ THREADED_TEST(NamedInterceptorDictionaryIC) {
 }
 
 
+THREADED_TEST(NamedInterceptorDictionaryICMultipleContext) {
+  v8::HandleScope scope;
+
+  v8::Persistent<Context> context1 = Context::New();
+
+  context1->Enter();
+  Local<ObjectTemplate> templ = ObjectTemplate::New();
+  templ->SetNamedPropertyHandler(XPropertyGetter);
+  // Create an object with a named interceptor.
+  v8::Local<v8::Object> object = templ->NewInstance();
+  context1->Global()->Set(v8_str("interceptor_obj"), object);
+
+  // Force the object into the slow case.
+  CompileRun("interceptor_obj.y = 0;"
+             "delete interceptor_obj.y;");
+  context1->Exit();
+
+  {
+    // Introduce the object into a different context.
+    // Repeat named loads to exercise ICs.
+    LocalContext context2;
+    context2->Global()->Set(v8_str("interceptor_obj"), object);
+    Local<Value> result =
+      CompileRun("function get_x(o) { return o.x; }"
+                 "interceptor_obj.x = 42;"
+                 "for (var i=0; i != 10; i++) {"
+                 "  get_x(interceptor_obj);"
+                 "}"
+                 "get_x(interceptor_obj)");
+    // Check that the interceptor was actually invoked.
+    CHECK_EQ(result, v8_str("x"));
+  }
+
+  // Return to the original context and force some object to the slow case
+  // to cause the NormalizedMapCache to verify.
+  context1->Enter();
+  CompileRun("var obj = { x : 0 }; delete obj.x;");
+  context1->Exit();
+
+  context1.Dispose();
+}
+
+
 static v8::Handle<Value> SetXOnPrototypeGetter(Local<String> property,
                                                const AccessorInfo& info) {
   // Set x on the prototype object and do not handle the get request.
@@ -3018,6 +3062,27 @@ static v8::Handle<Value> IdentityIndexedPropertyGetter(
     uint32_t index,
     const AccessorInfo& info) {
   return v8::Integer::New(index);
+}
+
+
+THREADED_TEST(IndexedInterceptorWithGetOwnPropertyDescriptor) {
+  v8::HandleScope scope;
+  Local<ObjectTemplate> templ = ObjectTemplate::New();
+  templ->SetIndexedPropertyHandler(IdentityIndexedPropertyGetter);
+
+  LocalContext context;
+  context->Global()->Set(v8_str("obj"), templ->NewInstance());
+
+  // Check fast object case.
+  const char* fast_case_code =
+      "Object.getOwnPropertyDescriptor(obj, 0).value.toString()";
+  ExpectString(fast_case_code, "0");
+
+  // Check slow case.
+  const char* slow_case_code =
+      "obj.x = 1; delete obj.x;"
+      "Object.getOwnPropertyDescriptor(obj, 1).value.toString()";
+  ExpectString(slow_case_code, "1");
 }
 
 
@@ -3602,6 +3667,29 @@ THREADED_TEST(ExceptionExtensions) {
   v8::ExtensionConfiguration extensions(1, extension_names);
   v8::Handle<Context> context = Context::New(&extensions);
   CHECK(context.IsEmpty());
+}
+
+
+static const char* kNativeCallInExtensionSource =
+    "function call_runtime_last_index_of(x) {"
+    "  return %StringLastIndexOf(x, 'bob', 10);"
+    "}";
+
+
+static const char* kNativeCallTest =
+    "call_runtime_last_index_of('bobbobboellebobboellebobbob');";
+
+// Test that a native runtime calls are supported in extensions.
+THREADED_TEST(NativeCallInExtensions) {
+  v8::HandleScope handle_scope;
+  v8::RegisterExtension(new Extension("nativecall",
+                                      kNativeCallInExtensionSource));
+  const char* extension_names[] = { "nativecall" };
+  v8::ExtensionConfiguration extensions(1, extension_names);
+  v8::Handle<Context> context = Context::New(&extensions);
+  Context::Scope lock(context);
+  v8::Handle<Value> result = Script::Compile(v8_str(kNativeCallTest))->Run();
+  CHECK_EQ(result, v8::Integer::New(3));
 }
 
 
@@ -8601,15 +8689,12 @@ TEST(PreCompileInvalidPreparseDataError) {
       v8::ScriptData::PreCompile(script, i::StrLength(script));
   CHECK(!sd->HasError());
   // ScriptDataImpl private implementation details
-  const int kUnsignedSize = sizeof(unsigned);
-  const int kHeaderSize = 4;
-  const int kFunctionEntrySize = 4;
+  const int kHeaderSize = i::ScriptDataImpl::kHeaderSize;
+  const int kFunctionEntrySize = i::FunctionEntry::kSize;
   const int kFunctionEntryStartOffset = 0;
   const int kFunctionEntryEndOffset = 1;
   unsigned* sd_data =
       reinterpret_cast<unsigned*>(const_cast<char*>(sd->Data()));
-  CHECK_EQ(sd->Length(),
-           (kHeaderSize + 2 * kFunctionEntrySize) * kUnsignedSize);
 
   // Overwrite function bar's end position with 0.
   sd_data[kHeaderSize + 1 * kFunctionEntrySize + kFunctionEntryEndOffset] = 0;
@@ -8625,6 +8710,8 @@ TEST(PreCompileInvalidPreparseDataError) {
   try_catch.Reset();
   // Overwrite function bar's start position with 200.  The function entry
   // will not be found when searching for it by position.
+  sd = v8::ScriptData::PreCompile(script, i::StrLength(script));
+  sd_data = reinterpret_cast<unsigned*>(const_cast<char*>(sd->Data()));
   sd_data[kHeaderSize + 1 * kFunctionEntrySize + kFunctionEntryStartOffset] =
       200;
   compiled_script = Script::New(source, NULL, sd);
@@ -10924,7 +11011,9 @@ TEST(Bug618) {
   CompileRun(source);
 
   script = v8::Script::Compile(v8_str("new C1();"));
-  for (int i = 0; i < 10; i++) {
+  // Allow enough iterations for the inobject slack tracking logic
+  // to finalize instance size and install the fast construct stub.
+  for (int i = 0; i < 256; i++) {
     v8::Handle<v8::Object> c1 = v8::Handle<v8::Object>::Cast(script->Run());
     CHECK_EQ(23, c1->Get(v8_str("x"))->Int32Value());
     CHECK_EQ(42, c1->Get(v8_str("y"))->Int32Value());
@@ -11284,4 +11373,73 @@ TEST(GCInFailedAccessCheckCallback) {
   // Reset the failed access check callback so it does not influence
   // the other tests.
   v8::V8::SetFailedAccessCheckCallbackFunction(NULL);
+}
+
+
+TEST(StringCheckMultipleContexts) {
+  const char* code =
+      "(function() { return \"a\".charAt(0); })()";
+
+  {
+    // Run the code twice in the first context to initialize the call IC.
+    v8::HandleScope scope;
+    LocalContext context1;
+    ExpectString(code, "a");
+    ExpectString(code, "a");
+  }
+
+  {
+    // Change the String.prototype in the second context and check
+    // that the right function gets called.
+    v8::HandleScope scope;
+    LocalContext context2;
+    CompileRun("String.prototype.charAt = function() { return \"not a\"; }");
+    ExpectString(code, "not a");
+  }
+}
+
+
+TEST(NumberCheckMultipleContexts) {
+  const char* code =
+      "(function() { return (42).toString(); })()";
+
+  {
+    // Run the code twice in the first context to initialize the call IC.
+    v8::HandleScope scope;
+    LocalContext context1;
+    ExpectString(code, "42");
+    ExpectString(code, "42");
+  }
+
+  {
+    // Change the Number.prototype in the second context and check
+    // that the right function gets called.
+    v8::HandleScope scope;
+    LocalContext context2;
+    CompileRun("Number.prototype.toString = function() { return \"not 42\"; }");
+    ExpectString(code, "not 42");
+  }
+}
+
+
+TEST(BooleanCheckMultipleContexts) {
+  const char* code =
+      "(function() { return true.toString(); })()";
+
+  {
+    // Run the code twice in the first context to initialize the call IC.
+    v8::HandleScope scope;
+    LocalContext context1;
+    ExpectString(code, "true");
+    ExpectString(code, "true");
+  }
+
+  {
+    // Change the Boolean.prototype in the second context and check
+    // that the right function gets called.
+    v8::HandleScope scope;
+    LocalContext context2;
+    CompileRun("Boolean.prototype.toString = function() { return \"\"; }");
+    ExpectString(code, "");
+  }
 }

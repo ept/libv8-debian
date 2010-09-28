@@ -1,4 +1,4 @@
-// Copyright 2006-2008 the V8 project authors. All rights reserved.
+// Copyright 2010 the V8 project authors. All rights reserved.
 // Redistribution and use in source and binary forms, with or without
 // modification, are permitted provided that the following conditions are
 // met:
@@ -342,8 +342,11 @@ void Scanner::LiteralScope::Complete() {
 // ----------------------------------------------------------------------------
 // Scanner
 
-Scanner::Scanner(ParserMode pre)
-    : is_pre_parsing_(pre == PREPARSE), stack_overflow_(false) { }
+Scanner::Scanner()
+    : has_line_terminator_before_next_(false),
+      is_parsing_json_(false),
+      source_(NULL),
+      stack_overflow_(false) {}
 
 
 void Scanner::Initialize(Handle<String> source,
@@ -430,6 +433,7 @@ Token::Value Scanner::Next() {
     stack_overflow_ = true;
     next_.token = Token::ILLEGAL;
   } else {
+    has_line_terminator_before_next_ = false;
     Scan();
   }
   return current_.token;
@@ -742,7 +746,7 @@ Token::Value Scanner::ScanJsonNumber() {
       AddCharAdvance();
     } while (c0_ >= '0' && c0_ <= '9');
   }
-  if ((c0_ | 0x20) == 'e') {
+  if (AsciiAlphaToLower(c0_) == 'e') {
     AddCharAdvance();
     if (c0_ == '-' || c0_ == '+') AddCharAdvance();
     if (c0_ < '0' || c0_ > '9') return Token::ILLEGAL;
@@ -772,7 +776,6 @@ Token::Value Scanner::ScanJsonIdentifier(const char* text,
 void Scanner::ScanJavaScript() {
   next_.literal_chars = Vector<const char>();
   Token::Value token;
-  has_line_terminator_before_next_ = false;
   do {
     // Remember the position of the next token
     next_.location.beg_pos = source_pos();
@@ -1013,6 +1016,10 @@ void Scanner::ScanJavaScript() {
 void Scanner::SeekForward(int pos) {
   source_->SeekForward(pos - 1);
   Advance();
+  // This function is only called to seek to the location
+  // of the end of a function (at the "}" token). It doesn't matter
+  // whether there was a line terminator in the part we skip.
+  has_line_terminator_before_next_ = false;
   Scan();
 }
 
