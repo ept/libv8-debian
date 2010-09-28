@@ -2,3 +2,4 @@
 0002-armel-build.patch
 0003-platform-detection-x86_64-and-mips.patch
 0004-add-the-install-target.patch
+0005-armhf-target.patch
