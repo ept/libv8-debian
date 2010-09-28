@@ -70,6 +70,16 @@ CountOperation* ExpressionStatement::StatementAsCountOperation() {
 }
 
 
+VariableProxy::VariableProxy(Variable* var)
+    : name_(var->name()),
+      var_(NULL),  // Will be set by the call to BindTo.
+      is_this_(var->is_this()),
+      inside_with_(false),
+      is_trivial_(false) {
+  BindTo(var);
+}
+
+
 VariableProxy::VariableProxy(Handle<String> name,
                              bool is_this,
                              bool inside_with)
@@ -84,7 +94,10 @@ VariableProxy::VariableProxy(Handle<String> name,
 
 
 VariableProxy::VariableProxy(bool is_this)
-    : is_this_(is_this) {
+  : var_(NULL),
+    is_this_(is_this),
+    inside_with_(false),
+    is_trivial_(false) {
 }
 
 

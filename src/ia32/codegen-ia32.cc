@@ -29,9 +29,9 @@
 
 #if defined(V8_TARGET_ARCH_IA32)
 
-#include "bootstrapper.h"
-#include "code-stubs-ia32.h"
 #include "codegen-inl.h"
+#include "bootstrapper.h"
+#include "code-stubs.h"
 #include "compiler.h"
 #include "debug.h"
 #include "ic-inl.h"
@@ -249,7 +249,7 @@ void CodeGenerator::Generate(CompilationInfo* info) {
       // the function.
       for (int i = 0; i < scope()->num_parameters(); i++) {
         Variable* par = scope()->parameter(i);
-        Slot* slot = par->slot();
+        Slot* slot = par->AsSlot();
         if (slot != NULL && slot->type() == Slot::CONTEXT) {
           // The use of SlotOperand below is safe in unspilled code
           // because the slot is guaranteed to be a context slot.
@@ -285,7 +285,7 @@ void CodeGenerator::Generate(CompilationInfo* info) {
     // Initialize ThisFunction reference if present.
     if (scope()->is_function_scope() && scope()->function() != NULL) {
       frame_->Push(Factory::the_hole_value());
-      StoreToSlot(scope()->function()->slot(), NOT_CONST_INIT);
+      StoreToSlot(scope()->function()->AsSlot(), NOT_CONST_INIT);
     }
 
 
@@ -717,10 +717,10 @@ void CodeGenerator::LoadTypeofExpression(Expression* expr) {
     Property property(&global, &key, RelocInfo::kNoPosition);
     Reference ref(this, &property);
     ref.GetValue();
-  } else if (variable != NULL && variable->slot() != NULL) {
+  } else if (variable != NULL && variable->AsSlot() != NULL) {
     // For a variable that rewrites to a slot, we signal it is the immediate
     // subexpression of a typeof.
-    LoadFromSlotCheckForArguments(variable->slot(), INSIDE_TYPEOF);
+    LoadFromSlotCheckForArguments(variable->AsSlot(), INSIDE_TYPEOF);
   } else {
     // Anything else can be handled normally.
     Load(expr);
@@ -759,17 +759,17 @@ Result CodeGenerator::StoreArgumentsObject(bool initial) {
     frame_->Push(&result);
   }
 
-  Variable* arguments = scope()->arguments()->var();
-  Variable* shadow = scope()->arguments_shadow()->var();
-  ASSERT(arguments != NULL && arguments->slot() != NULL);
-  ASSERT(shadow != NULL && shadow->slot() != NULL);
+  Variable* arguments = scope()->arguments();
+  Variable* shadow = scope()->arguments_shadow();
+  ASSERT(arguments != NULL && arguments->AsSlot() != NULL);
+  ASSERT(shadow != NULL && shadow->AsSlot() != NULL);
   JumpTarget done;
   bool skip_arguments = false;
   if (mode == LAZY_ARGUMENTS_ALLOCATION && !initial) {
     // We have to skip storing into the arguments slot if it has
     // already been written to. This can happen if the a function
     // has a local variable named 'arguments'.
-    LoadFromSlot(arguments->slot(), NOT_INSIDE_TYPEOF);
+    LoadFromSlot(arguments->AsSlot(), NOT_INSIDE_TYPEOF);
     Result probe = frame_->Pop();
     if (probe.is_constant()) {
       // We have to skip updating the arguments object if it has
@@ -782,10 +782,10 @@ Result CodeGenerator::StoreArgumentsObject(bool initial) {
     }
   }
   if (!skip_arguments) {
-    StoreToSlot(arguments->slot(), NOT_CONST_INIT);
+    StoreToSlot(arguments->AsSlot(), NOT_CONST_INIT);
     if (mode == LAZY_ARGUMENTS_ALLOCATION) done.Bind();
   }
-  StoreToSlot(shadow->slot(), NOT_CONST_INIT);
+  StoreToSlot(shadow->AsSlot(), NOT_CONST_INIT);
   return frame_->Pop();
 }
 
@@ -842,7 +842,7 @@ void CodeGenerator::LoadReference(Reference* ref) {
       LoadGlobal();
       ref->set_type(Reference::NAMED);
     } else {
-      ASSERT(var->slot() != NULL);
+      ASSERT(var->AsSlot() != NULL);
       ref->set_type(Reference::SLOT);
     }
   } else {
@@ -1411,12 +1411,12 @@ void CodeGenerator::GenericBinaryOperation(BinaryOperation* expr,
           StringAddStub stub(NO_STRING_CHECK_IN_STUB);
           answer = frame_->CallStub(&stub, 2);
         } else {
-          answer =
-            frame_->InvokeBuiltin(Builtins::STRING_ADD_LEFT, CALL_FUNCTION, 2);
+          StringAddStub stub(NO_STRING_CHECK_LEFT_IN_STUB);
+          answer = frame_->CallStub(&stub, 2);
         }
       } else if (right_is_string) {
-        answer =
-          frame_->InvokeBuiltin(Builtins::STRING_ADD_RIGHT, CALL_FUNCTION, 2);
+        StringAddStub stub(NO_STRING_CHECK_RIGHT_IN_STUB);
+        answer = frame_->CallStub(&stub, 2);
       }
       answer.set_type_info(TypeInfo::String());
       frame_->Push(&answer);
@@ -1451,7 +1451,7 @@ void CodeGenerator::GenericBinaryOperation(BinaryOperation* expr,
                              overwrite_mode,
                              NO_SMI_CODE_IN_STUB,
                              operands_type);
-    answer = stub.GenerateCall(masm_, frame_, &left, &right);
+    answer = GenerateGenericBinaryOpStubCall(&stub, &left, &right);
   } else if (right_is_smi_constant) {
     answer = ConstantSmiBinaryOperation(expr, &left, right.handle(),
                                         false, overwrite_mode);
@@ -1474,12 +1474,26 @@ void CodeGenerator::GenericBinaryOperation(BinaryOperation* expr,
                                overwrite_mode,
                                NO_GENERIC_BINARY_FLAGS,
                                operands_type);
-      answer = stub.GenerateCall(masm_, frame_, &left, &right);
+      answer = GenerateGenericBinaryOpStubCall(&stub, &left, &right);
     }
   }
 
   answer.set_type_info(result_type);
   frame_->Push(&answer);
+}
+
+
+Result CodeGenerator::GenerateGenericBinaryOpStubCall(GenericBinaryOpStub* stub,
+                                                      Result* left,
+                                                      Result* right) {
+  if (stub->ArgsInRegistersSupported()) {
+    stub->SetArgsInRegisters();
+    return frame_->CallStub(stub, left, right);
+  } else {
+    frame_->Push(left);
+    frame_->Push(right);
+    return frame_->CallStub(stub, 2);
+  }
 }
 
 
@@ -2632,6 +2646,19 @@ static Condition DoubleCondition(Condition cc) {
 }
 
 
+static CompareFlags ComputeCompareFlags(NaNInformation nan_info,
+                                        bool inline_number_compare) {
+  CompareFlags flags = NO_SMI_COMPARE_IN_STUB;
+  if (nan_info == kCantBothBeNaN) {
+    flags = static_cast<CompareFlags>(flags | CANT_BOTH_BE_NAN);
+  }
+  if (inline_number_compare) {
+    flags = static_cast<CompareFlags>(flags | NO_NUMBER_COMPARE_IN_STUB);
+  }
+  return flags;
+}
+
+
 void CodeGenerator::Comparison(AstNode* node,
                                Condition cc,
                                bool strict,
@@ -2759,7 +2786,9 @@ void CodeGenerator::Comparison(AstNode* node,
 
       // Setup and call the compare stub.
       is_not_string.Bind(&left_side);
-      CompareStub stub(cc, strict, kCantBothBeNaN);
+      CompareFlags flags =
+          static_cast<CompareFlags>(CANT_BOTH_BE_NAN | NO_SMI_COMPARE_IN_STUB);
+      CompareStub stub(cc, strict, flags);
       Result result = frame_->CallStub(&stub, &left_side, &right_side);
       result.ToRegister();
       __ cmp(result.reg(), 0);
@@ -2853,7 +2882,8 @@ void CodeGenerator::Comparison(AstNode* node,
 
       // End of in-line compare, call out to the compare stub. Don't include
       // number comparison in the stub if it was inlined.
-      CompareStub stub(cc, strict, nan_info, !inline_number_compare);
+      CompareFlags flags = ComputeCompareFlags(nan_info, inline_number_compare);
+      CompareStub stub(cc, strict, flags);
       Result answer = frame_->CallStub(&stub, &left_side, &right_side);
       __ test(answer.reg(), Operand(answer.reg()));
       answer.Unuse();
@@ -2886,7 +2916,9 @@ void CodeGenerator::Comparison(AstNode* node,
 
         // End of in-line compare, call out to the compare stub. Don't include
         // number comparison in the stub if it was inlined.
-        CompareStub stub(cc, strict, nan_info, !inline_number_compare);
+        CompareFlags flags =
+            ComputeCompareFlags(nan_info, inline_number_compare);
+        CompareStub stub(cc, strict, flags);
         Result answer = frame_->CallStub(&stub, &left_side, &right_side);
         __ test(answer.reg(), Operand(answer.reg()));
         answer.Unuse();
@@ -2980,7 +3012,6 @@ void CodeGenerator::ConstantSmiComparison(Condition cc,
         dest->false_target()->Branch(zero);
       } else {
         // Do the smi check, then the comparison.
-        JumpTarget is_not_smi;
         __ test(left_reg, Immediate(kSmiTagMask));
         is_smi.Branch(zero, left_side, right_side);
       }
@@ -3017,7 +3048,9 @@ void CodeGenerator::ConstantSmiComparison(Condition cc,
       }
 
       // Setup and call the compare stub.
-      CompareStub stub(cc, strict, kCantBothBeNaN);
+      CompareFlags flags =
+          static_cast<CompareFlags>(CANT_BOTH_BE_NAN | NO_SMI_CODE_IN_STUB);
+      CompareStub stub(cc, strict, flags);
       Result result = frame_->CallStub(&stub, left_side, right_side);
       result.ToRegister();
       __ test(result.reg(), Operand(result.reg()));
@@ -3241,7 +3274,7 @@ void CodeGenerator::CallApplyLazy(Expression* applicand,
   // Load the receiver and the existing arguments object onto the
   // expression stack. Avoid allocating the arguments object here.
   Load(receiver);
-  LoadFromSlot(scope()->arguments()->var()->slot(), NOT_INSIDE_TYPEOF);
+  LoadFromSlot(scope()->arguments()->AsSlot(), NOT_INSIDE_TYPEOF);
 
   // Emit the source position information after having loaded the
   // receiver and the arguments.
@@ -3503,7 +3536,7 @@ void CodeGenerator::VisitDeclaration(Declaration* node) {
   Comment cmnt(masm_, "[ Declaration");
   Variable* var = node->proxy()->var();
   ASSERT(var != NULL);  // must have been resolved
-  Slot* slot = var->slot();
+  Slot* slot = var->AsSlot();
 
   // If it was not possible to allocate the variable at compile time,
   // we need to "declare" it at runtime to make sure it actually
@@ -4219,7 +4252,7 @@ void CodeGenerator::VisitForStatement(ForStatement* node) {
   // the bottom check of the loop condition.
   if (node->is_fast_smi_loop()) {
     // Set number type of the loop variable to smi.
-    SetTypeForStackSlot(node->loop_variable()->slot(), TypeInfo::Smi());
+    SetTypeForStackSlot(node->loop_variable()->AsSlot(), TypeInfo::Smi());
   }
 
   Visit(node->body());
@@ -4245,7 +4278,7 @@ void CodeGenerator::VisitForStatement(ForStatement* node) {
   // expression if we are in a fast smi loop condition.
   if (node->is_fast_smi_loop() && has_valid_frame()) {
     // Set number type of the loop variable to smi.
-    SetTypeForStackSlot(node->loop_variable()->slot(), TypeInfo::Smi());
+    SetTypeForStackSlot(node->loop_variable()->AsSlot(), TypeInfo::Smi());
   }
 
   // Based on the condition analysis, compile the backward jump as
@@ -4544,8 +4577,8 @@ void CodeGenerator::VisitTryCatchStatement(TryCatchStatement* node) {
 
   // Store the caught exception in the catch variable.
   Variable* catch_var = node->catch_var()->var();
-  ASSERT(catch_var != NULL && catch_var->slot() != NULL);
-  StoreToSlot(catch_var->slot(), NOT_CONST_INIT);
+  ASSERT(catch_var != NULL && catch_var->AsSlot() != NULL);
+  StoreToSlot(catch_var->AsSlot(), NOT_CONST_INIT);
 
   // Remove the exception from the stack.
   frame_->Drop();
@@ -5140,7 +5173,7 @@ void CodeGenerator::EmitDynamicLoadFromSlotFastCase(Slot* slot,
     done->Jump(result);
 
   } else if (slot->var()->mode() == Variable::DYNAMIC_LOCAL) {
-    Slot* potential_slot = slot->var()->local_if_not_shadowed()->slot();
+    Slot* potential_slot = slot->var()->local_if_not_shadowed()->AsSlot();
     Expression* rewrite = slot->var()->local_if_not_shadowed()->rewrite();
     if (potential_slot != NULL) {
       // Generate fast case for locals that rewrite to slots.
@@ -5173,7 +5206,7 @@ void CodeGenerator::EmitDynamicLoadFromSlotFastCase(Slot* slot,
           Result arguments = allocator()->Allocate();
           ASSERT(arguments.is_valid());
           __ mov(arguments.reg(),
-                 ContextSlotOperandCheckExtensions(obj_proxy->var()->slot(),
+                 ContextSlotOperandCheckExtensions(obj_proxy->var()->AsSlot(),
                                                    arguments,
                                                    slow));
           frame_->Push(&arguments);
@@ -5681,7 +5714,7 @@ void CodeGenerator::EmitSlotAssignment(Assignment* node) {
   Comment cmnt(masm(), "[ Variable Assignment");
   Variable* var = node->target()->AsVariableProxy()->AsVariable();
   ASSERT(var != NULL);
-  Slot* slot = var->slot();
+  Slot* slot = var->AsSlot();
   ASSERT(slot != NULL);
 
   // Evaluate the right-hand side.
@@ -6030,14 +6063,14 @@ void CodeGenerator::VisitCall(Call* node) {
     // in generated code. If we succeed, there is no need to perform a
     // context lookup in the runtime system.
     JumpTarget done;
-    if (var->slot() != NULL && var->mode() == Variable::DYNAMIC_GLOBAL) {
-      ASSERT(var->slot()->type() == Slot::LOOKUP);
+    if (var->AsSlot() != NULL && var->mode() == Variable::DYNAMIC_GLOBAL) {
+      ASSERT(var->AsSlot()->type() == Slot::LOOKUP);
       JumpTarget slow;
       // Prepare the stack for the call to
       // ResolvePossiblyDirectEvalNoLookup by pushing the loaded
       // function, the first argument to the eval call and the
       // receiver.
-      Result fun = LoadFromGlobalSlotCheckExtensions(var->slot(),
+      Result fun = LoadFromGlobalSlotCheckExtensions(var->AsSlot(),
                                                      NOT_INSIDE_TYPEOF,
                                                      &slow);
       frame_->Push(&fun);
@@ -6120,8 +6153,8 @@ void CodeGenerator::VisitCall(Call* node) {
     frame_->RestoreContextRegister();
     frame_->Push(&result);
 
-  } else if (var != NULL && var->slot() != NULL &&
-             var->slot()->type() == Slot::LOOKUP) {
+  } else if (var != NULL && var->AsSlot() != NULL &&
+             var->AsSlot()->type() == Slot::LOOKUP) {
     // ----------------------------------
     // JavaScript examples:
     //
@@ -6140,7 +6173,7 @@ void CodeGenerator::VisitCall(Call* node) {
     // Generate fast case for loading functions from slots that
     // correspond to local/global variables or arguments unless they
     // are shadowed by eval-introduced bindings.
-    EmitDynamicLoadFromSlotFastCase(var->slot(),
+    EmitDynamicLoadFromSlotFastCase(var->AsSlot(),
                                     NOT_INSIDE_TYPEOF,
                                     &function,
                                     &slow,
@@ -7918,6 +7951,42 @@ void CodeGenerator::GenerateIsRegExpEquivalent(ZoneList<Expression*>* args) {
 }
 
 
+void CodeGenerator::GenerateHasCachedArrayIndex(ZoneList<Expression*>* args) {
+  ASSERT(args->length() == 1);
+  Load(args->at(0));
+  Result value = frame_->Pop();
+  value.ToRegister();
+  ASSERT(value.is_valid());
+  if (FLAG_debug_code) {
+    __ AbortIfNotString(value.reg());
+  }
+
+  __ test(FieldOperand(value.reg(), String::kHashFieldOffset),
+          Immediate(String::kContainsCachedArrayIndexMask));
+
+  value.Unuse();
+  destination()->Split(zero);
+}
+
+
+void CodeGenerator::GenerateGetCachedArrayIndex(ZoneList<Expression*>* args) {
+  ASSERT(args->length() == 1);
+  Load(args->at(0));
+  Result string = frame_->Pop();
+  string.ToRegister();
+  if (FLAG_debug_code) {
+    __ AbortIfNotString(string.reg());
+  }
+
+  Result number = allocator()->Allocate();
+  ASSERT(number.is_valid());
+  __ mov(number.reg(), FieldOperand(string.reg(), String::kHashFieldOffset));
+  __ IndexFromHash(number.reg(), number.reg());
+  string.Unuse();
+  frame_->Push(&number);
+}
+
+
 void CodeGenerator::VisitCallRuntime(CallRuntime* node) {
   ASSERT(!in_safe_int32_mode());
   if (CheckForInlineRuntimeCall(node)) {
@@ -7984,7 +8053,7 @@ void CodeGenerator::VisitUnaryOperation(UnaryOperation* node) {
 
     Variable* variable = node->expression()->AsVariableProxy()->AsVariable();
     if (variable != NULL) {
-      Slot* slot = variable->slot();
+      Slot* slot = variable->AsSlot();
       if (variable->is_global()) {
         LoadGlobal();
         frame_->Push(variable->name());
@@ -8096,6 +8165,7 @@ void CodeGenerator::VisitUnaryOperation(UnaryOperation* node) {
           GenericUnaryOpStub stub(
               Token::SUB,
               overwrite,
+              NO_UNARY_FLAGS,
               no_negative_zero ? kIgnoreNegativeZero : kStrictNegativeZero);
           Result operand = frame_->Pop();
           Result answer = frame_->CallStub(&stub, &operand);
@@ -8123,7 +8193,9 @@ void CodeGenerator::VisitUnaryOperation(UnaryOperation* node) {
             __ test(operand.reg(), Immediate(kSmiTagMask));
             smi_label.Branch(zero, &operand, taken);
 
-            GenericUnaryOpStub stub(Token::BIT_NOT, overwrite);
+            GenericUnaryOpStub stub(Token::BIT_NOT,
+                                    overwrite,
+                                    NO_UNARY_SMI_CODE_IN_STUB);
             Result answer = frame_->CallStub(&stub, &operand);
             continue_label.Jump(&answer);
 
@@ -9072,9 +9144,15 @@ class DeferredReferenceGetNamedValue: public DeferredCode {
  public:
   DeferredReferenceGetNamedValue(Register dst,
                                  Register receiver,
-                                 Handle<String> name)
-      : dst_(dst), receiver_(receiver),  name_(name) {
-    set_comment("[ DeferredReferenceGetNamedValue");
+                                 Handle<String> name,
+                                 bool is_contextual)
+      : dst_(dst),
+        receiver_(receiver),
+        name_(name),
+        is_contextual_(is_contextual) {
+    set_comment(is_contextual
+                ? "[ DeferredReferenceGetNamedValue (contextual)"
+                : "[ DeferredReferenceGetNamedValue");
   }
 
   virtual void Generate();
@@ -9086,6 +9164,7 @@ class DeferredReferenceGetNamedValue: public DeferredCode {
   Register dst_;
   Register receiver_;
   Handle<String> name_;
+  bool is_contextual_;
 };
 
 
@@ -9095,9 +9174,15 @@ void DeferredReferenceGetNamedValue::Generate() {
   }
   __ Set(ecx, Immediate(name_));
   Handle<Code> ic(Builtins::builtin(Builtins::LoadIC_Initialize));
-  __ call(ic, RelocInfo::CODE_TARGET);
-  // The call must be followed by a test eax instruction to indicate
-  // that the inobject property case was inlined.
+  RelocInfo::Mode mode = is_contextual_
+      ? RelocInfo::CODE_TARGET_CONTEXT
+      : RelocInfo::CODE_TARGET;
+  __ call(ic, mode);
+  // The call must be followed by:
+  // - a test eax instruction to indicate that the inobject property
+  //   case was inlined.
+  // - a mov ecx instruction to indicate that the contextual property
+  //   load was inlined.
   //
   // Store the delta to the map check instruction here in the test
   // instruction.  Use masm_-> instead of the __ macro since the
@@ -9105,8 +9190,13 @@ void DeferredReferenceGetNamedValue::Generate() {
   int delta_to_patch_site = masm_->SizeOfCodeGeneratedSince(patch_site());
   // Here we use masm_-> instead of the __ macro because this is the
   // instruction that gets patched and coverage code gets in the way.
-  masm_->test(eax, Immediate(-delta_to_patch_site));
-  __ IncrementCounter(&Counters::named_load_inline_miss, 1);
+  if (is_contextual_) {
+    masm_->mov(ecx, -delta_to_patch_site);
+    __ IncrementCounter(&Counters::named_load_global_inline_miss, 1);
+  } else {
+    masm_->test(eax, Immediate(-delta_to_patch_site));
+    __ IncrementCounter(&Counters::named_load_inline_miss, 1);
+  }
 
   if (!dst_.is(eax)) __ mov(dst_, eax);
 }
@@ -9277,12 +9367,17 @@ Result CodeGenerator::EmitNamedLoad(Handle<String> name, bool is_contextual) {
 #ifdef DEBUG
   int original_height = frame()->height();
 #endif
+
+  bool contextual_load_in_builtin =
+      is_contextual &&
+      (Bootstrapper::IsActive() ||
+       (!info_->closure().is_null() && info_->closure()->IsBuiltin()));
+
   Result result;
-  // Do not inline the inobject property case for loads from the global
-  // object.  Also do not inline for unoptimized code.  This saves time in
-  // the code generator.  Unoptimized code is toplevel code or code that is
-  // not in a loop.
-  if (is_contextual || scope()->is_global_scope() || loop_nesting() == 0) {
+  // Do not inline in the global code or when not in loop.
+  if (scope()->is_global_scope() ||
+      loop_nesting() == 0 ||
+      contextual_load_in_builtin) {
     Comment cmnt(masm(), "[ Load from named Property");
     frame()->Push(name);
 
@@ -9295,19 +9390,26 @@ Result CodeGenerator::EmitNamedLoad(Handle<String> name, bool is_contextual) {
     // instruction here.
     __ nop();
   } else {
-    // Inline the inobject property case.
-    Comment cmnt(masm(), "[ Inlined named property load");
+    // Inline the property load.
+    Comment cmnt(masm(), is_contextual
+                         ? "[ Inlined contextual property load"
+                         : "[ Inlined named property load");
     Result receiver = frame()->Pop();
     receiver.ToRegister();
 
     result = allocator()->Allocate();
     ASSERT(result.is_valid());
     DeferredReferenceGetNamedValue* deferred =
-        new DeferredReferenceGetNamedValue(result.reg(), receiver.reg(), name);
+        new DeferredReferenceGetNamedValue(result.reg(),
+                                           receiver.reg(),
+                                           name,
+                                           is_contextual);
 
-    // Check that the receiver is a heap object.
-    __ test(receiver.reg(), Immediate(kSmiTagMask));
-    deferred->Branch(zero);
+    if (!is_contextual) {
+      // Check that the receiver is a heap object.
+      __ test(receiver.reg(), Immediate(kSmiTagMask));
+      deferred->Branch(zero);
+    }
 
     __ bind(deferred->patch_site());
     // This is the map check instruction that will be patched (so we can't
@@ -9319,17 +9421,33 @@ Result CodeGenerator::EmitNamedLoad(Handle<String> name, bool is_contextual) {
     // which allows the assert below to succeed and patching to work.
     deferred->Branch(not_equal);
 
-    // The delta from the patch label to the load offset must be statically
-    // known.
+    // The delta from the patch label to the actual load must be
+    // statically known.
     ASSERT(masm()->SizeOfCodeGeneratedSince(deferred->patch_site()) ==
            LoadIC::kOffsetToLoadInstruction);
-    // The initial (invalid) offset has to be large enough to force a 32-bit
-    // instruction encoding to allow patching with an arbitrary offset.  Use
-    // kMaxInt (minus kHeapObjectTag).
-    int offset = kMaxInt;
-    masm()->mov(result.reg(), FieldOperand(receiver.reg(), offset));
 
-    __ IncrementCounter(&Counters::named_load_inline, 1);
+    if (is_contextual) {
+      // Load the (initialy invalid) cell and get its value.
+      masm()->mov(result.reg(), Factory::null_value());
+      if (FLAG_debug_code) {
+        __ cmp(FieldOperand(result.reg(), HeapObject::kMapOffset),
+               Factory::global_property_cell_map());
+        __ Assert(equal, "Uninitialized inlined contextual load");
+      }
+      __ mov(result.reg(),
+             FieldOperand(result.reg(), JSGlobalPropertyCell::kValueOffset));
+      __ cmp(result.reg(), Factory::the_hole_value());
+      deferred->Branch(equal);
+      __ IncrementCounter(&Counters::named_load_global_inline, 1);
+    } else {
+      // The initial (invalid) offset has to be large enough to force a 32-bit
+      // instruction encoding to allow patching with an arbitrary offset.  Use
+      // kMaxInt (minus kHeapObjectTag).
+      int offset = kMaxInt;
+      masm()->mov(result.reg(), FieldOperand(receiver.reg(), offset));
+      __ IncrementCounter(&Counters::named_load_inline, 1);
+    }
+
     deferred->BindExit();
   }
   ASSERT(frame()->height() == original_height - 1);
@@ -9669,7 +9787,7 @@ void Reference::GetValue() {
   switch (type_) {
     case SLOT: {
       Comment cmnt(masm, "[ Load from Slot");
-      Slot* slot = expression_->AsVariableProxy()->AsVariable()->slot();
+      Slot* slot = expression_->AsVariableProxy()->AsVariable()->AsSlot();
       ASSERT(slot != NULL);
       cgen_->LoadFromSlotCheckForArguments(slot, NOT_INSIDE_TYPEOF);
       if (!persist_after_get_) set_unloaded();
@@ -9714,7 +9832,7 @@ void Reference::TakeValue() {
     return;
   }
 
-  Slot* slot = expression_->AsVariableProxy()->AsVariable()->slot();
+  Slot* slot = expression_->AsVariableProxy()->AsVariable()->AsSlot();
   ASSERT(slot != NULL);
   if (slot->type() == Slot::LOOKUP ||
       slot->type() == Slot::CONTEXT ||
@@ -9747,7 +9865,7 @@ void Reference::SetValue(InitState init_state) {
   switch (type_) {
     case SLOT: {
       Comment cmnt(masm, "[ Store to Slot");
-      Slot* slot = expression_->AsVariableProxy()->AsVariable()->slot();
+      Slot* slot = expression_->AsVariableProxy()->AsVariable()->AsSlot();
       ASSERT(slot != NULL);
       cgen_->StoreToSlot(slot, init_state);
       set_unloaded();
@@ -9776,21 +9894,6 @@ void Reference::SetValue(InitState init_state) {
     case UNLOADED:
     case ILLEGAL:
       UNREACHABLE();
-  }
-}
-
-
-Result GenericBinaryOpStub::GenerateCall(MacroAssembler* masm,
-                                         VirtualFrame* frame,
-                                         Result* left,
-                                         Result* right) {
-  if (ArgsInRegistersSupported()) {
-    SetArgsInRegisters();
-    return frame->CallStub(this, left, right);
-  } else {
-    frame->Push(left);
-    frame->Push(right);
-    return frame->CallStub(this, 2);
   }
 }
 

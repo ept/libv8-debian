@@ -869,7 +869,7 @@ static void DebugEventBreakPointCollectGarbage(
       // Scavenge.
       Heap::CollectGarbage(0, v8::internal::NEW_SPACE);
     } else {
-      // Mark sweep (and perhaps compact).
+      // Mark sweep compact.
       Heap::CollectAllGarbage(true);
     }
   }
@@ -1153,6 +1153,40 @@ TEST(BreakPointICCallWithGC) {
                                    v8::Undefined());
   v8::Script::Compile(v8::String::New("function bar(){return 1;}"))->Run();
   v8::Script::Compile(v8::String::New("function foo(){return bar();}"))->Run();
+  v8::Local<v8::Function> foo =
+      v8::Local<v8::Function>::Cast(env->Global()->Get(v8::String::New("foo")));
+
+  // Run without breakpoints.
+  CHECK_EQ(1, foo->Call(env->Global(), 0, NULL)->Int32Value());
+  CHECK_EQ(0, break_point_hit_count);
+
+  // Run with breakpoint.
+  int bp = SetBreakPoint(foo, 0);
+  CHECK_EQ(1, foo->Call(env->Global(), 0, NULL)->Int32Value());
+  CHECK_EQ(1, break_point_hit_count);
+  CHECK_EQ(1, foo->Call(env->Global(), 0, NULL)->Int32Value());
+  CHECK_EQ(2, break_point_hit_count);
+
+  // Run without breakpoints.
+  ClearBreakPoint(bp);
+  foo->Call(env->Global(), 0, NULL);
+  CHECK_EQ(2, break_point_hit_count);
+
+  v8::Debug::SetDebugEventListener(NULL);
+  CheckDebuggerUnloaded();
+}
+
+
+// Test that a break point can be set at an IC call location and survive a GC.
+TEST(BreakPointConstructCallWithGC) {
+  break_point_hit_count = 0;
+  v8::HandleScope scope;
+  DebugLocalContext env;
+  v8::Debug::SetDebugEventListener(DebugEventBreakPointCollectGarbage,
+                                   v8::Undefined());
+  v8::Script::Compile(v8::String::New("function bar(){ this.x = 1;}"))->Run();
+  v8::Script::Compile(v8::String::New(
+      "function foo(){return new bar(1).x;}"))->Run();
   v8::Local<v8::Function> foo =
       v8::Local<v8::Function>::Cast(env->Global()->Get(v8::String::New("foo")));
 
@@ -4557,6 +4591,18 @@ int GetTotalFramesInt(char *message) {
 }
 
 
+// We match parts of the message to get source line.
+int GetSourceLineFromBreakEventMessage(char *message) {
+  const char* source_line = "\"sourceLine\":";
+  char* pos = strstr(message, source_line);
+  if (pos == NULL) {
+    return -1;
+  }
+  int res = -1;
+  res = StringToInt(pos + strlen(source_line));
+  return res;
+}
+
 /* Test MessageQueues */
 /* Tests the message queues that hold debugger commands and
  * response messages to the debugger.  Fills queues and makes
@@ -4836,6 +4882,9 @@ static void ThreadedMessageHandler(const v8::Debug::Message& message) {
   v8::String::Value json(message.GetJSON());
   Utf16ToAscii(*json, json.length(), print_buffer);
   if (IsBreakEventMessage(print_buffer)) {
+    // Check that we are inside the while loop.
+    int source_line = GetSourceLineFromBreakEventMessage(print_buffer);
+    CHECK(8 <= source_line && source_line <= 13);
     threaded_debugging_barriers.barrier_2.Wait();
   }
 }
