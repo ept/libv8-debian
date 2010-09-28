@@ -1,10 +1,4 @@
-libv8 (2.3.11-1) experimental; urgency=low
-
-  * New upstream release, followed the procedure of README.source to update. 
-
- -- Jérémy Lal <kapouer@melix.org>  Tue, 07 Sep 2010 09:45:12 +0200
-
-libv8 (2.3.9-1) unstable; urgency=low
+libv8 (2.4.6-1) experimental; urgency=low
 
   * New upstream release, followed the procedure of README.source to update.
   * Removed patch issue3037008_6001.diff, applied upstream.
@@ -12,7 +6,15 @@ libv8 (2.3.9-1) unstable; urgency=low
   * Remove GCC_VERSION=44, no longer needed.
   * Runs cctest and mjsunit tests after build.
 
- -- Jérémy Lal <kapouer@melix.org>  Wed, 18 Aug 2010 15:22:07 +0200
+ -- Jérémy Lal <kapouer@melix.org>  Tue, 28 Sep 2010 17:03:25 +0200
+
+libv8 (2.2.24-6) unstable; urgency=low
+
+  * CVE-2010-3412 (Closes: #597856)
+    Race condition in the console implementation in Google Chrome before
+    6.0.472.59 has unspecified impact and attack vectors.
+
+ -- Jérémy Lal <kapouer@melix.org>  Fri, 24 Sep 2010 11:44:57 +0200
 
 libv8 (2.2.24-5) unstable; urgency=low
 
