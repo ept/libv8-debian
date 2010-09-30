@@ -5,7 +5,6 @@ libv8 (2.4.6-1) experimental; urgency=low
   * Removed part of 0002-armel-build.patch, applied upstream.
   * Remove GCC_VERSION=44, no longer needed.
   * Runs cctest and mjsunit tests after build.
-  * Add support for armhf. (Closes: #596997)
 
  -- Jérémy Lal <kapouer@melix.org>  Tue, 28 Sep 2010 17:03:25 +0200
 
