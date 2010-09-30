@@ -1,4 +1,4 @@
-libv8 (2.4.6-1) experimental; urgency=low
+libv8 (2.4.7-1) experimental; urgency=low
 
   * New upstream release, followed the procedure of README.source to update.
   * Removed patch issue3037008_6001.diff, applied upstream.
