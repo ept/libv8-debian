@@ -13,8 +13,13 @@ export CFLAGS
 export CXXFLAGS
 
 DEB_SCONS_OPTIONS          := library=shared soname=on shlibtype=hidden
-DEB_SCONS_BUILD_OPTIONS    := sample=shell
-DEB_SCONS_BUILD_TARGET     := library sample cctests
+# policy 4.9.1
+ifeq (,$(filter nocheck,$(DEB_BUILD_OPTIONS)))
+	DEB_SCONS_BUILD_OPTIONS    := sample=shell
+	DEB_SCONS_BUILD_TARGET     := library sample cctests
+else
+	DEB_SCONS_BUILD_TARGET     := library
+endif
 DEB_SCONS_INSTALL_OPTIONS  := $(DEB_SCONS_OPTIONS) DESTDIR=$(DEB_DESTDIR)
 
 clean::
@@ -24,8 +29,11 @@ clean::
 	rm -f shell
 
 common-post-build-impl::
-	# need to preload freshly compiled lib.
-	LD_PRELOAD=$(CURDIR)/libv8-$(SONAME).so $(CURDIR)/tools/test.py --no-build cctest mjsunit message
+	# policy 4.9.1
+	ifeq (,$(filter nocheck,$(DEB_BUILD_OPTIONS)))
+		# need to preload freshly compiled lib.
+		LD_PRELOAD=$(CURDIR)/libv8-$(SONAME).so $(CURDIR)/tools/test.py --no-build cctest mjsunit message
+	endif
 
 common-install-impl::
 	cd debian/tmp/usr/lib/ ; \
