@@ -3,22 +3,7 @@
 include /usr/share/cdbs/1/rules/debhelper.mk
 include /usr/share/cdbs/1/class/scons.mk
 
-# These are used for cross-compiling and for saving the configure script
-# from having to guess our platform (since we know it already)
-DEB_HOST_GNU_TYPE       ?= $(shell dpkg-architecture -qDEB_HOST_GNU_TYPE)
-DEB_BUILD_GNU_TYPE      ?= $(shell dpkg-architecture -qDEB_BUILD_GNU_TYPE)
-DEB_BUILD_ARCH          ?= $(shell dpkg-architecture -qDEB_BUILD_ARCH)
-
-DEBIAN_NAME		:= $(shell dpkg-parsechangelog | sed -n 's/^Source: *\(.*\)$$/\1/ p')
-DEBIAN_VERSION		:= $(shell dpkg-parsechangelog | sed -n 's/^Version: *\(.*\)$$/\1/ p')
-DEBIAN_UPSTREAM_VERSION	:= $(shell echo $(DEBIAN_VERSION) | sed 's/^\(.*\)-[^-]*$$/\1/')
-DEBIAN_UPSTREAM_BRANCH	:= $(shell echo $(DEBIAN_UPSTREAM_VERSION) | sed 's/^\([^\.]*\.[^.+~]*\).*$$/\1/')
-DEBIAN_REVISION		:= $(shell echo $(DEBIAN_VERSION) | sed 's/^.*r\([^-]*\).*/\1/')
-
 SONAME			:= 2.4.7
-
-SRC_DIR			:= $(CURDIR)
-DEB_BUILDDIR		:= $(SRC_DIR)
 
 DEB_DH_MAKESHLIBS_ARGS := -- -c4
 
@@ -33,7 +18,6 @@ DEB_SCONS_BUILD_TARGET     := library sample cctests
 DEB_SCONS_INSTALL_OPTIONS  := $(DEB_SCONS_OPTIONS) DESTDIR=$(DEB_DESTDIR)
 
 clean::
-	#if [ -f src/version.cc~ ] ; then mv src/version.cc~ src/version.cc ; fi
 	rm -f tools/*.pyc libv8-$(SONAME).so
 	rm -rf obj
 	rm -f test/*/*.pyc
@@ -47,57 +31,3 @@ common-install-impl::
 	cd debian/tmp/usr/lib/ ; \
 	mv libv8-$(SONAME)*.so libv8.so.$(SONAME) ; \
 	ln -s -T libv8.so.$(SONAME) libv8.so
-
-# Tarball (get-orig-source & get-current-source)
-V8_SVN_URL := http://v8.googlecode.com/svn/branches/$(DEBIAN_UPSTREAM_BRANCH)
-TMP_DDIR   := $(DEBIAN_NAME)-$(shell echo $$$$)
-ifeq (,$(LOCAL_BRANCH))
-TMP_DIR    := $(TMP_DDIR)
-else
-TMP_DIR    := $(LOCAL_BRANCH)
-endif
-
-ifneq (,$(DEBIAN_TAG))
-get-orig-source: TAG  = $(NULL)
-else
-get-orig-source: TAG  = -r $(shell svn log --limit 1 $(V8_SVN_URL) | grep ^r | head -1 | sed -e 's/^r\([^ ]*\).*/\1/')
-endif
-get-orig-source: gos-all
-
-get-current-source: TAG = -r $(DEBIAN_REVISION)
-get-current-source: gos-all
-
-gos-all: gos-co gos-pack
-gos-co:
-ifeq (,$(LOCAL_BRANCH))
-	rm -rf $(TMP_DIR)
-endif
-	@if [ ! -d $(TMP_DIR) ] ; then echo mkdir $(TMP_DIR); mkdir $(TMP_DIR) ; fi
-	# Checkout
-	@if [ ! -d $(TMP_DIR)/src ] ; then \
-	  echo svn co $(V8_SVN_URL) $(TMP_DIR)/src ; \
-	  svn co $(V8_SVN_URL) $(TMP_DIR)/src ; \
-	else \
-	  echo svn update $(TMP_DIR)/src ; \
-	  svn update $(TMP_DIR)/src ; \
-	fi
-ifneq (,$(LOCAL_BRANCH))
-	rm -rf $(TMP_DDIR)
-	cp -la $(TMP_DIR) $(TMP_DDIR)
-endif
-	
-gos-pack: TMP_DIR  = $(TMP_DDIR)
-ifneq (,$(DEBIAN_TAG))
-gos-pack: VERSION  = $(shell echo $(DEBIAN_TAG) | cut -d= -f2)
-else
-gos-pack: REVISION = $(shell cd $(TMP_DIR)/src && svn log --xml --limit 1 | grep -E '^( *revision=|<date>)' | tr -d '\n' | \
-	             sed -e 's/.*"\([0-9]*\)".*>\(....\)-\(..\)-\(..\)T.*/\2\3\4r\1/')
-gos-pack: VERSION  = $(shell grep -E '^#define (MAJOR|MINOR|BUILD)_(VERSION|NUMBER)' $(TMP_DIR)/src/src/version.cc | awk '{ print $$3 }' | tr '\n' '.' | sed -e 's/\.$$//')~svn$(REVISION)
-endif
-gos-pack:
-	# Pack
-	mv $(TMP_DIR)/src $(TMP_DIR)/$(DEBIAN_NAME)-$(VERSION)
-	cd $(TMP_DIR) && tar zcf ../$(DEBIAN_NAME)_$(VERSION).orig.tar.gz --exclude=.svn $(DEBIAN_NAME)-$(VERSION)
-	rm -rf $(TMP_DIR)
-	@echo "# Done (created $(DEBIAN_NAME)_$(VERSION).orig.tar.gz)"
-	@ls -l $(DEBIAN_NAME)_$(VERSION).orig.tar.gz
