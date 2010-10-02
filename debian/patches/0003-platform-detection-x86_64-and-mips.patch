@@ -3,7 +3,7 @@ http://code.google.com/p/v8/issues/detail?id=429
 
 --- a/tools/utils.py
 +++ b/tools/utils.py
-@@ -71,14 +71,17 @@
+@@ -71,13 +71,16 @@
    id = id.lower()  # Windows 7 capitalizes 'AMD64'.
    if id.startswith('arm'):
      return 'arm'
@@ -15,12 +15,11 @@ http://code.google.com/p/v8/issues/detail?id=429
 -    return 'ia32'
 +    return 'x64'
    elif id == 'amd64':
-     return 'ia32'
++    return 'x64'
 +  elif id == 'mipsel':
 +    # only little endian is supported as of libv8 2.2.24
 +    return 'mips'
 +  elif (not id) or (not re.match('(x|i[3-6])86', id) is None):
-+    return 'ia32'
+     return 'ia32'
    else:
      return None
- 
