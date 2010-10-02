@@ -9,6 +9,25 @@ for more information on how to apply the patches, modify patches, or
 remove a patch.
 
 
+Import a new version using git-buildpackage layout:
+=====
+# the new version you want to import
+VERSION=2.4.7
+# the dir where you keep your debian git packaging archive 
+GITDIR=collab-maint
+
+# download and repackage the upstream source
+svn export http://v8.googlecode.com/svn/tags/$VERSION import/libv8-$VERSION
+cd import
+tar zcvf libv8-$VERSION.tar.gz libv8-$VERSION
+cd ..
+
+# import into upstream/$VERSION and automatically merge to master
+cd $GITDIR
+git checkout master
+git-import-orig --pristine-tar ../import/libv8-$VERSION.tar.gz
+
+
 To update to a new version:
 =====
 
