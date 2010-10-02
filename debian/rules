@@ -13,12 +13,15 @@ export CFLAGS
 export CXXFLAGS
 
 DEB_SCONS_OPTIONS          := library=shared soname=on shlibtype=hidden
+DEB_SCONS_BUILD_TARGET     := library
 # policy 4.9.1
 ifeq (,$(filter nocheck,$(DEB_BUILD_OPTIONS)))
 	DEB_SCONS_BUILD_OPTIONS    := sample=shell
-	DEB_SCONS_BUILD_TARGET     := library sample cctests
-else
-	DEB_SCONS_BUILD_TARGET     := library
+	DEB_SCONS_BUILD_TARGET     += sample cctests
+endif
+ifneq (,$(filter parallel=%,$(DEB_BUILD_OPTIONS)))
+	NUMJOBS = $(patsubst parallel=%,%,$(filter parallel=%,$(DEB_BUILD_OPTIONS)))
+	DEB_SCONS_BUILD_OPTIONS += -j$(NUMJOBS)
 endif
 DEB_SCONS_INSTALL_OPTIONS  := $(DEB_SCONS_OPTIONS) DESTDIR=$(DEB_DESTDIR)
 
