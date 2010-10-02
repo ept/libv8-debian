@@ -3,10 +3,11 @@ libv8 (2.4.7-1) experimental; urgency=low
   * New upstream release, followed the procedure of README.source to update.
   * Removed patch issue3037008_6001.diff, applied upstream.
   * Removed part of 0002-armel-build.patch, applied upstream.
+  * Target for amd64 is x64, not ia32.
   * Remove GCC_VERSION=44, no longer needed.
   * Runs cctest and mjsunit tests after build.
 
- -- Jérémy Lal <kapouer@melix.org>  Tue, 28 Sep 2010 17:03:25 +0200
+ -- Jérémy Lal <kapouer@melix.org>  Sat, 02 Oct 2010 12:01:53 +0200
 
 libv8 (2.2.24-6) unstable; urgency=low
 
