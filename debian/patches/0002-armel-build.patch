@@ -1,4 +1,4 @@
-adding -march=armv5t to build libv8 on armel
+adding -march=armv4t to build libv8 on armel, and -Wno-psabi to fix gcc warnings on armel, see http://gcc.gnu.org/bugzilla/show_bug.cgi?id=42748
 
 --- a/SConstruct
 +++ b/SConstruct
@@ -8,7 +8,7 @@ adding -march=armv5t to build libv8 on armel
          'CPPDEFINES' : ['CAN_USE_UNALIGNED_ACCESSES=0']
 -      }
 +      },
-+      'CCFLAGS':      ['-march=armv4t', '-mno-thumb-interwork', '-fno-tree-sink']
++      'CCFLAGS':      ['-march=armv4t', '-mno-thumb-interwork', '-fno-tree-sink', '-Wno-psabi']
      },
      'simulator:arm': {
        'CCFLAGS':      ['-m32'],
