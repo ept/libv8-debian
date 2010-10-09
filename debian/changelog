@@ -1,9 +1,13 @@
 libv8 (2.4.7-2) experimental; urgency=low
 
+  * Fix FTBFS on armel with -Wno-psabi. For more info :
+    http://gcc.gnu.org/bugzilla/show_bug.cgi?id=42748
+  * Fix FTBFS on mipsel, just remove it, it is not supported upstream,
+    and anyway it won't compile in the 2.2 or 2.3 branches.
   * Respect policy 4.9.1 for DEB_BUILD_OPTIONS nocheck and parallel.
-  * Remove unused code from debian/rules. 
+  * Remove unused code from debian/rules.
 
- -- Jérémy Lal <kapouer@melix.org>  Sun, 03 Oct 2010 01:22:49 +0200
+ -- Jérémy Lal <kapouer@melix.org>  Sat, 09 Oct 2010 21:26:14 +0200
 
 libv8 (2.4.7-1) experimental; urgency=low
 
