@@ -32,11 +32,9 @@ clean::
 	rm -f shell
 
 common-post-build-impl::
-	# policy 4.9.1
-	ifeq (,$(filter nocheck,$(DEB_BUILD_OPTIONS)))
-		# need to preload freshly compiled lib.
-		LD_PRELOAD=$(CURDIR)/libv8-$(SONAME).so $(CURDIR)/tools/test.py --no-build cctest mjsunit message
-	endif
+ifeq (,$(filter nocheck,$(DEB_BUILD_OPTIONS)))
+	LD_PRELOAD=$(CURDIR)/libv8-$(SONAME).so $(CURDIR)/tools/test.py --no-build cctest mjsunit message
+endif
 
 common-install-impl::
 	cd debian/tmp/usr/lib/ ; \
