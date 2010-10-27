@@ -13,7 +13,7 @@ Vcs-Git: git://git.debian.org/git/collab-maint/libv8.git
 Package: libv8-dev
 Section: libdevel
 Architecture: i386 amd64 armel
-Depends: libv8-2.4.7 (= ${binary:Version}), ${misc:Depends}
+Depends: libv8-2.4.9.9 (= ${binary:Version}), ${misc:Depends}
 Description: Development files for the V8 JavaScript Engine
  V8 is Google's open source, high performance JavaScript engine. It is written
  in C++ and is used in Google Chrome, Google's open source browser.
@@ -21,7 +21,7 @@ Description: Development files for the V8 JavaScript Engine
  Install this package if you wish to develop your own programs using the
  V8 JavaScript Engine
 
-Package: libv8-2.4.7
+Package: libv8-2.4.9.9
 Architecture: i386 amd64 armel
 Depends: ${shlibs:Depends}, ${misc:Depends}
 Description: V8 JavaScript Engine
@@ -35,7 +35,7 @@ Package: libv8-dbg
 Priority: extra
 Section: debug
 Architecture: i386 amd64 armel
-Depends: libv8-2.4.7 (= ${binary:Version}), ${misc:Depends}
+Depends: libv8-2.4.9.9 (= ${binary:Version}), ${misc:Depends}
 Description: Development symbols for the V8 JavaScript Engine
  V8 is Google's open source, high performance JavaScript engine. It is written
  in C++ and is used in Google Chrome, Google's open source browser.

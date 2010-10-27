@@ -1,3 +1,10 @@
+libv8 (2.4.9.9-1) experimental; urgency=low
+
+  * New upstream release, followed the procedure of README.source to update.
+  * Fix FTBFS on armel by unsetting -march. (Closes: #599713) 
+
+ -- Jérémy Lal <kapouer@melix.org>  Wed, 27 Oct 2010 02:18:48 +0200
+
 libv8 (2.4.7-2) experimental; urgency=low
 
   * Fix FTBFS on armel with -Wno-psabi. For more info :
