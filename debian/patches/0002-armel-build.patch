@@ -8,7 +8,7 @@ adding -march=armv4t to build libv8 on armel, and -Wno-psabi to fix gcc warnings
          'CPPDEFINES' : ['CAN_USE_UNALIGNED_ACCESSES=0']
 -      }
 +      },
-+      'CCFLAGS':      ['-march=armv4t', '-mno-thumb-interwork', '-fno-tree-sink', '-Wno-psabi']
++      'CCFLAGS':      ['-mno-thumb-interwork', '-fno-tree-sink', '-Wno-psabi']
      },
      'simulator:arm': {
        'CCFLAGS':      ['-m32'],
