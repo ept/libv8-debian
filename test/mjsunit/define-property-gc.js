@@ -25,19 +25,21 @@
 // (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
 // OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
-#ifndef V8_CACHED_POWERS_H_
-#define V8_CACHED_POWERS_H_
+// Tests the handling of GC issues in the defineProperty method.
+// Flags: --max-new-space-size=256
 
-#include "diy-fp.h"
+function Regular() {
+  this[0] = 0;
+  this[1] = 1;
+}
 
-namespace v8 {
-namespace internal {
 
-void GetCachedPowerForBinaryExponentRange(int min_exponent,
-                                          int max_exponent,
-                                          DiyFp* power,
-                                          int* decimal_exponent);
+function foo() {
+  var descElementNonWritable = { value: 'foofoo', writable: false };
+  for (var i = 0; i < 1000; i++) {
+    var regular = new Regular();
+    Object.defineProperty(regular, '1', descElementNonWritable);
+  }
+}
 
-} }  // namespace v8::internal
-
-#endif  // V8_CACHED_POWERS_H_
+foo();

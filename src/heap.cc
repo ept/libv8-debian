@@ -55,6 +55,7 @@ namespace internal {
 String* Heap::hidden_symbol_;
 Object* Heap::roots_[Heap::kRootListLength];
 
+
 NewSpace Heap::new_space_;
 OldSpace* Heap::old_pointer_space_ = NULL;
 OldSpace* Heap::old_data_space_ = NULL;
@@ -62,6 +63,9 @@ OldSpace* Heap::code_space_ = NULL;
 MapSpace* Heap::map_space_ = NULL;
 CellSpace* Heap::cell_space_ = NULL;
 LargeObjectSpace* Heap::lo_space_ = NULL;
+
+static const intptr_t kMinimumPromotionLimit = 2 * MB;
+static const intptr_t kMinimumAllocationLimit = 8 * MB;
 
 intptr_t Heap::old_gen_promotion_limit_ = kMinimumPromotionLimit;
 intptr_t Heap::old_gen_allocation_limit_ = kMinimumAllocationLimit;
@@ -414,26 +418,17 @@ void Heap::GarbageCollectionEpilogue() {
 }
 
 
-void Heap::CollectAllGarbage(bool force_compaction,
-                             CollectionPolicy collectionPolicy) {
+void Heap::CollectAllGarbage(bool force_compaction) {
   // Since we are ignoring the return value, the exact choice of space does
   // not matter, so long as we do not specify NEW_SPACE, which would not
   // cause a full GC.
   MarkCompactCollector::SetForceCompaction(force_compaction);
-  CollectGarbage(0, OLD_POINTER_SPACE, collectionPolicy);
+  CollectGarbage(OLD_POINTER_SPACE);
   MarkCompactCollector::SetForceCompaction(false);
 }
 
 
-void Heap::CollectAllAvailableGarbage() {
-  CompilationCache::Clear();
-  CollectAllGarbage(true, AGGRESSIVE);
-}
-
-
-bool Heap::CollectGarbage(int requested_size,
-                          AllocationSpace space,
-                          CollectionPolicy collectionPolicy) {
+void Heap::CollectGarbage(AllocationSpace space) {
   // The VM is in the GC state until exiting this function.
   VMState state(GC);
 
@@ -460,7 +455,7 @@ bool Heap::CollectGarbage(int requested_size,
         ? &Counters::gc_scavenger
         : &Counters::gc_compactor;
     rate->Start();
-    PerformGarbageCollection(collector, &tracer, collectionPolicy);
+    PerformGarbageCollection(collector, &tracer);
     rate->Stop();
 
     GarbageCollectionEpilogue();
@@ -469,31 +464,14 @@ bool Heap::CollectGarbage(int requested_size,
 
 #ifdef ENABLE_LOGGING_AND_PROFILING
   if (FLAG_log_gc) HeapProfiler::WriteSample();
+  if (CpuProfiler::is_profiling()) CpuProfiler::ProcessMovedFunctions();
 #endif
-
-  switch (space) {
-    case NEW_SPACE:
-      return new_space_.Available() >= requested_size;
-    case OLD_POINTER_SPACE:
-      return old_pointer_space_->Available() >= requested_size;
-    case OLD_DATA_SPACE:
-      return old_data_space_->Available() >= requested_size;
-    case CODE_SPACE:
-      return code_space_->Available() >= requested_size;
-    case MAP_SPACE:
-      return map_space_->Available() >= requested_size;
-    case CELL_SPACE:
-      return cell_space_->Available() >= requested_size;
-    case LO_SPACE:
-      return lo_space_->Available() >= requested_size;
-  }
-  return false;
 }
 
 
 void Heap::PerformScavenge() {
   GCTracer tracer;
-  PerformGarbageCollection(SCAVENGER, &tracer, NORMAL);
+  PerformGarbageCollection(SCAVENGER, &tracer);
 }
 
 
@@ -542,27 +520,27 @@ void Heap::ReserveSpace(
   while (gc_performed) {
     gc_performed = false;
     if (!new_space->ReserveSpace(new_space_size)) {
-      Heap::CollectGarbage(new_space_size, NEW_SPACE);
+      Heap::CollectGarbage(NEW_SPACE);
       gc_performed = true;
     }
     if (!old_pointer_space->ReserveSpace(pointer_space_size)) {
-      Heap::CollectGarbage(pointer_space_size, OLD_POINTER_SPACE);
+      Heap::CollectGarbage(OLD_POINTER_SPACE);
       gc_performed = true;
     }
     if (!(old_data_space->ReserveSpace(data_space_size))) {
-      Heap::CollectGarbage(data_space_size, OLD_DATA_SPACE);
+      Heap::CollectGarbage(OLD_DATA_SPACE);
       gc_performed = true;
     }
     if (!(code_space->ReserveSpace(code_space_size))) {
-      Heap::CollectGarbage(code_space_size, CODE_SPACE);
+      Heap::CollectGarbage(CODE_SPACE);
       gc_performed = true;
     }
     if (!(map_space->ReserveSpace(map_space_size))) {
-      Heap::CollectGarbage(map_space_size, MAP_SPACE);
+      Heap::CollectGarbage(MAP_SPACE);
       gc_performed = true;
     }
     if (!(cell_space->ReserveSpace(cell_space_size))) {
-      Heap::CollectGarbage(cell_space_size, CELL_SPACE);
+      Heap::CollectGarbage(CELL_SPACE);
       gc_performed = true;
     }
     // We add a slack-factor of 2 in order to have space for a series of
@@ -574,7 +552,7 @@ void Heap::ReserveSpace(
     large_object_size += cell_space_size + map_space_size + code_space_size +
         data_space_size + pointer_space_size;
     if (!(lo_space->ReserveSpace(large_object_size))) {
-      Heap::CollectGarbage(large_object_size, LO_SPACE);
+      Heap::CollectGarbage(LO_SPACE);
       gc_performed = true;
     }
   }
@@ -683,8 +661,7 @@ void Heap::UpdateSurvivalRateTrend(int start_new_space_size) {
 }
 
 void Heap::PerformGarbageCollection(GarbageCollector collector,
-                                    GCTracer* tracer,
-                                    CollectionPolicy collectionPolicy) {
+                                    GCTracer* tracer) {
   VerifySymbolTable();
   if (collector == MARK_COMPACTOR && global_gc_prologue_callback_) {
     ASSERT(!allocation_allowed_);
@@ -714,45 +691,25 @@ void Heap::PerformGarbageCollection(GarbageCollector collector,
 
     UpdateSurvivalRateTrend(start_new_space_size);
 
-    UpdateOldSpaceLimits();
+    intptr_t old_gen_size = PromotedSpaceSize();
+    old_gen_promotion_limit_ =
+        old_gen_size + Max(kMinimumPromotionLimit, old_gen_size / 3);
+    old_gen_allocation_limit_ =
+        old_gen_size + Max(kMinimumAllocationLimit, old_gen_size / 2);
 
-    // Major GC would invoke weak handle callbacks on weakly reachable
-    // handles, but won't collect weakly reachable objects until next
-    // major GC.  Therefore if we collect aggressively and weak handle callback
-    // has been invoked, we rerun major GC to release objects which become
-    // garbage.
-    if (collectionPolicy == AGGRESSIVE) {
-      // Note: as weak callbacks can execute arbitrary code, we cannot
-      // hope that eventually there will be no weak callbacks invocations.
-      // Therefore stop recollecting after several attempts.
-      const int kMaxNumberOfAttempts = 7;
-      for (int attempt = 0; attempt < kMaxNumberOfAttempts; attempt++) {
-        { DisableAssertNoAllocation allow_allocation;
-          GCTracer::Scope scope(tracer, GCTracer::Scope::EXTERNAL);
-          if (!GlobalHandles::PostGarbageCollectionProcessing()) break;
-        }
-        MarkCompact(tracer);
-        // Weak handle callbacks can allocate data, so keep limits correct.
-        UpdateOldSpaceLimits();
-      }
-    } else {
-      if (high_survival_rate_during_scavenges &&
-          IsStableOrIncreasingSurvivalTrend()) {
-        // Stable high survival rates of young objects both during partial and
-        // full collection indicate that mutator is either building or modifying
-        // a structure with a long lifetime.
-        // In this case we aggressively raise old generation memory limits to
-        // postpone subsequent mark-sweep collection and thus trade memory
-        // space for the mutation speed.
-        old_gen_promotion_limit_ *= 2;
-        old_gen_allocation_limit_ *= 2;
-      }
+    if (high_survival_rate_during_scavenges &&
+        IsStableOrIncreasingSurvivalTrend()) {
+      // Stable high survival rates of young objects both during partial and
+      // full collection indicate that mutator is either building or modifying
+      // a structure with a long lifetime.
+      // In this case we aggressively raise old generation memory limits to
+      // postpone subsequent mark-sweep collection and thus trade memory
+      // space for the mutation speed.
+      old_gen_promotion_limit_ *= 2;
+      old_gen_allocation_limit_ *= 2;
     }
 
-    { DisableAssertNoAllocation allow_allocation;
-      GCTracer::Scope scope(tracer, GCTracer::Scope::EXTERNAL);
-      GlobalHandles::PostGarbageCollectionProcessing();
-    }
+    old_gen_exhausted_ = false;
   } else {
     tracer_ = tracer;
     Scavenge();
@@ -762,6 +719,12 @@ void Heap::PerformGarbageCollection(GarbageCollector collector,
   }
 
   Counters::objs_since_last_young.Set(0);
+
+  if (collector == MARK_COMPACTOR) {
+    DisableAssertNoAllocation allow_allocation;
+    GCTracer::Scope scope(tracer, GCTracer::Scope::EXTERNAL);
+    GlobalHandles::PostGarbageCollectionProcessing();
+  }
 
   // Update relocatables.
   Relocatable::PostGarbageCollectionProcessing();
@@ -1235,7 +1198,7 @@ class ScavengingVisitor : public StaticVisitorBase {
     if (Logger::is_logging() || CpuProfiler::is_profiling()) {
       if (target->IsJSFunction()) {
         PROFILE(FunctionMoveEvent(source->address(), target->address()));
-        PROFILE(FunctionCreateEventFromMove(JSFunction::cast(target), source));
+        PROFILE(FunctionCreateEventFromMove(JSFunction::cast(target)));
       }
     }
 #endif
@@ -3431,7 +3394,7 @@ bool Heap::IdleNotification() {
       HistogramTimerScope scope(&Counters::gc_context);
       CollectAllGarbage(false);
     } else {
-      CollectGarbage(0, NEW_SPACE);
+      CollectGarbage(NEW_SPACE);
     }
     new_space_.Shrink();
     last_gc_count = gc_count_;
@@ -4937,11 +4900,11 @@ int DescriptorLookupCache::results_[DescriptorLookupCache::kLength];
 
 
 #ifdef DEBUG
-bool Heap::GarbageCollectionGreedyCheck() {
+void Heap::GarbageCollectionGreedyCheck() {
   ASSERT(FLAG_gc_greedy);
-  if (Bootstrapper::IsActive()) return true;
-  if (disallow_allocation_failure()) return true;
-  return CollectGarbage(0, NEW_SPACE);
+  if (Bootstrapper::IsActive()) return;
+  if (disallow_allocation_failure()) return;
+  CollectGarbage(NEW_SPACE);
 }
 #endif
 
