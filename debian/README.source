@@ -39,4 +39,12 @@ with the new version; additionally rename the file with the new version
 3) edit debian/patches/0001-enable_soname.patch and define the correct SONAME
 
 4) edit debian/control and remove any reference to the old version by updating
-it with the new vesrion
+it with the new version
+
+
+ARMEL and VFP
+=============
+
+v8 detects at runtime the available processor features, like vfp.
+Unfortunately, in libv8 2.4.9.9 it assumes "vfp" feature is "vfp3", see :
+http://code.google.com/p/v8/issues/detail?id=914
