@@ -1,4 +1,8 @@
-adding -march=armv4t to build libv8 on armel, and -Wno-psabi to fix gcc warnings on armel, see http://gcc.gnu.org/bugzilla/show_bug.cgi?id=42748
+Tune flags to build libv8 on armel
+ -mno-thumb-interwork to allow compilation on default debian armel target (-march=armv4t), see
+  http://code.google.com/p/v8/issues/detail?id=590
+ -fno-tree-sink to workaround a gcc armel bug, see http://gcc.gnu.org/bugzilla/show_bug.cgi?id=39604
+ -Wno-psabi to fix gcc warnings on armel, see http://gcc.gnu.org/bugzilla/show_bug.cgi?id=42748
 
 --- a/SConstruct
 +++ b/SConstruct
