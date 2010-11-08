@@ -1,7 +1,9 @@
-libv8 (2.4.9.9-1) experimental; urgency=low
+libv8 (2.4.9.12-1) experimental; urgency=low
 
   * New upstream release, followed the procedure of README.source to update.
-  * Fix FTBFS on armel by unsetting -march. (Closes: #599713) 
+  * Fix FTBFS on armel. (Closes: #599713)
+  * No longer flag march=armv4t, it's the default debian armel target.
+    (Closes: #596997)
 
  -- Jérémy Lal <kapouer@melix.org>  Wed, 27 Oct 2010 02:18:48 +0200
 
