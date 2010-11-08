@@ -4,6 +4,7 @@ libv8 (2.4.9.12-1) experimental; urgency=low
   * Fix FTBFS on armel. (Closes: #599713)
   * No longer flag march=armv4t, it's the default debian armel target.
     (Closes: #596997)
+  * Fix typo in libv8-dbg short description. (Closes: #601855)
 
  -- Jérémy Lal <kapouer@melix.org>  Wed, 27 Oct 2010 02:18:48 +0200
 
