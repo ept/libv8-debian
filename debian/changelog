@@ -1,4 +1,4 @@
-libv8 (2.4.9.12-1) experimental; urgency=low
+libv8 (2.5.6-1) experimental; urgency=low
 
   * New upstream release, followed the procedure of README.source to update.
   * Fix FTBFS on armel. (Closes: #599713)
@@ -6,7 +6,7 @@ libv8 (2.4.9.12-1) experimental; urgency=low
     (Closes: #596997)
   * Fix typo in libv8-dbg short description. (Closes: #601855)
 
- -- Jérémy Lal <kapouer@melix.org>  Wed, 27 Oct 2010 02:18:48 +0200
+ -- Jérémy Lal <kapouer@melix.org>  Thu, 18 Nov 2010 20:51:59 +0100
 
 libv8 (2.4.7-2) experimental; urgency=low
 

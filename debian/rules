@@ -3,7 +3,7 @@
 include /usr/share/cdbs/1/rules/debhelper.mk
 include /usr/share/cdbs/1/class/scons.mk
 
-SONAME			:= 2.4.9.12
+SONAME			:= 2.5.6
 
 DEB_DH_MAKESHLIBS_ARGS := -- -c4
 
