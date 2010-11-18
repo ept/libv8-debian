@@ -270,8 +270,9 @@ void CodeRange::TearDown() {
 // -----------------------------------------------------------------------------
 // MemoryAllocator
 //
-intptr_t MemoryAllocator::capacity_   = 0;
-intptr_t MemoryAllocator::size_       = 0;
+intptr_t MemoryAllocator::capacity_ = 0;
+intptr_t MemoryAllocator::capacity_executable_ = 0;
+intptr_t MemoryAllocator::size_ = 0;
 intptr_t MemoryAllocator::size_executable_ = 0;
 
 List<MemoryAllocator::MemoryAllocationCallbackRegistration>
@@ -302,8 +303,10 @@ int MemoryAllocator::Pop() {
 }
 
 
-bool MemoryAllocator::Setup(intptr_t capacity) {
+bool MemoryAllocator::Setup(intptr_t capacity, intptr_t capacity_executable) {
   capacity_ = RoundUp(capacity, Page::kPageSize);
+  capacity_executable_ = RoundUp(capacity_executable, Page::kPageSize);
+  ASSERT_GE(capacity_, capacity_executable_);
 
   // Over-estimate the size of chunks_ array.  It assumes the expansion of old
   // space is always in the unit of a chunk (kChunkSize) except the last
@@ -346,6 +349,7 @@ void MemoryAllocator::TearDown() {
   ASSERT(top_ == max_nof_chunks_);  // all chunks are free
   top_ = 0;
   capacity_ = 0;
+  capacity_executable_ = 0;
   size_ = 0;
   max_nof_chunks_ = 0;
 }
@@ -357,16 +361,31 @@ void* MemoryAllocator::AllocateRawMemory(const size_t requested,
   if (size_ + static_cast<size_t>(requested) > static_cast<size_t>(capacity_)) {
     return NULL;
   }
+
   void* mem;
-  if (executable == EXECUTABLE  && CodeRange::exists()) {
-    mem = CodeRange::AllocateRawMemory(requested, allocated);
+  if (executable == EXECUTABLE) {
+    // Check executable memory limit.
+    if (size_executable_ + requested >
+        static_cast<size_t>(capacity_executable_)) {
+      LOG(StringEvent("MemoryAllocator::AllocateRawMemory",
+                      "V8 Executable Allocation capacity exceeded"));
+      return NULL;
+    }
+    // Allocate executable memory either from code range or from the
+    // OS.
+    if (CodeRange::exists()) {
+      mem = CodeRange::AllocateRawMemory(requested, allocated);
+    } else {
+      mem = OS::Allocate(requested, allocated, true);
+    }
+    // Update executable memory size.
+    size_executable_ += static_cast<int>(*allocated);
   } else {
-    mem = OS::Allocate(requested, allocated, (executable == EXECUTABLE));
+    mem = OS::Allocate(requested, allocated, false);
   }
   int alloced = static_cast<int>(*allocated);
   size_ += alloced;
 
-  if (executable == EXECUTABLE) size_executable_ += alloced;
 #ifdef DEBUG
   ZapBlock(reinterpret_cast<Address>(mem), alloced);
 #endif
@@ -391,6 +410,7 @@ void MemoryAllocator::FreeRawMemory(void* mem,
   if (executable == EXECUTABLE) size_executable_ -= static_cast<int>(length);
 
   ASSERT(size_ >= 0);
+  ASSERT(size_executable_ >= 0);
 }
 
 
@@ -873,7 +893,7 @@ void PagedSpace::MarkAllPagesClean() {
 }
 
 
-Object* PagedSpace::FindObject(Address addr) {
+MaybeObject* PagedSpace::FindObject(Address addr) {
   // Note: this function can only be called before or after mark-compact GC
   // because it accesses map pointers.
   ASSERT(!MarkCompactCollector::in_use());
@@ -1804,7 +1824,7 @@ int OldSpaceFreeList::Free(Address start, int size_in_bytes) {
 }
 
 
-Object* OldSpaceFreeList::Allocate(int size_in_bytes, int* wasted_bytes) {
+MaybeObject* OldSpaceFreeList::Allocate(int size_in_bytes, int* wasted_bytes) {
   ASSERT(0 < size_in_bytes);
   ASSERT(size_in_bytes <= kMaxBlockSize);
   ASSERT(IsAligned(size_in_bytes, kPointerSize));
@@ -1924,7 +1944,7 @@ void FixedSizeFreeList::Free(Address start) {
 }
 
 
-Object* FixedSizeFreeList::Allocate() {
+MaybeObject* FixedSizeFreeList::Allocate() {
   if (head_ == NULL) {
     return Failure::RetryAfterGC(owner_);
   }
@@ -2187,9 +2207,10 @@ HeapObject* OldSpace::SlowAllocateRaw(int size_in_bytes) {
   // is currently forbidden.
   if (!Heap::linear_allocation()) {
     int wasted_bytes;
-    Object* result = free_list_.Allocate(size_in_bytes, &wasted_bytes);
+    Object* result;
+    MaybeObject* maybe = free_list_.Allocate(size_in_bytes, &wasted_bytes);
     accounting_stats_.WasteBytes(wasted_bytes);
-    if (!result->IsFailure()) {
+    if (maybe->ToObject(&result)) {
       accounting_stats_.AllocateBytes(size_in_bytes);
 
       HeapObject* obj = HeapObject::cast(result);
@@ -2495,8 +2516,9 @@ HeapObject* FixedSpace::SlowAllocateRaw(int size_in_bytes) {
   // that is currently forbidden.  The fixed space free list implicitly assumes
   // that all free blocks are of the fixed size.
   if (!Heap::linear_allocation()) {
-    Object* result = free_list_.Allocate();
-    if (!result->IsFailure()) {
+    Object* result;
+    MaybeObject* maybe = free_list_.Allocate();
+    if (maybe->ToObject(&result)) {
       accounting_stats_.AllocateBytes(size_in_bytes);
       HeapObject* obj = HeapObject::cast(result);
       Page* p = Page::FromAddress(obj->address());
@@ -2745,9 +2767,9 @@ void LargeObjectSpace::Unprotect() {
 #endif
 
 
-Object* LargeObjectSpace::AllocateRawInternal(int requested_size,
-                                              int object_size,
-                                              Executability executable) {
+MaybeObject* LargeObjectSpace::AllocateRawInternal(int requested_size,
+                                                   int object_size,
+                                                   Executability executable) {
   ASSERT(0 < object_size && object_size <= requested_size);
 
   // Check if we want to force a GC before growing the old space further.
@@ -2783,7 +2805,7 @@ Object* LargeObjectSpace::AllocateRawInternal(int requested_size,
 }
 
 
-Object* LargeObjectSpace::AllocateRawCode(int size_in_bytes) {
+MaybeObject* LargeObjectSpace::AllocateRawCode(int size_in_bytes) {
   ASSERT(0 < size_in_bytes);
   return AllocateRawInternal(size_in_bytes,
                              size_in_bytes,
@@ -2791,7 +2813,7 @@ Object* LargeObjectSpace::AllocateRawCode(int size_in_bytes) {
 }
 
 
-Object* LargeObjectSpace::AllocateRawFixedArray(int size_in_bytes) {
+MaybeObject* LargeObjectSpace::AllocateRawFixedArray(int size_in_bytes) {
   ASSERT(0 < size_in_bytes);
   return AllocateRawInternal(size_in_bytes,
                              size_in_bytes,
@@ -2799,7 +2821,7 @@ Object* LargeObjectSpace::AllocateRawFixedArray(int size_in_bytes) {
 }
 
 
-Object* LargeObjectSpace::AllocateRaw(int size_in_bytes) {
+MaybeObject* LargeObjectSpace::AllocateRaw(int size_in_bytes) {
   ASSERT(0 < size_in_bytes);
   return AllocateRawInternal(size_in_bytes,
                              size_in_bytes,
@@ -2808,7 +2830,7 @@ Object* LargeObjectSpace::AllocateRaw(int size_in_bytes) {
 
 
 // GC support
-Object* LargeObjectSpace::FindObject(Address a) {
+MaybeObject* LargeObjectSpace::FindObject(Address a) {
   for (LargeObjectChunk* chunk = first_chunk_;
        chunk != NULL;
        chunk = chunk->next()) {

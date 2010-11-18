@@ -202,9 +202,10 @@ namespace internal {
   V(closure_symbol, "(closure)")
 
 
-// Forward declaration of the GCTracer class.
+// Forward declarations.
 class GCTracer;
 class HeapStats;
+class WeakObjectRetainer;
 
 
 typedef String* (*ExternalStringTableUpdaterCallback)(Object** pointer);
@@ -221,7 +222,9 @@ class Heap : public AllStatic {
  public:
   // Configure heap size before setup. Return false if the heap has been
   // setup already.
-  static bool ConfigureHeap(int max_semispace_size, int max_old_gen_size);
+  static bool ConfigureHeap(int max_semispace_size,
+                            int max_old_gen_size,
+                            int max_executable_size);
   static bool ConfigureHeapDefault();
 
   // Initializes the global object heap. If create_heap_objects is true,
@@ -252,6 +255,7 @@ class Heap : public AllStatic {
   static int ReservedSemiSpaceSize() { return reserved_semispace_size_; }
   static int InitialSemiSpaceSize() { return initial_semispace_size_; }
   static intptr_t MaxOldGenerationSize() { return max_old_generation_size_; }
+  static intptr_t MaxExecutableSize() { return max_executable_size_; }
 
   // Returns the capacity of the heap in bytes w/o growing. Heap grows when
   // more spaces are needed until it reaches the limit.
@@ -259,6 +263,9 @@ class Heap : public AllStatic {
 
   // Returns the amount of memory currently committed for the heap.
   static intptr_t CommittedMemory();
+
+  // Returns the amount of executable memory currently committed for the heap.
+  static intptr_t CommittedMemoryExecutable();
 
   // Returns the available bytes in space w/o growing.
   // Heap doesn't guarantee that it can allocate an object that requires
@@ -315,32 +322,33 @@ class Heap : public AllStatic {
   // Returns Failure::RetryAfterGC(requested_bytes, space) if the allocation
   // failed.
   // Please note this does not perform a garbage collection.
-  MUST_USE_RESULT static Object* AllocateJSObject(
+  MUST_USE_RESULT static MaybeObject* AllocateJSObject(
       JSFunction* constructor, PretenureFlag pretenure = NOT_TENURED);
 
   // Allocates and initializes a new global object based on a constructor.
   // Returns Failure::RetryAfterGC(requested_bytes, space) if the allocation
   // failed.
   // Please note this does not perform a garbage collection.
-  MUST_USE_RESULT static Object* AllocateGlobalObject(JSFunction* constructor);
+  MUST_USE_RESULT static MaybeObject* AllocateGlobalObject(
+      JSFunction* constructor);
 
   // Returns a deep copy of the JavaScript object.
   // Properties and elements are copied too.
   // Returns failure if allocation failed.
-  MUST_USE_RESULT static Object* CopyJSObject(JSObject* source);
+  MUST_USE_RESULT static MaybeObject* CopyJSObject(JSObject* source);
 
   // Allocates the function prototype.
   // Returns Failure::RetryAfterGC(requested_bytes, space) if the allocation
   // failed.
   // Please note this does not perform a garbage collection.
-  MUST_USE_RESULT static Object* AllocateFunctionPrototype(
+  MUST_USE_RESULT static MaybeObject* AllocateFunctionPrototype(
       JSFunction* function);
 
   // Reinitialize an JSGlobalProxy based on a constructor.  The object
   // must have the same size as objects allocated using the
   // constructor.  The object is reinitialized and behaves as an
   // object that has been freshly allocated using the constructor.
-  MUST_USE_RESULT static Object* ReinitializeJSGlobalProxy(
+  MUST_USE_RESULT static MaybeObject* ReinitializeJSGlobalProxy(
       JSFunction* constructor,
       JSGlobalProxy* global);
 
@@ -348,31 +356,32 @@ class Heap : public AllStatic {
   // Returns Failure::RetryAfterGC(requested_bytes, space) if the allocation
   // failed.
   // Please note this does not perform a garbage collection.
-  MUST_USE_RESULT static Object* AllocateJSObjectFromMap(
+  MUST_USE_RESULT static MaybeObject* AllocateJSObjectFromMap(
       Map* map, PretenureFlag pretenure = NOT_TENURED);
 
   // Allocates a heap object based on the map.
   // Returns Failure::RetryAfterGC(requested_bytes, space) if the allocation
   // failed.
   // Please note this function does not perform a garbage collection.
-  MUST_USE_RESULT static Object* Allocate(Map* map, AllocationSpace space);
+  MUST_USE_RESULT static MaybeObject* Allocate(Map* map, AllocationSpace space);
 
   // Allocates a JS Map in the heap.
   // Returns Failure::RetryAfterGC(requested_bytes, space) if the allocation
   // failed.
   // Please note this function does not perform a garbage collection.
-  MUST_USE_RESULT static Object* AllocateMap(InstanceType instance_type,
+  MUST_USE_RESULT static MaybeObject* AllocateMap(InstanceType instance_type,
                                              int instance_size);
 
   // Allocates a partial map for bootstrapping.
-  MUST_USE_RESULT static Object* AllocatePartialMap(InstanceType instance_type,
-                                                    int instance_size);
+  MUST_USE_RESULT static MaybeObject* AllocatePartialMap(
+      InstanceType instance_type,
+      int instance_size);
 
   // Allocate a map for the specified function
-  MUST_USE_RESULT static Object* AllocateInitialMap(JSFunction* fun);
+  MUST_USE_RESULT static MaybeObject* AllocateInitialMap(JSFunction* fun);
 
   // Allocates an empty code cache.
-  MUST_USE_RESULT static Object* AllocateCodeCache();
+  MUST_USE_RESULT static MaybeObject* AllocateCodeCache();
 
   // Clear the Instanceof cache (used when a prototype changes).
   static void ClearInstanceofCache() {
@@ -397,13 +406,13 @@ class Heap : public AllStatic {
   // Returns Failure::RetryAfterGC(requested_bytes, space) if the allocation
   // failed.
   // Please note this does not perform a garbage collection.
-  MUST_USE_RESULT static Object* AllocateStringFromAscii(
+  MUST_USE_RESULT static MaybeObject* AllocateStringFromAscii(
       Vector<const char> str,
       PretenureFlag pretenure = NOT_TENURED);
-  MUST_USE_RESULT static Object* AllocateStringFromUtf8(
+  MUST_USE_RESULT static MaybeObject* AllocateStringFromUtf8(
       Vector<const char> str,
       PretenureFlag pretenure = NOT_TENURED);
-  MUST_USE_RESULT static Object* AllocateStringFromTwoByte(
+  MUST_USE_RESULT static MaybeObject* AllocateStringFromTwoByte(
       Vector<const uc16> str,
       PretenureFlag pretenure = NOT_TENURED);
 
@@ -411,15 +420,17 @@ class Heap : public AllStatic {
   // Returns Failure::RetryAfterGC(requested_bytes, space) if the allocation
   // failed.
   // Please note this function does not perform a garbage collection.
-  MUST_USE_RESULT static inline Object* AllocateSymbol(Vector<const char> str,
-                                                       int chars,
-                                                       uint32_t hash_field);
+  MUST_USE_RESULT static inline MaybeObject* AllocateSymbol(
+      Vector<const char> str,
+      int chars,
+      uint32_t hash_field);
 
-  MUST_USE_RESULT static Object* AllocateInternalSymbol(
+  MUST_USE_RESULT static MaybeObject* AllocateInternalSymbol(
       unibrow::CharacterStream* buffer, int chars, uint32_t hash_field);
 
-  MUST_USE_RESULT static Object* AllocateExternalSymbol(Vector<const char> str,
-                                                        int chars);
+  MUST_USE_RESULT static MaybeObject* AllocateExternalSymbol(
+      Vector<const char> str,
+      int chars);
 
 
   // Allocates and partially initializes a String.  There are two String
@@ -429,10 +440,10 @@ class Heap : public AllStatic {
   // Returns Failure::RetryAfterGC(requested_bytes, space) if the allocation
   // failed.
   // Please note this does not perform a garbage collection.
-  MUST_USE_RESULT static Object* AllocateRawAsciiString(
+  MUST_USE_RESULT static MaybeObject* AllocateRawAsciiString(
       int length,
       PretenureFlag pretenure = NOT_TENURED);
-  MUST_USE_RESULT static Object* AllocateRawTwoByteString(
+  MUST_USE_RESULT static MaybeObject* AllocateRawTwoByteString(
       int length,
       PretenureFlag pretenure = NOT_TENURED);
 
@@ -440,27 +451,27 @@ class Heap : public AllStatic {
   // A cache is used for ascii codes.
   // Returns Failure::RetryAfterGC(requested_bytes, space) if the allocation
   // failed. Please note this does not perform a garbage collection.
-  MUST_USE_RESULT static Object* LookupSingleCharacterStringFromCode(
+  MUST_USE_RESULT static MaybeObject* LookupSingleCharacterStringFromCode(
       uint16_t code);
 
   // Allocate a byte array of the specified length
   // Returns Failure::RetryAfterGC(requested_bytes, space) if the allocation
   // failed.
   // Please note this does not perform a garbage collection.
-  MUST_USE_RESULT static Object* AllocateByteArray(int length,
+  MUST_USE_RESULT static MaybeObject* AllocateByteArray(int length,
                                                    PretenureFlag pretenure);
 
   // Allocate a non-tenured byte array of the specified length
   // Returns Failure::RetryAfterGC(requested_bytes, space) if the allocation
   // failed.
   // Please note this does not perform a garbage collection.
-  MUST_USE_RESULT static Object* AllocateByteArray(int length);
+  MUST_USE_RESULT static MaybeObject* AllocateByteArray(int length);
 
   // Allocate a pixel array of the specified length
   // Returns Failure::RetryAfterGC(requested_bytes, space) if the allocation
   // failed.
   // Please note this does not perform a garbage collection.
-  MUST_USE_RESULT static Object* AllocatePixelArray(int length,
+  MUST_USE_RESULT static MaybeObject* AllocatePixelArray(int length,
                                                     uint8_t* external_pointer,
                                                     PretenureFlag pretenure);
 
@@ -468,7 +479,7 @@ class Heap : public AllStatic {
   // Returns Failure::RetryAfterGC(requested_bytes, space) if the allocation
   // failed.
   // Please note this does not perform a garbage collection.
-  MUST_USE_RESULT static Object* AllocateExternalArray(
+  MUST_USE_RESULT static MaybeObject* AllocateExternalArray(
       int length,
       ExternalArrayType array_type,
       void* external_pointer,
@@ -478,66 +489,71 @@ class Heap : public AllStatic {
   // Returns Failure::RetryAfterGC(requested_bytes, space) if the allocation
   // failed.
   // Please note this does not perform a garbage collection.
-  MUST_USE_RESULT static Object* AllocateJSGlobalPropertyCell(Object* value);
+  MUST_USE_RESULT static MaybeObject* AllocateJSGlobalPropertyCell(
+      Object* value);
 
   // Allocates a fixed array initialized with undefined values
   // Returns Failure::RetryAfterGC(requested_bytes, space) if the allocation
   // failed.
   // Please note this does not perform a garbage collection.
-  MUST_USE_RESULT static Object* AllocateFixedArray(int length,
-                                                    PretenureFlag pretenure);
+  MUST_USE_RESULT static MaybeObject* AllocateFixedArray(
+      int length,
+      PretenureFlag pretenure);
   // Allocates a fixed array initialized with undefined values
-  MUST_USE_RESULT static Object* AllocateFixedArray(int length);
+  MUST_USE_RESULT static MaybeObject* AllocateFixedArray(int length);
 
   // Allocates an uninitialized fixed array. It must be filled by the caller.
   //
   // Returns Failure::RetryAfterGC(requested_bytes, space) if the allocation
   // failed.
   // Please note this does not perform a garbage collection.
-  MUST_USE_RESULT static Object* AllocateUninitializedFixedArray(int length);
+  MUST_USE_RESULT static MaybeObject* AllocateUninitializedFixedArray(
+      int length);
 
   // Make a copy of src and return it. Returns
   // Failure::RetryAfterGC(requested_bytes, space) if the allocation failed.
-  MUST_USE_RESULT static inline Object* CopyFixedArray(FixedArray* src);
+  MUST_USE_RESULT static inline MaybeObject* CopyFixedArray(FixedArray* src);
 
   // Make a copy of src, set the map, and return the copy. Returns
   // Failure::RetryAfterGC(requested_bytes, space) if the allocation failed.
-  MUST_USE_RESULT static Object* CopyFixedArrayWithMap(FixedArray* src,
-                                                       Map* map);
+  MUST_USE_RESULT static MaybeObject* CopyFixedArrayWithMap(FixedArray* src,
+                                                            Map* map);
 
   // Allocates a fixed array initialized with the hole values.
   // Returns Failure::RetryAfterGC(requested_bytes, space) if the allocation
   // failed.
   // Please note this does not perform a garbage collection.
-  MUST_USE_RESULT static Object* AllocateFixedArrayWithHoles(
+  MUST_USE_RESULT static MaybeObject* AllocateFixedArrayWithHoles(
       int length,
       PretenureFlag pretenure = NOT_TENURED);
 
   // AllocateHashTable is identical to AllocateFixedArray except
   // that the resulting object has hash_table_map as map.
-  MUST_USE_RESULT static Object* AllocateHashTable(
+  MUST_USE_RESULT static MaybeObject* AllocateHashTable(
       int length, PretenureFlag pretenure = NOT_TENURED);
 
   // Allocate a global (but otherwise uninitialized) context.
-  MUST_USE_RESULT static Object* AllocateGlobalContext();
+  MUST_USE_RESULT static MaybeObject* AllocateGlobalContext();
 
   // Allocate a function context.
-  MUST_USE_RESULT static Object* AllocateFunctionContext(int length,
-                                                         JSFunction* closure);
+  MUST_USE_RESULT static MaybeObject* AllocateFunctionContext(
+      int length,
+      JSFunction* closure);
 
   // Allocate a 'with' context.
-  MUST_USE_RESULT static Object* AllocateWithContext(Context* previous,
-                                                     JSObject* extension,
-                                                     bool is_catch_context);
+  MUST_USE_RESULT static MaybeObject* AllocateWithContext(
+      Context* previous,
+      JSObject* extension,
+      bool is_catch_context);
 
   // Allocates a new utility object in the old generation.
-  MUST_USE_RESULT static Object* AllocateStruct(InstanceType type);
+  MUST_USE_RESULT static MaybeObject* AllocateStruct(InstanceType type);
 
   // Allocates a function initialized with a shared part.
   // Returns Failure::RetryAfterGC(requested_bytes, space) if the allocation
   // failed.
   // Please note this does not perform a garbage collection.
-  MUST_USE_RESULT static Object* AllocateFunction(
+  MUST_USE_RESULT static MaybeObject* AllocateFunction(
       Map* function_map,
       SharedFunctionInfo* shared,
       Object* prototype,
@@ -553,37 +569,38 @@ class Heap : public AllStatic {
   // Returns Failure::RetryAfterGC(requested_bytes, space) if the allocation
   // failed.
   // Please note this does not perform a garbage collection.
-  MUST_USE_RESULT static Object* AllocateArgumentsObject(Object* callee,
-                                                         int length);
+  MUST_USE_RESULT static MaybeObject* AllocateArgumentsObject(Object* callee,
+                                                              int length);
 
   // Same as NewNumberFromDouble, but may return a preallocated/immutable
   // number object (e.g., minus_zero_value_, nan_value_)
-  MUST_USE_RESULT static Object* NumberFromDouble(
+  MUST_USE_RESULT static MaybeObject* NumberFromDouble(
       double value, PretenureFlag pretenure = NOT_TENURED);
 
   // Allocated a HeapNumber from value.
-  MUST_USE_RESULT static Object* AllocateHeapNumber(double value,
-                                                    PretenureFlag pretenure);
+  MUST_USE_RESULT static MaybeObject* AllocateHeapNumber(
+      double value,
+      PretenureFlag pretenure);
   // pretenure = NOT_TENURED.
-  MUST_USE_RESULT static Object* AllocateHeapNumber(double value);
+  MUST_USE_RESULT static MaybeObject* AllocateHeapNumber(double value);
 
   // Converts an int into either a Smi or a HeapNumber object.
   // Returns Failure::RetryAfterGC(requested_bytes, space) if the allocation
   // failed.
   // Please note this does not perform a garbage collection.
-  MUST_USE_RESULT static inline Object* NumberFromInt32(int32_t value);
+  MUST_USE_RESULT static inline MaybeObject* NumberFromInt32(int32_t value);
 
   // Converts an int into either a Smi or a HeapNumber object.
   // Returns Failure::RetryAfterGC(requested_bytes, space) if the allocation
   // failed.
   // Please note this does not perform a garbage collection.
-  MUST_USE_RESULT static inline Object* NumberFromUint32(uint32_t value);
+  MUST_USE_RESULT static inline MaybeObject* NumberFromUint32(uint32_t value);
 
   // Allocates a new proxy object.
   // Returns Failure::RetryAfterGC(requested_bytes, space) if the allocation
   // failed.
   // Please note this does not perform a garbage collection.
-  MUST_USE_RESULT static Object* AllocateProxy(
+  MUST_USE_RESULT static MaybeObject* AllocateProxy(
       Address proxy,
       PretenureFlag pretenure = NOT_TENURED);
 
@@ -591,14 +608,14 @@ class Heap : public AllStatic {
   // Returns Failure::RetryAfterGC(requested_bytes, space) if the allocation
   // failed.
   // Please note this does not perform a garbage collection.
-  MUST_USE_RESULT static Object* AllocateSharedFunctionInfo(Object* name);
+  MUST_USE_RESULT static MaybeObject* AllocateSharedFunctionInfo(Object* name);
 
   // Allocates a new cons string object.
   // Returns Failure::RetryAfterGC(requested_bytes, space) if the allocation
   // failed.
   // Please note this does not perform a garbage collection.
-  MUST_USE_RESULT static Object* AllocateConsString(String* first,
-                                                    String* second);
+  MUST_USE_RESULT static MaybeObject* AllocateConsString(String* first,
+                                                         String* second);
 
   // Allocates a new sub string object which is a substring of an underlying
   // string buffer stretching from the index start (inclusive) to the index
@@ -606,7 +623,7 @@ class Heap : public AllStatic {
   // Returns Failure::RetryAfterGC(requested_bytes, space) if the allocation
   // failed.
   // Please note this does not perform a garbage collection.
-  MUST_USE_RESULT static Object* AllocateSubString(
+  MUST_USE_RESULT static MaybeObject* AllocateSubString(
       String* buffer,
       int start,
       int end,
@@ -617,9 +634,9 @@ class Heap : public AllStatic {
   // Returns Failure::RetryAfterGC(requested_bytes, space) if the allocation
   // failed.
   // Please note this does not perform a garbage collection.
-  MUST_USE_RESULT static Object* AllocateExternalStringFromAscii(
+  MUST_USE_RESULT static MaybeObject* AllocateExternalStringFromAscii(
       ExternalAsciiString::Resource* resource);
-  MUST_USE_RESULT static Object* AllocateExternalStringFromTwoByte(
+  MUST_USE_RESULT static MaybeObject* AllocateExternalStringFromTwoByte(
       ExternalTwoByteString::Resource* resource);
 
   // Finalizes an external string by deleting the associated external
@@ -631,7 +648,7 @@ class Heap : public AllStatic {
   // Returns Failure::RetryAfterGC(requested_bytes, space) if the allocation
   // failed.
   // Please note this function does not perform a garbage collection.
-  MUST_USE_RESULT static inline Object* AllocateRaw(
+  MUST_USE_RESULT static inline MaybeObject* AllocateRaw(
       int size_in_bytes,
       AllocationSpace space,
       AllocationSpace retry_space);
@@ -646,26 +663,27 @@ class Heap : public AllStatic {
   // self_reference. This allows generated code to reference its own Code
   // object by containing this pointer.
   // Please note this function does not perform a garbage collection.
-  MUST_USE_RESULT static Object* CreateCode(const CodeDesc& desc,
-                                            Code::Flags flags,
-                                            Handle<Object> self_reference);
+  MUST_USE_RESULT static MaybeObject* CreateCode(const CodeDesc& desc,
+                                                 Code::Flags flags,
+                                                 Handle<Object> self_reference);
 
-  MUST_USE_RESULT static Object* CopyCode(Code* code);
+  MUST_USE_RESULT static MaybeObject* CopyCode(Code* code);
 
   // Copy the code and scope info part of the code object, but insert
   // the provided data as the relocation information.
-  MUST_USE_RESULT static Object* CopyCode(Code* code, Vector<byte> reloc_info);
+  MUST_USE_RESULT static MaybeObject* CopyCode(Code* code,
+                                               Vector<byte> reloc_info);
 
   // Finds the symbol for string in the symbol table.
   // If not found, a new symbol is added to the table and returned.
   // Returns Failure::RetryAfterGC(requested_bytes, space) if allocation
   // failed.
   // Please note this function does not perform a garbage collection.
-  MUST_USE_RESULT static Object* LookupSymbol(Vector<const char> str);
-  MUST_USE_RESULT static Object* LookupAsciiSymbol(const char* str) {
+  MUST_USE_RESULT static MaybeObject* LookupSymbol(Vector<const char> str);
+  MUST_USE_RESULT static MaybeObject* LookupAsciiSymbol(const char* str) {
     return LookupSymbol(CStrVector(str));
   }
-  MUST_USE_RESULT static Object* LookupSymbol(String* str);
+  MUST_USE_RESULT static MaybeObject* LookupSymbol(String* str);
   static bool LookupSymbolIfExists(String* str, String** symbol);
   static bool LookupTwoCharsSymbolIfExists(String* str, String** symbol);
 
@@ -680,7 +698,7 @@ class Heap : public AllStatic {
   // string might stay non-flat even when not a failure is returned.
   //
   // Please note this function does not perform a garbage collection.
-  MUST_USE_RESULT static inline Object* PrepareForCompare(String* str);
+  MUST_USE_RESULT static inline MaybeObject* PrepareForCompare(String* str);
 
   // Converts the given boolean condition to JavaScript boolean value.
   static Object* ToBoolean(bool condition) {
@@ -693,12 +711,21 @@ class Heap : public AllStatic {
   static void GarbageCollectionEpilogue();
 
   // Performs garbage collection operation.
-  // Returns whether required_space bytes are available after the collection.
-  static void CollectGarbage(AllocationSpace space);
+  // Returns whether there is a chance that another major GC could
+  // collect more garbage.
+  static bool CollectGarbage(AllocationSpace space, GarbageCollector collector);
+
+  // Performs garbage collection operation.
+  // Returns whether there is a chance that another major GC could
+  // collect more garbage.
+  inline static bool CollectGarbage(AllocationSpace space);
 
   // Performs a full garbage collection. Force compaction if the
   // parameter is true.
   static void CollectAllGarbage(bool force_compaction);
+
+  // Last hope GC, should try to squeeze as much as possible.
+  static void CollectAllAvailableGarbage();
 
   // Notify the heap that a context has been disposed.
   static int NotifyContextDisposed() { return ++contexts_disposed_; }
@@ -758,6 +785,11 @@ class Heap : public AllStatic {
   // The hidden_symbol is special because it is the empty string, but does
   // not match the empty string.
   static String* hidden_symbol() { return hidden_symbol_; }
+
+  static void set_global_contexts_list(Object* object) {
+    global_contexts_list_ = object;
+  }
+  static Object* global_contexts_list() { return global_contexts_list_; }
 
   // Iterates over all roots in the heap.
   static void IterateRoots(ObjectVisitor* v, VisitMode mode);
@@ -862,6 +894,11 @@ class Heap : public AllStatic {
   // Generated code can embed this address to get access to the roots.
   static Object** roots_address() { return roots_; }
 
+  // Get address of global contexts list for serialization support.
+  static Object** global_contexts_list_address() {
+    return &global_contexts_list_;
+  }
+
 #ifdef DEBUG
   static void Print();
   static void PrintHandles();
@@ -886,10 +923,10 @@ class Heap : public AllStatic {
   // Returns Failure::RetryAfterGC(requested_bytes, space) if the allocation
   // failed.
   // Please note this function does not perform a garbage collection.
-  MUST_USE_RESULT static Object* CreateSymbol(const char* str,
-                                              int length,
-                                              int hash);
-  MUST_USE_RESULT static Object* CreateSymbol(String* str);
+  MUST_USE_RESULT static MaybeObject* CreateSymbol(const char* str,
+                                                   int length,
+                                                   int hash);
+  MUST_USE_RESULT static MaybeObject* CreateSymbol(String* str);
 
   // Write barrier support for address[offset] = o.
   static inline void RecordWrite(Address address, int offset);
@@ -961,9 +998,10 @@ class Heap : public AllStatic {
   static inline int AdjustAmountOfExternalAllocatedMemory(int change_in_bytes);
 
   // Allocate uninitialized fixed array.
-  MUST_USE_RESULT static Object* AllocateRawFixedArray(int length);
-  MUST_USE_RESULT static Object* AllocateRawFixedArray(int length,
-                                                       PretenureFlag pretenure);
+  MUST_USE_RESULT static MaybeObject* AllocateRawFixedArray(int length);
+  MUST_USE_RESULT static MaybeObject* AllocateRawFixedArray(
+      int length,
+      PretenureFlag pretenure);
 
   // True if we have reached the allocation limit in the old generation that
   // should force the next GC (caused normally) to be a full one.
@@ -1006,7 +1044,7 @@ class Heap : public AllStatic {
     kRootListLength
   };
 
-  MUST_USE_RESULT static Object* NumberToString(
+  MUST_USE_RESULT static MaybeObject* NumberToString(
       Object* number,
       bool check_number_string_cache = true);
 
@@ -1043,6 +1081,8 @@ class Heap : public AllStatic {
   static void UpdateNewSpaceReferencesInExternalStringTable(
       ExternalStringTableUpdaterCallback updater_func);
 
+  static void ProcessWeakReferences(WeakObjectRetainer* retainer);
+
   // Helper function that governs the promotion policy from new space to
   // old.  If the object's old address lies below the new space's age
   // mark or if we've already filled the bottom 1/16th of the to space,
@@ -1062,6 +1102,7 @@ class Heap : public AllStatic {
   static int max_semispace_size_;
   static int initial_semispace_size_;
   static intptr_t max_old_generation_size_;
+  static intptr_t max_executable_size_;
   static intptr_t code_range_size_;
 
   // For keeping track of how much data has survived
@@ -1149,6 +1190,8 @@ class Heap : public AllStatic {
 
   static Object* roots_[kRootListLength];
 
+  static Object* global_contexts_list_;
+
   struct StringTypeTable {
     InstanceType type;
     int size;
@@ -1219,17 +1262,19 @@ class Heap : public AllStatic {
   static GarbageCollector SelectGarbageCollector(AllocationSpace space);
 
   // Performs garbage collection
-  static void PerformGarbageCollection(GarbageCollector collector,
+  // Returns whether there is a chance another major GC could
+  // collect more garbage.
+  static bool PerformGarbageCollection(GarbageCollector collector,
                                        GCTracer* tracer);
 
   // Allocate an uninitialized object in map space.  The behavior is identical
   // to Heap::AllocateRaw(size_in_bytes, MAP_SPACE), except that (a) it doesn't
   // have to test the allocation space argument and (b) can reduce code size
   // (since both AllocateRaw and AllocateRawMap are inlined).
-  MUST_USE_RESULT static inline Object* AllocateRawMap();
+  MUST_USE_RESULT static inline MaybeObject* AllocateRawMap();
 
   // Allocate an uninitialized object in the global property cell space.
-  MUST_USE_RESULT static inline Object* AllocateRawCell();
+  MUST_USE_RESULT static inline MaybeObject* AllocateRawCell();
 
   // Initializes a JSObject based on its map.
   static void InitializeJSObjectFromMap(JSObject* obj,
@@ -1248,10 +1293,11 @@ class Heap : public AllStatic {
 
   static void CreateFixedStubs();
 
-  static Object* CreateOddball(const char* to_string, Object* to_number);
+  MUST_USE_RESULT static MaybeObject* CreateOddball(const char* to_string,
+                                                    Object* to_number);
 
   // Allocate empty fixed array.
-  static Object* AllocateEmptyFixedArray();
+  MUST_USE_RESULT static MaybeObject* AllocateEmptyFixedArray();
 
   // Performs a minor collection in new generation.
   static void Scavenge();
@@ -1290,7 +1336,7 @@ class Heap : public AllStatic {
   // other parts of the VM could use it. Specifically, a function that creates
   // instances of type JS_FUNCTION_TYPE benefit from the use of this function.
   // Please note this does not perform a garbage collection.
-  MUST_USE_RESULT static inline Object* InitializeFunction(
+  MUST_USE_RESULT static inline MaybeObject* InitializeFunction(
       JSFunction* function,
       SharedFunctionInfo* shared,
       Object* prototype);
@@ -1299,7 +1345,7 @@ class Heap : public AllStatic {
 
 
   // Initializes the number to string cache based on the max semispace size.
-  static Object* InitializeNumberStringCache();
+  MUST_USE_RESULT static MaybeObject* InitializeNumberStringCache();
   // Flush the number to string cache.
   static void FlushNumberStringCache();
 
@@ -1907,7 +1953,7 @@ class TranscendentalCache {
 
   // Returns a heap number with f(input), where f is a math function specified
   // by the 'type' argument.
-  MUST_USE_RESULT static inline Object* Get(Type type, double input) {
+  MUST_USE_RESULT static inline MaybeObject* Get(Type type, double input) {
     TranscendentalCache* cache = caches_[type];
     if (cache == NULL) {
       caches_[type] = cache = new TranscendentalCache(type);
@@ -1920,7 +1966,7 @@ class TranscendentalCache {
   static void Clear();
 
  private:
-  MUST_USE_RESULT inline Object* Get(double input) {
+  MUST_USE_RESULT inline MaybeObject* Get(double input) {
     Converter c;
     c.dbl = input;
     int hash = Hash(c);
@@ -1932,13 +1978,14 @@ class TranscendentalCache {
       return e.output;
     }
     double answer = Calculate(input);
-    Object* heap_number = Heap::AllocateHeapNumber(answer);
-    if (!heap_number->IsFailure()) {
-      elements_[hash].in[0] = c.integers[0];
-      elements_[hash].in[1] = c.integers[1];
-      elements_[hash].output = heap_number;
-    }
     Counters::transcendental_cache_miss.Increment();
+    Object* heap_number;
+    { MaybeObject* maybe_heap_number = Heap::AllocateHeapNumber(answer);
+      if (!maybe_heap_number->ToObject(&heap_number)) return maybe_heap_number;
+    }
+    elements_[hash].in[0] = c.integers[0];
+    elements_[hash].in[1] = c.integers[1];
+    elements_[hash].output = heap_number;
     return heap_number;
   }
 
@@ -2028,6 +2075,19 @@ class ExternalStringTable : public AllStatic {
   static List<Object*> new_space_strings_;
   static List<Object*> old_space_strings_;
 };
+
+
+// Abstract base class for checking whether a weak object should be retained.
+class WeakObjectRetainer {
+ public:
+  virtual ~WeakObjectRetainer() {}
+
+  // Return whether this object should be retained. If NULL is returned the
+  // object has no references. Otherwise the address of the retained object
+  // should be returned as in some GC situations the object has been moved.
+  virtual Object* RetainAs(Object* object) = 0;
+};
+
 
 } }  // namespace v8::internal
 
