@@ -43,7 +43,6 @@
 #include "serialize.h"
 #include "snapshot.h"
 #include "top.h"
-#include "utils.h"
 #include "v8threads.h"
 #include "version.h"
 
@@ -394,14 +393,18 @@ v8::Handle<Boolean> False() {
 ResourceConstraints::ResourceConstraints()
   : max_young_space_size_(0),
     max_old_space_size_(0),
+    max_executable_size_(0),
     stack_limit_(NULL) { }
 
 
 bool SetResourceConstraints(ResourceConstraints* constraints) {
   int young_space_size = constraints->max_young_space_size();
   int old_gen_size = constraints->max_old_space_size();
-  if (young_space_size != 0 || old_gen_size != 0) {
-    bool result = i::Heap::ConfigureHeap(young_space_size / 2, old_gen_size);
+  int max_executable_size = constraints->max_executable_size();
+  if (young_space_size != 0 || old_gen_size != 0 || max_executable_size != 0) {
+    bool result = i::Heap::ConfigureHeap(young_space_size / 2,
+                                         old_gen_size,
+                                         max_executable_size);
     if (!result) return false;
   }
   if (constraints->stack_limit() != NULL) {
@@ -457,16 +460,34 @@ void V8::DisposeGlobal(i::Object** obj) {
 // --- H a n d l e s ---
 
 
-HandleScope::HandleScope() : is_closed_(false) {
+HandleScope::HandleScope()
+    : prev_next_(i::HandleScope::current_.next),
+      prev_limit_(i::HandleScope::current_.limit),
+      is_closed_(false) {
   API_ENTRY_CHECK("HandleScope::HandleScope");
-  i::HandleScope::Enter(&previous_);
+  i::HandleScope::current_.level++;
 }
 
 
 HandleScope::~HandleScope() {
   if (!is_closed_) {
-    i::HandleScope::Leave(&previous_);
+    Leave();
   }
+}
+
+
+void HandleScope::Leave() {
+  i::HandleScope::current_.level--;
+  ASSERT(i::HandleScope::current_.level >= 0);
+  i::HandleScope::current_.next = prev_next_;
+  if (i::HandleScope::current_.limit != prev_limit_) {
+    i::HandleScope::current_.limit = prev_limit_;
+    i::HandleScope::DeleteExtensions();
+  }
+
+#ifdef DEBUG
+  i::HandleScope::ZapRange(prev_next_, prev_limit_);
+#endif
 }
 
 
@@ -553,7 +574,7 @@ i::Object** v8::HandleScope::RawClose(i::Object** value) {
     result = *value;
   }
   is_closed_ = true;
-  i::HandleScope::Leave(&previous_);
+  Leave();
 
   if (value == NULL) {
     return NULL;
@@ -1137,13 +1158,13 @@ void ObjectTemplate::SetInternalFieldCount(int value) {
 
 ScriptData* ScriptData::PreCompile(const char* input, int length) {
   unibrow::Utf8InputBuffer<> buf(input, length);
-  return i::Parser::PreParse(i::Handle<i::String>(), &buf, NULL);
+  return i::ParserApi::PreParse(i::Handle<i::String>(), &buf, NULL);
 }
 
 
 ScriptData* ScriptData::PreCompile(v8::Handle<String> source) {
   i::Handle<i::String> str = Utils::OpenHandle(*source);
-  return i::Parser::PreParse(str, NULL, NULL);
+  return i::ParserApi::PreParse(str, NULL, NULL);
 }
 
 
@@ -1489,7 +1510,8 @@ static i::Handle<i::Object> CallV8HeapFunction(const char* name,
                                                i::Object** argv[],
                                                bool* has_pending_exception) {
   i::Handle<i::String> fmt_str = i::Factory::LookupAsciiSymbol(name);
-  i::Object* object_fun = i::Top::builtins()->GetProperty(*fmt_str);
+  i::Object* object_fun =
+      i::Top::builtins()->GetPropertyNoExceptionThrown(*fmt_str);
   i::Handle<i::JSFunction> fun =
       i::Handle<i::JSFunction>(i::JSFunction::cast(object_fun));
   i::Handle<i::Object> value =
@@ -1605,7 +1627,8 @@ Local<StackFrame> StackTrace::GetFrame(uint32_t index) const {
   ENTER_V8;
   HandleScope scope;
   i::Handle<i::JSArray> self = Utils::OpenHandle(this);
-  i::Handle<i::JSObject> obj(i::JSObject::cast(self->GetElement(index)));
+  i::Object* raw_object = self->GetElementNoExceptionThrown(index);
+  i::Handle<i::JSObject> obj(i::JSObject::cast(raw_object));
   return scope.Close(Utils::StackFrameToLocal(obj));
 }
 
@@ -2521,10 +2544,12 @@ Local<Value> v8::Object::GetRealNamedPropertyInPrototypeChain(
   self_obj->LookupRealNamedPropertyInPrototypes(*key_obj, &lookup);
   if (lookup.IsProperty()) {
     PropertyAttributes attributes;
-    i::Handle<i::Object> result(self_obj->GetProperty(*self_obj,
-                                                      &lookup,
-                                                      *key_obj,
-                                                      &attributes));
+    i::Object* property =
+        self_obj->GetProperty(*self_obj,
+                              &lookup,
+                              *key_obj,
+                              &attributes)->ToObjectUnchecked();
+    i::Handle<i::Object> result(property);
     return Utils::ToLocal(result);
   }
   return Local<Value>();  // No real property was found in prototype chain.
@@ -2540,10 +2565,12 @@ Local<Value> v8::Object::GetRealNamedProperty(Handle<String> key) {
   self_obj->LookupRealNamedProperty(*key_obj, &lookup);
   if (lookup.IsProperty()) {
     PropertyAttributes attributes;
-    i::Handle<i::Object> result(self_obj->GetProperty(*self_obj,
-                                                      &lookup,
-                                                      *key_obj,
-                                                      &attributes));
+    i::Object* property =
+        self_obj->GetProperty(*self_obj,
+                              &lookup,
+                              *key_obj,
+                              &attributes)->ToObjectUnchecked();
+    i::Handle<i::Object> result(property);
     return Utils::ToLocal(result);
   }
   return Local<Value>();  // No real property was found in prototype chain.
@@ -3236,11 +3263,15 @@ bool v8::V8::Dispose() {
 }
 
 
-HeapStatistics::HeapStatistics(): total_heap_size_(0), used_heap_size_(0) { }
+HeapStatistics::HeapStatistics(): total_heap_size_(0),
+                                  total_heap_size_executable_(0),
+                                  used_heap_size_(0) { }
 
 
 void v8::V8::GetHeapStatistics(HeapStatistics* heap_statistics) {
   heap_statistics->set_total_heap_size(i::Heap::CommittedMemory());
+  heap_statistics->set_total_heap_size_executable(
+      i::Heap::CommittedMemoryExecutable());
   heap_statistics->set_used_heap_size(i::Heap::SizeOfObjects());
 }
 

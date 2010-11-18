@@ -106,7 +106,7 @@ class CodeStub BASE_EMBEDDED {
   // Retrieve the code for the stub if already generated.  Do not
   // generate the code if not already generated and instead return a
   // retry after GC Failure object.
-  Object* TryGetCode();
+  MUST_USE_RESULT MaybeObject* TryGetCode();
 
   static Major MajorKeyFromKey(uint32_t key) {
     return static_cast<Major>(MajorKeyBits::decode(key));
@@ -536,15 +536,41 @@ class ApiGetterEntryStub : public CodeStub {
   virtual void SetCustomCache(Code* value);
 
   static const int kStackSpace = 5;
-  static const int kArgc = 4;
+  static const int kArgc = 2;
  private:
   Handle<AccessorInfo> info() { return info_; }
   ApiFunction* fun() { return fun_; }
   Major MajorKey() { return NoCache; }
   int MinorKey() { return 0; }
-  const char* GetName() { return "ApiEntryStub"; }
+  const char* GetName() { return "ApiGetterEntryStub"; }
   // The accessor info associated with the function.
   Handle<AccessorInfo> info_;
+  // The function to be called.
+  ApiFunction* fun_;
+};
+
+
+class ApiCallEntryStub : public CodeStub {
+ public:
+  ApiCallEntryStub(Handle<CallHandlerInfo> info,
+                   ApiFunction* fun)
+      : info_(info),
+        fun_(fun) { }
+  void Generate(MacroAssembler* masm);
+  virtual bool has_custom_cache() { return true; }
+  virtual bool GetCustomCache(Code** code_out);
+  virtual void SetCustomCache(Code* value);
+
+  static const int kStackSpace = 0;
+  static const int kArgc = 5;
+ private:
+  Handle<CallHandlerInfo> info() { return info_; }
+  ApiFunction* fun() { return fun_; }
+  Major MajorKey() { return NoCache; }
+  int MinorKey() { return 0; }
+  const char* GetName() { return "ApiCallEntryStub"; }
+  // The call handler info associated with the function.
+  Handle<CallHandlerInfo> info_;
   // The function to be called.
   ApiFunction* fun_;
 };

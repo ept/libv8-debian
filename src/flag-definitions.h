@@ -140,6 +140,9 @@ DEFINE_bool(stack_trace_on_abort, true,
 // codegen-ia32.cc / codegen-arm.cc
 DEFINE_bool(trace, false, "trace function calls")
 DEFINE_bool(defer_negation, true, "defer negation operation")
+DEFINE_bool(mask_constants_with_cookie,
+            true,
+            "use random jit cookie to mask large constants")
 
 // codegen.cc
 DEFINE_bool(lazy, true, "use lazy compilation")
@@ -183,6 +186,7 @@ DEFINE_bool(always_inline_smi_code, false,
 // heap.cc
 DEFINE_int(max_new_space_size, 0, "max size of the new generation (in kBytes)")
 DEFINE_int(max_old_space_size, 0, "max size of the old generation (in Mbytes)")
+DEFINE_int(max_executable_size, 0, "max size of executable memory (in Mbytes)")
 DEFINE_bool(gc_global, false, "always perform global GCs")
 DEFINE_int(gc_interval, -1, "garbage collect after <n> allocations")
 DEFINE_bool(trace_gc, false,
@@ -412,6 +416,7 @@ DEFINE_bool(sliding_state_window, false,
             "Update sliding state window counters.")
 DEFINE_string(logfile, "v8.log", "Specify the name of the log file.")
 DEFINE_bool(oprofile, false, "Enable JIT agent for OProfile.")
+DEFINE_bool(ll_prof, false, "Enable low-level linux profiler.")
 
 //
 // Heap protection flags
