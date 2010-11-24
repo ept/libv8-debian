@@ -1,8 +1,7 @@
 Tune flags to build libv8 on armel
- mno-thumb-interwork to allow compilation on default debian armel target (-march=armv4t), see
-  http://code.google.com/p/v8/issues/detail?id=590
- FIXED IN GCC 4.4.5 : fno-tree-sink to workaround a gcc armel bug, see http://gcc.gnu.org/bugzilla/show_bug.cgi?id=39604
- STILL APPLY : -Wno-psabi to fix gcc warnings on armel, see http://gcc.gnu.org/bugzilla/show_bug.cgi?id=42748
+ * mno-thumb-interwork to allow compilation on default debian armel target (-march=armv4t), see http://code.google.com/p/v8/issues/detail?id=590. Actually simply removing the warning seems to be fine now.
+ * fno-tree-sink to workaround a gcc armel bug, see http://gcc.gnu.org/bugzilla/show_bug.cgi?id=39604
+ * Wno-psabi to fix gcc warnings on armel, see http://gcc.gnu.org/bugzilla/show_bug.cgi?id=42748
 
 --- a/SConstruct
 +++ b/SConstruct
@@ -12,7 +11,7 @@ Tune flags to build libv8 on armel
          'CPPDEFINES' : ['CAN_USE_UNALIGNED_ACCESSES=0']
 -      }
 +      },
-+      'CCFLAGS':      ['-Wno-psabi']
++      'CCFLAGS':      ['-Wno-psabi', '-fno-tree-sink']
      },
      'simulator:arm': {
        'CCFLAGS':      ['-m32'],
