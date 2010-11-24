@@ -282,6 +282,8 @@
         '../../src/ast.h',
         '../../src/bignum.cc',
         '../../src/bignum.h',
+        '../../src/bignum-dtoa.cc',
+        '../../src/bignum-dtoa.h',
         '../../src/bootstrapper.cc',
         '../../src/bootstrapper.h',
         '../../src/builtins.cc',
@@ -331,7 +333,6 @@
         '../../src/disassembler.h',
         '../../src/dtoa.cc',
         '../../src/dtoa.h',
-        '../../src/dtoa-config.c',
         '../../src/diy-fp.cc',
         '../../src/diy-fp.h',
         '../../src/double.h',
@@ -484,6 +485,10 @@
         '../../src/zone-inl.h',
         '../../src/zone.cc',
         '../../src/zone.h',
+	'../../src/extensions/externalize-string-extension.cc',
+	'../../src/extensions/externalize-string-extension.h',
+	'../../src/extensions/gc-extension.cc',
+	'../../src/extensions/gc-extension.h',
       ],
       'conditions': [
         ['v8_target_arch=="arm"', {
@@ -651,11 +656,7 @@
             '../../src/platform-win32.cc',
           ],
           # 4355, 4800 came from common.vsprops
-          # 4018, 4244 were a per file config on dtoa-config.c
-          # TODO: It's probably possible and desirable to stop disabling the
-          # dtoa-specific warnings by modifying dtoa as was done in Chromium
-          # r9255.  Refer to that revision for details.
-          'msvs_disabled_warnings': [4355, 4800, 4018, 4244],
+          'msvs_disabled_warnings': [4355, 4800],
           'link_settings':  {
             'libraries': [ '-lwinmm.lib' ],
           },
