@@ -727,7 +727,7 @@ FunctionLiteral* Parser::ParseProgram(Handle<String> source,
 
   // Initialize parser state.
   source->TryFlatten();
-  scanner_.Initialize(source, JAVASCRIPT);
+  scanner_.Initialize(source);
   ASSERT(target_stack_ == NULL);
   if (pre_data_ != NULL) pre_data_->Initialize();
 
@@ -790,8 +790,7 @@ FunctionLiteral* Parser::ParseLazy(Handle<SharedFunctionInfo> info) {
 
   // Initialize parser state.
   source->TryFlatten();
-  scanner_.Initialize(source, info->start_position(), info->end_position(),
-                      JAVASCRIPT);
+  scanner_.Initialize(source, info->start_position(), info->end_position());
   ASSERT(target_stack_ == NULL);
   mode_ = PARSE_EAGERLY;
 
@@ -1692,11 +1691,13 @@ Statement* Parser::ParseExpressionOrLabelledStatement(ZoneStringList* labels,
   // ExpressionStatement | LabelledStatement ::
   //   Expression ';'
   //   Identifier ':' Statement
-
+  bool starts_with_idenfifier = (peek() == Token::IDENTIFIER);
   Expression* expr = ParseExpression(true, CHECK_OK);
-  if (peek() == Token::COLON && expr &&
+  if (peek() == Token::COLON && starts_with_idenfifier && expr &&
       expr->AsVariableProxy() != NULL &&
       !expr->AsVariableProxy()->is_this()) {
+    // Expression is a single identifier, and not, e.g., a parenthesized
+    // identifier.
     VariableProxy* var = expr->AsVariableProxy();
     Handle<String> label = var->name();
     // TODO(1240780): We don't check for redeclaration of labels
@@ -2273,6 +2274,12 @@ Expression* Parser::ParseAssignmentExpression(bool accept_IN, bool* ok) {
       property->obj()->AsVariableProxy() != NULL &&
       property->obj()->AsVariableProxy()->is_this()) {
     temp_scope_->AddProperty();
+  }
+
+  // If we assign a function literal to a property we pretenure the
+  // literal so it can be added as a constant function property.
+  if (property != NULL && right->AsFunctionLiteral() != NULL) {
+    right->AsFunctionLiteral()->set_pretenure(true);
   }
 
   if (fni_ != NULL) {
@@ -3610,7 +3617,7 @@ Expression* Parser::NewThrowError(Handle<String> constructor,
 
 Handle<Object> JsonParser::ParseJson(Handle<String> source) {
   source->TryFlatten();
-  scanner_.Initialize(source, JSON);
+  scanner_.Initialize(source);
   Handle<Object> result = ParseJsonValue();
   if (result.is_null() || scanner_.Next() != Token::EOS) {
     if (scanner_.stack_overflow()) {
@@ -4635,31 +4642,42 @@ int ScriptDataImpl::ReadNumber(byte** source) {
 }
 
 
-// Preparse, but only collect data that is immediately useful,
-// even if the preparser data is only used once.
-ScriptDataImpl* ParserApi::PartialPreParse(Handle<String> source,
-                                           unibrow::CharacterStream* stream,
-                                           v8::Extension* extension) {
-  Handle<Script> no_script;
-  bool allow_lazy = FLAG_lazy && (extension == NULL);
-  if (!allow_lazy) {
-    // Partial preparsing is only about lazily compiled functions.
-    // If we don't allow lazy compilation, the log data will be empty.
-    return NULL;
-  }
-  preparser::PreParser<Scanner, PartialParserRecorder> parser;
-  Scanner scanner;
-  scanner.Initialize(source, stream, JAVASCRIPT);
-  PartialParserRecorder recorder;
-  if (!parser.PreParseProgram(&scanner, &recorder, allow_lazy)) {
+// Create a Scanner for the preparser to use as input, and preparse the source.
+static ScriptDataImpl* DoPreParse(Handle<String> source,
+                                  unibrow::CharacterStream* stream,
+                                  bool allow_lazy,
+                                  PartialParserRecorder* recorder,
+                                  int literal_flags) {
+  V8JavaScriptScanner scanner;
+  scanner.Initialize(source, stream, literal_flags);
+  preparser::PreParser<JavaScriptScanner, PartialParserRecorder> preparser;
+  if (!preparser.PreParseProgram(&scanner, recorder, allow_lazy)) {
     Top::StackOverflow();
     return NULL;
   }
 
   // Extract the accumulated data from the recorder as a single
   // contiguous vector that we are responsible for disposing.
-  Vector<unsigned> store = recorder.ExtractData();
+  Vector<unsigned> store = recorder->ExtractData();
   return new ScriptDataImpl(store);
+}
+
+
+// Preparse, but only collect data that is immediately useful,
+// even if the preparser data is only used once.
+ScriptDataImpl* ParserApi::PartialPreParse(Handle<String> source,
+                                           unibrow::CharacterStream* stream,
+                                           v8::Extension* extension) {
+  bool allow_lazy = FLAG_lazy && (extension == NULL);
+  if (!allow_lazy) {
+    // Partial preparsing is only about lazily compiled functions.
+    // If we don't allow lazy compilation, the log data will be empty.
+    return NULL;
+  }
+  PartialParserRecorder recorder;
+
+  return DoPreParse(source, stream, allow_lazy, &recorder,
+                    JavaScriptScanner::kNoLiterals);
 }
 
 
@@ -4667,19 +4685,12 @@ ScriptDataImpl* ParserApi::PreParse(Handle<String> source,
                                     unibrow::CharacterStream* stream,
                                     v8::Extension* extension) {
   Handle<Script> no_script;
-  preparser::PreParser<Scanner, CompleteParserRecorder> parser;
-  Scanner scanner;
-  scanner.Initialize(source, stream, JAVASCRIPT);
   bool allow_lazy = FLAG_lazy && (extension == NULL);
   CompleteParserRecorder recorder;
-  if (!parser.PreParseProgram(&scanner, &recorder, allow_lazy)) {
-    Top::StackOverflow();
-    return NULL;
-  }
-  // Extract the accumulated data from the recorder as a single
-  // contiguous vector that we are responsible for disposing.
-  Vector<unsigned> store = recorder.ExtractData();
-  return new ScriptDataImpl(store);
+  int kPreParseLiteralsFlags =
+      JavaScriptScanner::kLiteralString | JavaScriptScanner::kLiteralIdentifier;
+  return DoPreParse(source, stream, allow_lazy,
+                    &recorder, kPreParseLiteralsFlags);
 }
 
 
