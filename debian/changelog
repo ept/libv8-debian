@@ -1,4 +1,4 @@
-libv8 (2.5.8-1) experimental; urgency=low
+libv8 (2.5.9-1) experimental; urgency=low
 
   * New upstream release, followed the procedure of README.source to update.
   * Fix FTBFS on armel. (Closes: #599713)
