@@ -1,4 +1,4 @@
-libv8 (2.5.9-1) experimental; urgency=low
+libv8 (2.5.9-1) unstable; urgency=low
 
   * New upstream release 2.5.9.6
     followed the procedure of README.source to update.
@@ -7,7 +7,7 @@ libv8 (2.5.9-1) experimental; urgency=low
     (Closes: #596997)
   * Fix typo in libv8-dbg short description. (Closes: #601855)
 
- -- Jérémy Lal <kapouer@melix.org>  Wed, 24 Nov 2010 09:51:43 +0100
+ -- Jérémy Lal <kapouer@melix.org>  Thu, 06 Jan 2011 18:02:20 +0100
 
 libv8 (2.4.7-2) experimental; urgency=low
 
