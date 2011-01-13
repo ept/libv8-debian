@@ -1,6 +1,6 @@
-libv8 (2.5.9-1) unstable; urgency=low
+libv8 (2.5.9.7-1) unstable; urgency=low
 
-  * New upstream release 2.5.9.7
+  * New upstream release.
     followed the procedure of README.source to update.
   * Fix FTBFS on armel. (Closes: #599713)
   * No longer flag march=armv4t, it's the default debian armel target.
