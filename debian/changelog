@@ -1,3 +1,9 @@
+libv8 (2.5.9.9-2) unstable; urgency=low
+
+  * Include v8stdint.h in libv8-dev. 
+
+ -- Jérémy Lal <kapouer@melix.org>  Thu, 20 Jan 2011 23:26:46 +0100
+
 libv8 (2.5.9.9-1) unstable; urgency=low
 
   * New upstream release.
