@@ -23,7 +23,7 @@ add the install target, it is missing from the shipped source
 +    env.Install(libdir, lib[0])
 +    if dir not in install_dirs:
 +      install_dirs += libdir
-+  for include in [ 'include/v8.h', 'include/v8-debug.h', 'include/v8-profiler.h' ]:
++  for include in [ 'include/v8.h', 'include/v8-debug.h', 'include/v8-profiler.h', 'include/v8stdint.h' ]:
 +    env.Install(incdir, include);
 +  install_dirs += incdir
 +  env.Alias('install', install_dirs)
