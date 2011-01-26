@@ -1,5 +1,7 @@
-patch to enable the soname that is not automatically shipped with SConstruct
-
+Description: scons soname=on needs soname to be set
+Forwarded: not-needed
+Author: Antonio Radici <antonio@dyne.org>
+Last-Update: 2011-01-24
 --- a/src/version.cc
 +++ b/src/version.cc
 @@ -41,7 +41,7 @@

@@ -1,4 +1,8 @@
-add the install target, it is missing from the shipped source
+Description: add the install target
+ Noteworthy : Here are defined the headers for libv8-dev
+Forwarded: not-needed
+Author: Antonio Radici <antonio@dyne.org>
+Last-Update: 2011-01-20
 
 --- a/SConstruct
 +++ b/SConstruct
