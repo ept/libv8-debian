@@ -53,7 +53,7 @@ clean::
 
 common-post-build-impl::
 ifeq (,$(filter nocheck,$(DEB_BUILD_OPTIONS)))
-	LD_PRELOAD=$(CURDIR)/libv8-$(SONAME).so $(CURDIR)/tools/test.py --no-build cctest mjsunit message
+	LD_PRELOAD=$(CURDIR)/libv8-$(SONAME).so $(CURDIR)/tools/test.py --no-build cctest mjsunit message arch=$(v8arch)
 endif
 
 common-install-impl::
