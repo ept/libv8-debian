@@ -1,7 +1,9 @@
 libv8 (2.5.9.11-1) unstable; urgency=low
 
   * New upstream release,
-    followed the procedure of README.source to update. 
+    followed the procedure of README.source to update.
+  * Map DEB_HOST_ARCH and DEB_HOST_ARCH_OS to v8 scons options 'arch'
+    and 'os'. (Closes: #611215)
 
  -- Jérémy Lal <kapouer@melix.org>  Mon, 24 Jan 2011 16:18:01 +0100
 

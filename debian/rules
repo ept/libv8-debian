@@ -12,7 +12,27 @@ CFLAGS += -fno-strict-aliasing
 export CFLAGS
 export CXXFLAGS
 
-DEB_SCONS_OPTIONS          := library=shared soname=on shlibtype=hidden
+# map HOST ARCH AND OS to v8 options
+ifeq ($(DEB_HOST_ARCH), i386)
+	v8arch := ia32
+endif
+ifeq ($(DEB_HOST_ARCH), amd64)
+	v8arch := x64
+endif
+ifeq ($(DEB_HOST_ARCH), armel)
+	v8arch := arm
+endif
+ifeq ($(DEB_HOST_ARCH), mipsel)
+	v8arch := mips
+endif
+ifeq ($(DEB_HOST_ARCH_OS), linux)
+	v8os := linux
+endif
+ifeq ($(DEB_HOST_ARCH_OS), kfreebsd)
+	v8os := freebsd
+endif
+
+DEB_SCONS_OPTIONS          := library=shared soname=on shlibtype=hidden arch=$(v8arch) os=$(v8os)
 DEB_SCONS_BUILD_TARGET     := library
 # policy 4.9.1
 ifeq (,$(filter nocheck,$(DEB_BUILD_OPTIONS)))
