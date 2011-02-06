@@ -39,10 +39,6 @@ ifeq (,$(filter nocheck,$(DEB_BUILD_OPTIONS)))
 	DEB_SCONS_BUILD_OPTIONS    := sample=shell
 	DEB_SCONS_BUILD_TARGET     += sample cctests
 endif
-ifneq (,$(filter parallel=%,$(DEB_BUILD_OPTIONS)))
-	NUMJOBS = $(patsubst parallel=%,%,$(filter parallel=%,$(DEB_BUILD_OPTIONS)))
-	DEB_SCONS_BUILD_OPTIONS += -j$(NUMJOBS)
-endif
 DEB_SCONS_INSTALL_OPTIONS  += DESTDIR="$(cdbs_curdestdir)"
 
 clean::
