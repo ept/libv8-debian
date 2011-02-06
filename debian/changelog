@@ -1,16 +1,18 @@
-libv8 (2.5.9.15-1) unstable; urgency=low
+libv8 (2.5.9.15-1) UNRELEASED; urgency=low
 
-  * New upstream release,
-    followed the procedure of README.source to update. 
+  * New upstream release.
 
- -- Jérémy Lal <kapouer@melix.org>  Sun, 06 Feb 2011 15:24:17 +0100
+  [ Jérémy Lal ]
+  * Map DEB_HOST_ARCH and DEB_HOST_ARCH_OS to v8 scons options 'arch'
+    and 'os'. (Closes: #611215)
+
+  [ Jonas Smedegaard ]
+  * Tidy CDBS variables internally in rules file.
+
+ -- Jonas Smedegaard <dr@jones.dk>  Sun, 06 Feb 2011 16:13:12 +0100
 
 libv8 (2.5.9.11-1) unstable; urgency=low
 
-  * New upstream release,
-    followed the procedure of README.source to update.
-  * Map DEB_HOST_ARCH and DEB_HOST_ARCH_OS to v8 scons options 'arch'
-    and 'os'. (Closes: #611215)
 
  -- Jérémy Lal <kapouer@melix.org>  Mon, 24 Jan 2011 16:18:01 +0100
 
