@@ -43,7 +43,7 @@ ifneq (,$(filter parallel=%,$(DEB_BUILD_OPTIONS)))
 	NUMJOBS = $(patsubst parallel=%,%,$(filter parallel=%,$(DEB_BUILD_OPTIONS)))
 	DEB_SCONS_BUILD_OPTIONS += -j$(NUMJOBS)
 endif
-DEB_SCONS_INSTALL_OPTIONS  := $(DEB_SCONS_OPTIONS) DESTDIR=$(DEB_DESTDIR)
+DEB_SCONS_INSTALL_OPTIONS  += DESTDIR="$(cdbs_curdestdir)"
 
 clean::
 	rm -f tools/*.pyc libv8-$(SONAME).so
