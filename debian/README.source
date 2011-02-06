@@ -29,13 +29,3 @@ with the new version; additionally rename the file with the new version
 
 4) edit debian/control and remove any reference to the old version by updating
 it with the new version
-
-
-ARMEL and VFP
-=============
-
-v8 detects at runtime the available processor features, like vfp.
-Unfortunately, in libv8 2.4.9.9 it assumes "vfp" feature is "vfp3", see :
-http://code.google.com/p/v8/issues/detail?id=914
-This bug appears when running v8 on some arm variants (qemu arm being one of them),
-and has been fixed in version 2.5.4
