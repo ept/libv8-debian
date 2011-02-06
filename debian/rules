@@ -38,7 +38,7 @@ clean::
 	rm -f shell
 
 common-post-build-impl::
-	$(if $(filter nocheck,$(DEB_BUILD_OPTIONS)),LD_PRELOAD=$(CURDIR)/libv8-$(SONAME).so $(CURDIR)/tools/test.py --no-build cctest mjsunit message arch=$(v8arch))
+	$(if !$(filter nocheck,$(DEB_BUILD_OPTIONS)),LD_PRELOAD=$(CURDIR)/libv8-$(SONAME).so $(CURDIR)/tools/test.py --no-build cctest mjsunit message arch=$(v8arch))
 
 common-install-impl::
 	cd debian/tmp/usr/lib/ ; \
