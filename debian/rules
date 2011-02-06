@@ -24,10 +24,9 @@ v8os := $(or $(v8os),$(DEB_HOST_ARCH_OS))
 
 DEB_SCONS_OPTIONS = library=shared soname=on shlibtype=hidden arch=$(v8arch) os=$(v8os)
 DEB_SCONS_BUILD_TARGET = library
-DEB_SCONS_CHECK_TARGET = sample cctests
 
-# FIXME: document why!
-DEB_SCONS_CHECK_OPTIONS = sample=shell
+# regression tests need to build shell for mjsunit, and cc code for cctest
+DEB_SCONS_CHECK_TARGET = sample sample=shell cctests
 
 DEB_SCONS_INSTALL_OPTIONS += DESTDIR="$(cdbs_curdestdir)"
 
@@ -37,6 +36,7 @@ clean::
 	rm -f test/*/*.pyc
 	rm -f shell
 
+# actually run regression tests
 common-post-build-impl::
 	$(if !$(filter nocheck,$(DEB_BUILD_OPTIONS)),LD_PRELOAD=$(CURDIR)/libv8-$(SONAME).so $(CURDIR)/tools/test.py --no-build cctest mjsunit message arch=$(v8arch))
 
