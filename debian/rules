@@ -3,9 +3,9 @@
 include /usr/share/cdbs/1/rules/debhelper.mk
 include /usr/share/cdbs/1/class/scons.mk
 
-SONAME			:= 2.5.9.11
+SONAME = 2.5.9.11
 
-DEB_DH_MAKESHLIBS_ARGS := -- -c4
+DEB_DH_MAKESHLIBS_ARGS = -- -c4
 
 CXXFLAGS += -fno-strict-aliasing
 CFLAGS += -fno-strict-aliasing
@@ -22,14 +22,14 @@ v8os ?= $(if $(filter linux,$(DEB_HOST_ARCH_OS)),linux)
 v8os ?= $(if $(filter kfreebsd,$(DEB_HOST_ARCH_OS)),freebsd)
 v8os ?= $(DEB_HOST_ARCH_OS)
 
-DEB_SCONS_OPTIONS          := library=shared soname=on shlibtype=hidden arch=$(v8arch) os=$(v8os)
-DEB_SCONS_BUILD_TARGET     := library
-DEB_SCONS_CHECK_TARGET     := sample cctests
+DEB_SCONS_OPTIONS = library=shared soname=on shlibtype=hidden arch=$(v8arch) os=$(v8os)
+DEB_SCONS_BUILD_TARGET = library
+DEB_SCONS_CHECK_TARGET = sample cctests
 
 # FIXME: document why!
-DEB_SCONS_CHECK_OPTIONS    := sample=shell
+DEB_SCONS_CHECK_OPTIONS = sample=shell
 
-DEB_SCONS_INSTALL_OPTIONS  += DESTDIR="$(cdbs_curdestdir)"
+DEB_SCONS_INSTALL_OPTIONS += DESTDIR="$(cdbs_curdestdir)"
 
 clean::
 	rm -f tools/*.pyc libv8-$(SONAME).so
