@@ -11,11 +11,6 @@ libv8 (2.5.9.15-1) UNRELEASED; urgency=low
 
  -- Jonas Smedegaard <dr@jones.dk>  Sun, 06 Feb 2011 16:13:12 +0100
 
-libv8 (2.5.9.11-1) unstable; urgency=low
-
-
- -- Jérémy Lal <kapouer@melix.org>  Mon, 24 Jan 2011 16:18:01 +0100
-
 libv8 (2.5.9.9-2) unstable; urgency=low
 
   * Include v8stdint.h in libv8-dev. 
