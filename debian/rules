@@ -13,24 +13,14 @@ export CFLAGS
 export CXXFLAGS
 
 # map HOST ARCH AND OS to v8 options
-ifeq ($(DEB_HOST_ARCH), i386)
-	v8arch := ia32
-endif
-ifeq ($(DEB_HOST_ARCH), amd64)
-	v8arch := x64
-endif
-ifeq ($(DEB_HOST_ARCH), armel)
-	v8arch := arm
-endif
-ifeq ($(DEB_HOST_ARCH), mipsel)
-	v8arch := mips
-endif
-ifeq ($(DEB_HOST_ARCH_OS), linux)
-	v8os := linux
-endif
-ifeq ($(DEB_HOST_ARCH_OS), kfreebsd)
-	v8os := freebsd
-endif
+v8arch ?= $(if $(filter i386,$(DEB_HOST_ARCH)),ia32)
+v8arch ?= $(if $(filter amd64,$(DEB_HOST_ARCH)),x86)
+v8arch ?= $(if $(filter armel,$(DEB_HOST_ARCH)),arm)
+v8arch ?= $(if $(filter mipsel,$(DEB_HOST_ARCH)),mips)
+v8arch ?= $(DEB_HOST_ARCH)
+v8os ?= $(if $(filter linux,$(DEB_HOST_ARCH_OS)),linux)
+v8os ?= $(if $(filter kfreebsd,$(DEB_HOST_ARCH_OS)),freebsd)
+v8os ?= $(DEB_HOST_ARCH_OS)
 
 DEB_SCONS_OPTIONS          := library=shared soname=on shlibtype=hidden arch=$(v8arch) os=$(v8os)
 DEB_SCONS_BUILD_TARGET     := library
