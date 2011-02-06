@@ -24,11 +24,11 @@ v8os ?= $(DEB_HOST_ARCH_OS)
 
 DEB_SCONS_OPTIONS          := library=shared soname=on shlibtype=hidden arch=$(v8arch) os=$(v8os)
 DEB_SCONS_BUILD_TARGET     := library
-# policy 4.9.1
-ifeq (,$(filter nocheck,$(DEB_BUILD_OPTIONS)))
-	DEB_SCONS_BUILD_OPTIONS    := sample=shell
-	DEB_SCONS_BUILD_TARGET     += sample cctests
-endif
+DEB_SCONS_CHECK_TARGET     := sample cctests
+
+# FIXME: document why!
+DEB_SCONS_CHECK_OPTIONS    := sample=shell
+
 DEB_SCONS_INSTALL_OPTIONS  += DESTDIR="$(cdbs_curdestdir)"
 
 clean::
