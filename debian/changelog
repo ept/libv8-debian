@@ -1,3 +1,10 @@
+libv8 (2.5.9.15-1) unstable; urgency=low
+
+  * New upstream release,
+    followed the procedure of README.source to update. 
+
+ -- Jérémy Lal <kapouer@melix.org>  Sun, 06 Feb 2011 15:24:17 +0100
+
 libv8 (2.5.9.11-1) unstable; urgency=low
 
   * New upstream release,
