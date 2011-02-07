@@ -16,6 +16,7 @@ export CXXFLAGS
 v8arch := $(or $(v8arch),$(if $(filter i386,$(DEB_HOST_ARCH)),ia32))
 v8arch := $(or $(v8arch),$(if $(filter amd64,$(DEB_HOST_ARCH)),x64))
 v8arch := $(or $(v8arch),$(if $(filter armel,$(DEB_HOST_ARCH)),arm))
+v8arch := $(or $(v8arch),$(if $(filter armhf,$(DEB_HOST_ARCH)),arm))
 v8arch := $(or $(v8arch),$(if $(filter mipsel,$(DEB_HOST_ARCH)),mips))
 v8arch := $(or $(v8arch),$(DEB_HOST_ARCH))
 v8os := $(or $(v8os),$(if $(filter linux,$(DEB_HOST_ARCH_OS)),linux))
