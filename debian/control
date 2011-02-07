@@ -1,8 +1,7 @@
 Source: libv8
 Priority: optional
-Maintainer: Antonio Radici <antonio@dyne.org>
-Uploaders: Jérémy Lal <kapouer@melix.org>,
- Jonas Amedegaard <dr@jones.dk>
+Maintainer: Jérémy Lal <kapouer@melix.org>
+Uploaders: Jonas Smedegaard <dr@jones.dk>
 Build-Depends: debhelper (>= 7), pkg-config, scons, cdbs (>= 0.4.73)
 Standards-Version: 3.9.1
 Section: libs
