@@ -1,15 +1,19 @@
-libv8 (2.5.9.15-1) UNRELEASED; urgency=low
+libv8 (2.5.9.15-1) unstable; urgency=low
 
   * New upstream release.
 
   [ Jérémy Lal ]
   * Map DEB_HOST_ARCH and DEB_HOST_ARCH_OS to v8 scons options 'arch'
     and 'os'. (Closes: #611215)
+    Move to team-maintainance, with me as maintainer and Jonas
+    Smedegaard as uploader.
+    Drop Antonio Radici as uploader: Thanks for your contributions,
+    Antonio!
 
   [ Jonas Smedegaard ]
   * Tidy CDBS variables internally in rules file.
 
- -- Jonas Smedegaard <dr@jones.dk>  Sun, 06 Feb 2011 16:13:12 +0100
+ -- Jonas Smedegaard <dr@jones.dk>  Mon, 07 Feb 2011 01:36:39 +0100
 
 libv8 (2.5.9.9-2) unstable; urgency=low
 
