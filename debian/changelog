@@ -1,3 +1,9 @@
+libv8 (2.5.9.15-2) UNRELEASED; urgency=low
+
+  * Builds with snapshot=on. (Closes: #612781) 
+
+ -- Jérémy Lal <kapouer@melix.org>  Thu, 10 Feb 2011 17:44:09 +0100
+
 libv8 (2.5.9.15-1) unstable; urgency=low
 
   * New upstream release.
