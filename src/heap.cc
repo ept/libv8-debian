@@ -35,13 +35,16 @@
 #include "debug.h"
 #include "heap-profiler.h"
 #include "global-handles.h"
+#include "liveobjectlist-inl.h"
 #include "mark-compact.h"
 #include "natives.h"
 #include "objects-visiting.h"
+#include "runtime-profiler.h"
 #include "scanner-base.h"
 #include "scopeinfo.h"
 #include "snapshot.h"
 #include "v8threads.h"
+#include "vm-state-inl.h"
 #if V8_TARGET_ARCH_ARM && !V8_INTERPRETED_REGEXP
 #include "regexp-macro-assembler.h"
 #include "arm/regexp-macro-assembler-arm.h"
@@ -398,6 +401,8 @@ void Heap::GarbageCollectionPrologue() {
 #if defined(DEBUG) || defined(ENABLE_LOGGING_AND_PROFILING)
   ReportStatisticsBeforeGC();
 #endif
+
+  LiveObjectList::GCPrologue();
 }
 
 intptr_t Heap::SizeOfObjects() {
@@ -410,6 +415,7 @@ intptr_t Heap::SizeOfObjects() {
 }
 
 void Heap::GarbageCollectionEpilogue() {
+  LiveObjectList::GCEpilogue();
 #ifdef DEBUG
   allow_allocation(true);
   ZapFromSpace();
@@ -839,6 +845,8 @@ void Heap::MarkCompactPrologue(bool is_compacting) {
   ContextSlotCache::Clear();
   DescriptorLookupCache::Clear();
 
+  RuntimeProfiler::MarkCompactPrologue(is_compacting);
+
   CompilationCache::MarkCompactPrologue();
 
   CompletelyClearInstanceofCache();
@@ -1049,10 +1057,20 @@ void Heap::Scavenge() {
   // Scavenge object reachable from the global contexts list directly.
   scavenge_visitor.VisitPointer(BitCast<Object**>(&global_contexts_list_));
 
+  // Scavenge objects reachable from the runtime-profiler sampler
+  // window directly.
+  Object** sampler_window_address = RuntimeProfiler::SamplerWindowAddress();
+  int sampler_window_size = RuntimeProfiler::SamplerWindowSize();
+  scavenge_visitor.VisitPointers(
+      sampler_window_address,
+      sampler_window_address + sampler_window_size);
+
   new_space_front = DoScavenge(&scavenge_visitor, new_space_front);
 
   UpdateNewSpaceReferencesInExternalStringTable(
       &UpdateNewSpaceReferenceInExternalStringTableEntry);
+
+  LiveObjectList::UpdateReferencesForScavengeGC();
 
   ASSERT(new_space_front == new_space_.top());
 
@@ -1116,6 +1134,40 @@ void Heap::UpdateNewSpaceReferencesInExternalStringTable(
 }
 
 
+static Object* ProcessFunctionWeakReferences(Object* function,
+                                             WeakObjectRetainer* retainer) {
+  Object* head = Heap::undefined_value();
+  JSFunction* tail = NULL;
+  Object* candidate = function;
+  while (!candidate->IsUndefined()) {
+    // Check whether to keep the candidate in the list.
+    JSFunction* candidate_function = reinterpret_cast<JSFunction*>(candidate);
+    Object* retain = retainer->RetainAs(candidate);
+    if (retain != NULL) {
+      if (head->IsUndefined()) {
+        // First element in the list.
+        head = candidate_function;
+      } else {
+        // Subsequent elements in the list.
+        ASSERT(tail != NULL);
+        tail->set_next_function_link(candidate_function);
+      }
+      // Retained function is new tail.
+      tail = candidate_function;
+    }
+    // Move to next element in the list.
+    candidate = candidate_function->next_function_link();
+  }
+
+  // Terminate the list if there is one or more elements.
+  if (tail != NULL) {
+    tail->set_next_function_link(Heap::undefined_value());
+  }
+
+  return head;
+}
+
+
 void Heap::ProcessWeakReferences(WeakObjectRetainer* retainer) {
   Object* head = undefined_value();
   Context* tail = NULL;
@@ -1137,6 +1189,15 @@ void Heap::ProcessWeakReferences(WeakObjectRetainer* retainer) {
       }
       // Retained context is new tail.
       tail = candidate_context;
+
+      // Process the weak list of optimized functions for the context.
+      Object* function_list_head =
+          ProcessFunctionWeakReferences(
+              candidate_context->get(Context::OPTIMIZED_FUNCTIONS_LIST),
+              retainer);
+      candidate_context->set_unchecked(Context::OPTIMIZED_FUNCTIONS_LIST,
+                                       function_list_head,
+                                       UPDATE_WRITE_BARRIER);
     }
     // Move to next element in the list.
     candidate = candidate_context->get(Context::NEXT_CONTEXT_LINK);
@@ -1651,6 +1712,11 @@ bool Heap::CreateInitialMaps() {
   }
   set_byte_array_map(Map::cast(obj));
 
+  { MaybeObject* maybe_obj = AllocateByteArray(0, TENURED);
+    if (!maybe_obj->ToObject(&obj)) return false;
+  }
+  set_empty_byte_array(ByteArray::cast(obj));
+
   { MaybeObject* maybe_obj =
         AllocateMap(PIXEL_ARRAY_TYPE, PixelArray::kAlignedSize);
     if (!maybe_obj->ToObject(&obj)) return false;
@@ -1759,6 +1825,12 @@ bool Heap::CreateInitialMaps() {
     if (!maybe_obj->ToObject(&obj)) return false;
   }
   set_shared_function_info_map(Map::cast(obj));
+
+  { MaybeObject* maybe_obj = AllocateMap(JS_MESSAGE_OBJECT_TYPE,
+                                         JSMessageObject::kSize);
+    if (!maybe_obj->ToObject(&obj)) return false;
+  }
+  set_message_object_map(Map::cast(obj));
 
   ASSERT(!Heap::InNewSpace(Heap::empty_fixed_array()));
   return true;
@@ -1950,6 +2022,12 @@ bool Heap::CreateInitialObjects() {
     if (!maybe_obj->ToObject(&obj)) return false;
   }
   set_the_hole_value(obj);
+
+  { MaybeObject* maybe_obj = CreateOddball("arguments_marker",
+                                           Smi::FromInt(-4));
+    if (!maybe_obj->ToObject(&obj)) return false;
+  }
+  set_arguments_marker(obj);
 
   { MaybeObject* maybe_obj =
         CreateOddball("no_interceptor_result_sentinel", Smi::FromInt(-2));
@@ -2245,14 +2323,42 @@ MaybeObject* Heap::AllocateSharedFunctionInfo(Object* name) {
   share->set_debug_info(undefined_value());
   share->set_inferred_name(empty_string());
   share->set_compiler_hints(0);
+  share->set_deopt_counter(Smi::FromInt(FLAG_deopt_every_n_times));
   share->set_initial_map(undefined_value());
   share->set_this_property_assignments_count(0);
   share->set_this_property_assignments(undefined_value());
+  share->set_opt_count(0);
   share->set_num_literals(0);
   share->set_end_position(0);
   share->set_function_token_position(0);
   return result;
 }
+
+
+MaybeObject* Heap::AllocateJSMessageObject(String* type,
+                                           JSArray* arguments,
+                                           int start_position,
+                                           int end_position,
+                                           Object* script,
+                                           Object* stack_trace,
+                                           Object* stack_frames) {
+  Object* result;
+  { MaybeObject* maybe_result = Allocate(message_object_map(), NEW_SPACE);
+    if (!maybe_result->ToObject(&result)) return maybe_result;
+  }
+  JSMessageObject* message = JSMessageObject::cast(result);
+  message->set_properties(Heap::empty_fixed_array());
+  message->set_elements(Heap::empty_fixed_array());
+  message->set_type(type);
+  message->set_arguments(arguments);
+  message->set_start_position(start_position);
+  message->set_end_position(end_position);
+  message->set_script(script);
+  message->set_stack_trace(stack_trace);
+  message->set_stack_frames(stack_frames);
+  return result;
+}
+
 
 
 // Returns true for a character in a range.  Both limits are inclusive.
@@ -2487,20 +2593,10 @@ MaybeObject* Heap::AllocateExternalStringFromTwoByte(
   }
 
   // For small strings we check whether the resource contains only
-  // ascii characters.  If yes, we use a different string map.
-  bool is_ascii = true;
-  if (length >= static_cast<size_t>(String::kMinNonFlatLength)) {
-    is_ascii = false;
-  } else {
-    const uc16* data = resource->data();
-    for (size_t i = 0; i < length; i++) {
-      if (data[i] > String::kMaxAsciiCharCode) {
-        is_ascii = false;
-        break;
-      }
-    }
-  }
-
+  // ASCII characters.  If yes, we use a different string map.
+  static const size_t kAsciiCheckLengthLimit = 32;
+  bool is_ascii = length <= kAsciiCheckLengthLimit &&
+      String::IsAscii(resource->data(), static_cast<int>(length));
   Map* map = is_ascii ?
       Heap::external_string_with_ascii_data_map() : Heap::external_string_map();
   Object* result;
@@ -2666,6 +2762,10 @@ MaybeObject* Heap::CreateCode(const CodeDesc& desc,
   code->set_instruction_size(desc.instr_size);
   code->set_relocation_info(ByteArray::cast(reloc_info));
   code->set_flags(flags);
+  if (code->is_call_stub() || code->is_keyed_call_stub()) {
+    code->set_check_type(RECEIVER_MAP_CHECK);
+  }
+  code->set_deoptimization_data(empty_fixed_array());
   // Allow self references to created code object by patching the handle to
   // point to the newly allocated Code object.
   if (!self_reference.is_null()) {
@@ -2794,6 +2894,7 @@ MaybeObject* Heap::InitializeFunction(JSFunction* function,
   function->set_prototype_or_initial_map(prototype);
   function->set_context(undefined_value());
   function->set_literals(empty_fixed_array());
+  function->set_next_function_link(undefined_value());
   return function;
 }
 
@@ -3243,8 +3344,8 @@ MaybeObject* Heap::AllocateStringFromAscii(Vector<const char> string,
 }
 
 
-MaybeObject* Heap::AllocateStringFromUtf8(Vector<const char> string,
-                                          PretenureFlag pretenure) {
+MaybeObject* Heap::AllocateStringFromUtf8Slow(Vector<const char> string,
+                                              PretenureFlag pretenure) {
   // V8 only supports characters in the Basic Multilingual Plane.
   const uc32 kMaxSupportedChar = 0xFFFF;
   // Count the number of characters in the UTF-8 string and check if
@@ -3253,16 +3354,10 @@ MaybeObject* Heap::AllocateStringFromUtf8(Vector<const char> string,
       decoder(ScannerConstants::utf8_decoder());
   decoder->Reset(string.start(), string.length());
   int chars = 0;
-  bool is_ascii = true;
   while (decoder->has_more()) {
-    uc32 r = decoder->GetNext();
-    if (r > String::kMaxAsciiCharCode) is_ascii = false;
+    decoder->GetNext();
     chars++;
   }
-
-  // If the string is ascii, we do not need to convert the characters
-  // since UTF8 is backwards compatible with ascii.
-  if (is_ascii) return AllocateStringFromAscii(string, pretenure);
 
   Object* result;
   { MaybeObject* maybe_result = AllocateRawTwoByteString(chars, pretenure);
@@ -3284,11 +3379,8 @@ MaybeObject* Heap::AllocateStringFromUtf8(Vector<const char> string,
 MaybeObject* Heap::AllocateStringFromTwoByte(Vector<const uc16> string,
                                              PretenureFlag pretenure) {
   // Check if the string is an ASCII string.
-  int i = 0;
-  while (i < string.length() && string[i] <= String::kMaxAsciiCharCode) i++;
-
   MaybeObject* maybe_result;
-  if (i == string.length()) {  // It's an ASCII string.
+  if (String::IsAscii(string.start(), string.length())) {
     maybe_result = AllocateRawAsciiString(string.length(), pretenure);
   } else {  // It's not an ASCII string.
     maybe_result = AllocateRawTwoByteString(string.length(), pretenure);
@@ -3968,6 +4060,36 @@ MaybeObject* Heap::LookupSymbol(Vector<const char> string) {
 }
 
 
+MaybeObject* Heap::LookupAsciiSymbol(Vector<const char> string) {
+  Object* symbol = NULL;
+  Object* new_table;
+  { MaybeObject* maybe_new_table =
+        symbol_table()->LookupAsciiSymbol(string, &symbol);
+    if (!maybe_new_table->ToObject(&new_table)) return maybe_new_table;
+  }
+  // Can't use set_symbol_table because SymbolTable::cast knows that
+  // SymbolTable is a singleton and checks for identity.
+  roots_[kSymbolTableRootIndex] = new_table;
+  ASSERT(symbol != NULL);
+  return symbol;
+}
+
+
+MaybeObject* Heap::LookupTwoByteSymbol(Vector<const uc16> string) {
+  Object* symbol = NULL;
+  Object* new_table;
+  { MaybeObject* maybe_new_table =
+        symbol_table()->LookupTwoByteSymbol(string, &symbol);
+    if (!maybe_new_table->ToObject(&new_table)) return maybe_new_table;
+  }
+  // Can't use set_symbol_table because SymbolTable::cast knows that
+  // SymbolTable is a singleton and checks for identity.
+  roots_[kSymbolTableRootIndex] = new_table;
+  ASSERT(symbol != NULL);
+  return symbol;
+}
+
+
 MaybeObject* Heap::LookupSymbol(String* string) {
   if (string->IsSymbol()) return string;
   Object* symbol = NULL;
@@ -4419,7 +4541,7 @@ void Heap::RecordStats(HeapStats* stats, bool take_snapshot) {
       MemoryAllocator::Size() + MemoryAllocator::Available();
   *stats->os_error = OS::GetLastError();
   if (take_snapshot) {
-    HeapIterator iterator(HeapIterator::kPreciseFiltering);
+    HeapIterator iterator(HeapIterator::kFilterFreeListNodes);
     for (HeapObject* obj = iterator.next();
          obj != NULL;
          obj = iterator.next()) {
@@ -4853,13 +4975,20 @@ ObjectIterator* SpaceIterator::CreateIterator() {
 }
 
 
-class FreeListNodesFilter {
+class HeapObjectsFilter {
+ public:
+  virtual ~HeapObjectsFilter() {}
+  virtual bool SkipObject(HeapObject* object) = 0;
+};
+
+
+class FreeListNodesFilter : public HeapObjectsFilter {
  public:
   FreeListNodesFilter() {
     MarkFreeListNodes();
   }
 
-  inline bool IsFreeListNode(HeapObject* object) {
+  bool SkipObject(HeapObject* object) {
     if (object->IsMarked()) {
       object->ClearMark();
       return true;
@@ -4891,6 +5020,65 @@ class FreeListNodesFilter {
 };
 
 
+class UnreachableObjectsFilter : public HeapObjectsFilter {
+ public:
+  UnreachableObjectsFilter() {
+    MarkUnreachableObjects();
+  }
+
+  bool SkipObject(HeapObject* object) {
+    if (object->IsMarked()) {
+      object->ClearMark();
+      return true;
+    } else {
+      return false;
+    }
+  }
+
+ private:
+  class UnmarkingVisitor : public ObjectVisitor {
+   public:
+    UnmarkingVisitor() : list_(10) {}
+
+    void VisitPointers(Object** start, Object** end) {
+      for (Object** p = start; p < end; p++) {
+        if (!(*p)->IsHeapObject()) continue;
+        HeapObject* obj = HeapObject::cast(*p);
+        if (obj->IsMarked()) {
+          obj->ClearMark();
+          list_.Add(obj);
+        }
+      }
+    }
+
+    bool can_process() { return !list_.is_empty(); }
+
+    void ProcessNext() {
+      HeapObject* obj = list_.RemoveLast();
+      obj->Iterate(this);
+    }
+
+   private:
+    List<HeapObject*> list_;
+  };
+
+  void MarkUnreachableObjects() {
+    HeapIterator iterator;
+    for (HeapObject* obj = iterator.next();
+         obj != NULL;
+         obj = iterator.next()) {
+      obj->SetMark();
+    }
+    UnmarkingVisitor visitor;
+    Heap::IterateRoots(&visitor, VISIT_ALL);
+    while (visitor.can_process())
+      visitor.ProcessNext();
+  }
+
+  AssertNoAllocation no_alloc;
+};
+
+
 HeapIterator::HeapIterator()
     : filtering_(HeapIterator::kNoFiltering),
       filter_(NULL) {
@@ -4898,7 +5086,7 @@ HeapIterator::HeapIterator()
 }
 
 
-HeapIterator::HeapIterator(HeapIterator::FreeListNodesFiltering filtering)
+HeapIterator::HeapIterator(HeapIterator::HeapObjectsFiltering filtering)
     : filtering_(filtering),
       filter_(NULL) {
   Init();
@@ -4912,12 +5100,17 @@ HeapIterator::~HeapIterator() {
 
 void HeapIterator::Init() {
   // Start the iteration.
-  if (filtering_ == kPreciseFiltering) {
-    filter_ = new FreeListNodesFilter;
-    space_iterator_ =
-        new SpaceIterator(MarkCompactCollector::SizeOfMarkedObject);
-  } else {
-    space_iterator_ = new SpaceIterator;
+  space_iterator_ = filtering_ == kNoFiltering ? new SpaceIterator :
+      new SpaceIterator(MarkCompactCollector::SizeOfMarkedObject);
+  switch (filtering_) {
+    case kFilterFreeListNodes:
+      filter_ = new FreeListNodesFilter;
+      break;
+    case kFilterUnreachable:
+      filter_ = new UnreachableObjectsFilter;
+      break;
+    default:
+      break;
   }
   object_iterator_ = space_iterator_->next();
 }
@@ -4925,9 +5118,9 @@ void HeapIterator::Init() {
 
 void HeapIterator::Shutdown() {
 #ifdef DEBUG
-  // Assert that in precise mode we have iterated through all
+  // Assert that in filtering mode we have iterated through all
   // objects. Otherwise, heap will be left in an inconsistent state.
-  if (filtering_ == kPreciseFiltering) {
+  if (filtering_ != kNoFiltering) {
     ASSERT(object_iterator_ == NULL);
   }
 #endif
@@ -4944,7 +5137,7 @@ HeapObject* HeapIterator::next() {
   if (filter_ == NULL) return NextObject();
 
   HeapObject* obj = NextObject();
-  while (obj != NULL && filter_->IsFreeListNode(obj)) obj = NextObject();
+  while (obj != NULL && filter_->SkipObject(obj)) obj = NextObject();
   return obj;
 }
 

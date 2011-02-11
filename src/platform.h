@@ -113,6 +113,10 @@ int signbit(double x);
 
 #endif  // __GNUC__
 
+#include "atomicops.h"
+#include "utils.h"
+#include "v8globals.h"
+
 namespace v8 {
 namespace internal {
 
@@ -121,6 +125,7 @@ namespace internal {
 typedef intptr_t AtomicWord;
 
 class Semaphore;
+class Mutex;
 
 double ceiling(double x);
 double modulo(double x, double y);
@@ -169,6 +174,7 @@ class OS {
   static int GetLastError();
 
   static FILE* FOpen(const char* path, const char* mode);
+  static bool Remove(const char* path);
 
   // Log file open mode is platform-dependent due to line ends issues.
   static const char* LogFileOpenMode;
@@ -178,6 +184,10 @@ class OS {
   // should go to stdout.
   static void Print(const char* format, ...);
   static void VPrint(const char* format, va_list args);
+
+  // Print output to a file. This is mostly used for debugging output.
+  static void FPrint(FILE* out, const char* format, ...);
+  static void VFPrint(FILE* out, const char* format, va_list args);
 
   // Print error output to console. This is mostly used for error message
   // output. On platforms that has standard terminal output, the output
@@ -242,9 +252,11 @@ class OS {
 
   class MemoryMappedFile {
    public:
+    static MemoryMappedFile* open(const char* name);
     static MemoryMappedFile* create(const char* name, int size, void* initial);
     virtual ~MemoryMappedFile() { }
     virtual void* memory() = 0;
+    virtual int size() = 0;
   };
 
   // Safe formatting print. Ensures that str is always null-terminated.
@@ -378,6 +390,7 @@ class Thread: public ThreadHandle {
 
   // Create new thread.
   Thread();
+  explicit Thread(const char* name);
   virtual ~Thread();
 
   // Start new thread by calling the Run() method in the new thread.
@@ -385,6 +398,10 @@ class Thread: public ThreadHandle {
 
   // Wait until thread terminates.
   void Join();
+
+  inline const char* name() const {
+    return name_;
+  }
 
   // Abstract method for run handler.
   virtual void Run() = 0;
@@ -407,9 +424,17 @@ class Thread: public ThreadHandle {
   // A hint to the scheduler to let another thread run.
   static void YieldCPU();
 
+  // The thread name length is limited to 16 based on Linux's implementation of
+  // prctl().
+  static const int kMaxThreadNameLength = 16;
  private:
+  void set_name(const char *name);
+
   class PlatformData;
   PlatformData* data_;
+
+  char name_[kMaxThreadNameLength];
+
   DISALLOW_COPY_AND_ASSIGN(Thread);
 };
 
@@ -433,6 +458,10 @@ class Mutex {
   // Unlocks the given mutex. The mutex is assumed to be locked and owned by
   // the calling thread on entrance.
   virtual int Unlock() = 0;
+
+  // Tries to lock the given mutex. Returns whether the mutex was
+  // successfully locked.
+  virtual bool TryLock() = 0;
 };
 
 
@@ -554,7 +583,7 @@ class TickSample {
 class Sampler {
  public:
   // Initialize sampler.
-  Sampler(int interval, bool profiling);
+  explicit Sampler(int interval);
   virtual ~Sampler();
 
   // Performs stack sampling.
@@ -572,16 +601,12 @@ class Sampler {
   void Stop();
 
   // Is the sampler used for profiling?
-  bool IsProfiling() const { return profiling_; }
-
-  // Is the sampler running in sync with the JS thread? On platforms
-  // where the sampler is implemented with a thread that wakes up
-  // every now and then, having a synchronous sampler implies
-  // suspending/resuming the JS thread.
-  bool IsSynchronous() const { return synchronous_; }
+  bool IsProfiling() const { return NoBarrier_Load(&profiling_) > 0; }
+  void IncreaseProfilingDepth() { NoBarrier_AtomicIncrement(&profiling_, 1); }
+  void DecreaseProfilingDepth() { NoBarrier_AtomicIncrement(&profiling_, -1); }
 
   // Whether the sampler is running (that is, consumes resources).
-  bool IsActive() const { return active_; }
+  bool IsActive() const { return NoBarrier_Load(&active_); }
 
   // Used in tests to make sure that stack sampling is performed.
   int samples_taken() const { return samples_taken_; }
@@ -593,12 +618,12 @@ class Sampler {
   virtual void DoSampleStack(TickSample* sample) = 0;
 
  private:
+  void SetActive(bool value) { NoBarrier_Store(&active_, value); }
   void IncSamplesTaken() { if (++samples_taken_ < 0) samples_taken_ = 0; }
 
   const int interval_;
-  const bool profiling_;
-  const bool synchronous_;
-  bool active_;
+  Atomic32 profiling_;
+  Atomic32 active_;
   PlatformData* data_;  // Platform specific data.
   int samples_taken_;  // Counts stack samples taken.
   DISALLOW_IMPLICIT_CONSTRUCTORS(Sampler);

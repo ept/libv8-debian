@@ -169,14 +169,12 @@ class ParserApi {
   static bool Parse(CompilationInfo* info);
 
   // Generic preparser generating full preparse data.
-  static ScriptDataImpl* PreParse(Handle<String> source,
-                                  unibrow::CharacterStream* stream,
+  static ScriptDataImpl* PreParse(UC16CharacterStream* source,
                                   v8::Extension* extension);
 
   // Preparser that only does preprocessing that makes sense if only used
   // immediately after.
-  static ScriptDataImpl* PartialPreParse(Handle<String> source,
-                                         unibrow::CharacterStream* stream,
+  static ScriptDataImpl* PartialPreParse(UC16CharacterStream* source,
                                          v8::Extension* extension);
 };
 
@@ -323,7 +321,6 @@ class RegExpParser {
   // and sets the value if it is.
   bool ParseHexEscape(int length, uc32* value);
 
-  uc32 ParseControlLetterEscape();
   uc32 ParseOctalLiteral();
 
   // Tries to parse the input as a back reference.  If successful it
@@ -433,12 +430,23 @@ class Parser {
   void ReportMessageAt(Scanner::Location loc,
                        const char* message,
                        Vector<const char*> args);
+  void ReportMessageAt(Scanner::Location loc,
+                       const char* message,
+                       Vector<Handle<String> > args);
 
  protected:
+  FunctionLiteral* ParseLazy(Handle<SharedFunctionInfo> info,
+                             UC16CharacterStream* source,
+                             ZoneScope* zone_scope);
   enum Mode {
     PARSE_LAZILY,
     PARSE_EAGERLY
   };
+
+  // Called by ParseProgram after setting up the scanner.
+  FunctionLiteral* DoParseProgram(Handle<String> source,
+                                  bool in_global_context,
+                                  ZoneScope* zone_scope);
 
   // Report syntax error
   void ReportUnexpectedToken(Token::Value token);
@@ -446,7 +454,7 @@ class Parser {
   void ReportMessage(const char* message, Vector<const char*> args);
 
   bool inside_with() const { return with_nesting_level_ > 0; }
-  Scanner& scanner()  { return scanner_; }
+  V8JavaScriptScanner& scanner()  { return scanner_; }
   Mode mode() const { return mode_; }
   ScriptDataImpl* pre_data() const { return pre_data_; }
 
@@ -546,12 +554,51 @@ class Parser {
   // Magical syntax support.
   Expression* ParseV8Intrinsic(bool* ok);
 
-  INLINE(Token::Value peek()) { return scanner_.peek(); }
-  INLINE(Token::Value Next()) { return scanner_.NextCheckStack(); }
+  INLINE(Token::Value peek()) {
+    if (stack_overflow_) return Token::ILLEGAL;
+    return scanner().peek();
+  }
+
+  INLINE(Token::Value Next()) {
+    // BUG 1215673: Find a thread safe way to set a stack limit in
+    // pre-parse mode. Otherwise, we cannot safely pre-parse from other
+    // threads.
+    if (stack_overflow_) {
+      return Token::ILLEGAL;
+    }
+    if (StackLimitCheck().HasOverflowed()) {
+      // Any further calls to Next or peek will return the illegal token.
+      // The current call must return the next token, which might already
+      // have been peek'ed.
+      stack_overflow_ = true;
+    }
+    return scanner().Next();
+  }
+
   INLINE(void Consume(Token::Value token));
   void Expect(Token::Value token, bool* ok);
   bool Check(Token::Value token);
   void ExpectSemicolon(bool* ok);
+
+  Handle<String> LiteralString(PretenureFlag tenured) {
+    if (scanner().is_literal_ascii()) {
+      return Factory::NewStringFromAscii(scanner().literal_ascii_string(),
+                                         tenured);
+    } else {
+      return Factory::NewStringFromTwoByte(scanner().literal_uc16_string(),
+                                           tenured);
+    }
+  }
+
+  Handle<String> NextLiteralString(PretenureFlag tenured) {
+    if (scanner().is_next_literal_ascii()) {
+      return Factory::NewStringFromAscii(scanner().next_literal_ascii_string(),
+                                         tenured);
+    } else {
+      return Factory::NewStringFromTwoByte(scanner().next_literal_uc16_string(),
+                                           tenured);
+    }
+  }
 
   Handle<String> GetSymbol(bool* ok);
 
@@ -565,6 +612,14 @@ class Parser {
   Handle<String> ParseIdentifierOrGetOrSet(bool* is_get,
                                            bool* is_set,
                                            bool* ok);
+
+  // Strict mode validation of LValue expressions
+  void CheckStrictModeLValue(Expression* expression,
+                             const char* error,
+                             bool* ok);
+
+  // Strict mode octal literal validation.
+  void CheckOctalLiteral(int beg_pos, int end_pos, bool* ok);
 
   // Parser support
   VariableProxy* Declare(Handle<String> name, Variable::Mode mode,
@@ -587,11 +642,9 @@ class Parser {
 
   Scope* NewScope(Scope* parent, Scope::Type type, bool inside_with);
 
-  Handle<String> LookupSymbol(int symbol_id,
-                              Vector<const char> string);
+  Handle<String> LookupSymbol(int symbol_id);
 
-  Handle<String> LookupCachedSymbol(int symbol_id,
-                                    Vector<const char> string);
+  Handle<String> LookupCachedSymbol(int symbol_id);
 
   Expression* NewCall(Expression* expression,
                       ZoneList<Expression*>* arguments,
@@ -639,6 +692,12 @@ class Parser {
   bool is_pre_parsing_;
   ScriptDataImpl* pre_data_;
   FuncNameInferrer* fni_;
+  bool stack_overflow_;
+  // If true, the next (and immediately following) function literal is
+  // preceded by a parenthesis.
+  // Heuristically that means that the function will be called immediately,
+  // so never lazily compile it.
+  bool parenthesized_function_;
 };
 
 
@@ -684,7 +743,14 @@ class JsonParser BASE_EMBEDDED {
   // Parse JSON input as a single JSON value.
   // Returns null handle and sets exception if parsing failed.
   static Handle<Object> Parse(Handle<String> source) {
-    return JsonParser().ParseJson(source);
+    if (source->IsExternalTwoByteString()) {
+      ExternalTwoByteStringUC16CharacterStream stream(
+          Handle<ExternalTwoByteString>::cast(source), 0, source->length());
+      return JsonParser().ParseJson(source, &stream);
+    } else {
+      GenericStringUC16CharacterStream stream(source, 0, source->length());
+      return JsonParser().ParseJson(source, &stream);
+    }
   }
 
  private:
@@ -692,7 +758,7 @@ class JsonParser BASE_EMBEDDED {
   ~JsonParser() { }
 
   // Parse a string containing a single JSON value.
-  Handle<Object> ParseJson(Handle<String>);
+  Handle<Object> ParseJson(Handle<String> script, UC16CharacterStream* source);
   // Parse a single JSON value from input (grammar production JSONValue).
   // A JSON value is either a (double-quoted) string literal, a number literal,
   // one of "true", "false", or "null", or an object or array literal.
@@ -718,6 +784,7 @@ class JsonParser BASE_EMBEDDED {
   Handle<String> GetString();
 
   JsonScanner scanner_;
+  bool stack_overflow_;
 };
 } }  // namespace v8::internal
 

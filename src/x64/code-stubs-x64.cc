@@ -1,4 +1,4 @@
-// Copyright 2010 the V8 project authors. All rights reserved.
+// Copyright 2011 the V8 project authors. All rights reserved.
 // Redistribution and use in source and binary forms, with or without
 // modification, are permitted provided that the following conditions are
 // met:
@@ -57,12 +57,14 @@ void FastNewClosureStub::Generate(MacroAssembler* masm) {
   // write barrier because the allocated object is in new space.
   __ LoadRoot(rbx, Heap::kEmptyFixedArrayRootIndex);
   __ LoadRoot(rcx, Heap::kTheHoleValueRootIndex);
+  __ LoadRoot(rdi, Heap::kUndefinedValueRootIndex);
   __ movq(FieldOperand(rax, JSObject::kPropertiesOffset), rbx);
   __ movq(FieldOperand(rax, JSObject::kElementsOffset), rbx);
   __ movq(FieldOperand(rax, JSFunction::kPrototypeOrInitialMapOffset), rcx);
   __ movq(FieldOperand(rax, JSFunction::kSharedFunctionInfoOffset), rdx);
   __ movq(FieldOperand(rax, JSFunction::kContextOffset), rsi);
   __ movq(FieldOperand(rax, JSFunction::kLiteralsOffset), rbx);
+  __ movq(FieldOperand(rax, JSFunction::kNextFunctionLinkOffset), rdi);
 
   // Initialize the code pointer in the function to be the one
   // found in the shared function info object.
@@ -102,7 +104,7 @@ void FastNewContextStub::Generate(MacroAssembler* masm) {
   __ Move(FieldOperand(rax, FixedArray::kLengthOffset), Smi::FromInt(length));
 
   // Setup the fixed slots.
-  __ xor_(rbx, rbx);  // Set to NULL.
+  __ Set(rbx, 0);  // Set to NULL.
   __ movq(Operand(rax, Context::SlotOffset(Context::CLOSURE_INDEX)), rcx);
   __ movq(Operand(rax, Context::SlotOffset(Context::FCONTEXT_INDEX)), rax);
   __ movq(Operand(rax, Context::SlotOffset(Context::PREVIOUS_INDEX)), rbx);
@@ -248,7 +250,7 @@ void ToBooleanStub::Generate(MacroAssembler* masm) {
   __ movq(rax, Immediate(1));
   __ ret(1 * kPointerSize);
   __ bind(&false_result);
-  __ xor_(rax, rax);
+  __ Set(rax, 0);
   __ ret(1 * kPointerSize);
 }
 
@@ -983,6 +985,201 @@ Handle<Code> GetBinaryOpStub(int key, BinaryOpIC::TypeInfo type_info) {
 }
 
 
+Handle<Code> GetTypeRecordingBinaryOpStub(int key,
+    TRBinaryOpIC::TypeInfo type_info,
+    TRBinaryOpIC::TypeInfo result_type_info) {
+  TypeRecordingBinaryOpStub stub(key, type_info, result_type_info);
+  return stub.GetCode();
+}
+
+
+void TypeRecordingBinaryOpStub::GenerateTypeTransition(MacroAssembler* masm) {
+  __ pop(rcx);  // Save return address.
+  __ push(rdx);
+  __ push(rax);
+  // Left and right arguments are now on top.
+  // Push this stub's key. Although the operation and the type info are
+  // encoded into the key, the encoding is opaque, so push them too.
+  __ Push(Smi::FromInt(MinorKey()));
+  __ Push(Smi::FromInt(op_));
+  __ Push(Smi::FromInt(operands_type_));
+
+  __ push(rcx);  // Push return address.
+
+  // Patch the caller to an appropriate specialized stub and return the
+  // operation result to the caller of the stub.
+  __ TailCallExternalReference(
+      ExternalReference(IC_Utility(IC::kTypeRecordingBinaryOp_Patch)),
+      5,
+      1);
+}
+
+
+// Prepare for a type transition runtime call when the args are already on
+// the stack, under the return address.
+void TypeRecordingBinaryOpStub::GenerateTypeTransitionWithSavedArgs(
+    MacroAssembler* masm) {
+  __ pop(rcx);  // Save return address.
+  // Left and right arguments are already on top of the stack.
+  // Push this stub's key. Although the operation and the type info are
+  // encoded into the key, the encoding is opaque, so push them too.
+  __ Push(Smi::FromInt(MinorKey()));
+  __ Push(Smi::FromInt(op_));
+  __ Push(Smi::FromInt(operands_type_));
+
+  __ push(rcx);  // Push return address.
+
+  // Patch the caller to an appropriate specialized stub and return the
+  // operation result to the caller of the stub.
+  __ TailCallExternalReference(
+      ExternalReference(IC_Utility(IC::kTypeRecordingBinaryOp_Patch)),
+      5,
+      1);
+}
+
+
+void TypeRecordingBinaryOpStub::Generate(MacroAssembler* masm) {
+  switch (operands_type_) {
+    case TRBinaryOpIC::UNINITIALIZED:
+      GenerateTypeTransition(masm);
+      break;
+    case TRBinaryOpIC::SMI:
+      GenerateSmiStub(masm);
+      break;
+    case TRBinaryOpIC::INT32:
+      GenerateInt32Stub(masm);
+      break;
+    case TRBinaryOpIC::HEAP_NUMBER:
+      GenerateHeapNumberStub(masm);
+      break;
+    case TRBinaryOpIC::STRING:
+      GenerateStringStub(masm);
+      break;
+    case TRBinaryOpIC::GENERIC:
+      GenerateGeneric(masm);
+      break;
+    default:
+      UNREACHABLE();
+  }
+}
+
+
+const char* TypeRecordingBinaryOpStub::GetName() {
+  if (name_ != NULL) return name_;
+  const int kMaxNameLength = 100;
+  name_ = Bootstrapper::AllocateAutoDeletedArray(kMaxNameLength);
+  if (name_ == NULL) return "OOM";
+  const char* op_name = Token::Name(op_);
+  const char* overwrite_name;
+  switch (mode_) {
+    case NO_OVERWRITE: overwrite_name = "Alloc"; break;
+    case OVERWRITE_RIGHT: overwrite_name = "OverwriteRight"; break;
+    case OVERWRITE_LEFT: overwrite_name = "OverwriteLeft"; break;
+    default: overwrite_name = "UnknownOverwrite"; break;
+  }
+
+  OS::SNPrintF(Vector<char>(name_, kMaxNameLength),
+               "TypeRecordingBinaryOpStub_%s_%s_%s",
+               op_name,
+               overwrite_name,
+               TRBinaryOpIC::GetName(operands_type_));
+  return name_;
+}
+
+
+void TypeRecordingBinaryOpStub::GenerateSmiCode(MacroAssembler* masm,
+    Label* slow,
+    SmiCodeGenerateHeapNumberResults allow_heapnumber_results) {
+  UNIMPLEMENTED();
+}
+
+
+void TypeRecordingBinaryOpStub::GenerateSmiStub(MacroAssembler* masm) {
+  Label call_runtime;
+
+  switch (op_) {
+    case Token::ADD:
+    case Token::SUB:
+    case Token::MUL:
+    case Token::DIV:
+      break;
+    case Token::MOD:
+    case Token::BIT_OR:
+    case Token::BIT_AND:
+    case Token::BIT_XOR:
+    case Token::SAR:
+    case Token::SHL:
+    case Token::SHR:
+      GenerateRegisterArgsPush(masm);
+      break;
+    default:
+      UNREACHABLE();
+  }
+
+  if (result_type_ == TRBinaryOpIC::UNINITIALIZED ||
+      result_type_ == TRBinaryOpIC::SMI) {
+    GenerateSmiCode(masm, &call_runtime, NO_HEAPNUMBER_RESULTS);
+  } else {
+    GenerateSmiCode(masm, &call_runtime, ALLOW_HEAPNUMBER_RESULTS);
+  }
+  __ bind(&call_runtime);
+  switch (op_) {
+    case Token::ADD:
+    case Token::SUB:
+    case Token::MUL:
+    case Token::DIV:
+      GenerateTypeTransition(masm);
+      break;
+    case Token::MOD:
+    case Token::BIT_OR:
+    case Token::BIT_AND:
+    case Token::BIT_XOR:
+    case Token::SAR:
+    case Token::SHL:
+    case Token::SHR:
+      GenerateTypeTransitionWithSavedArgs(masm);
+      break;
+    default:
+      UNREACHABLE();
+  }
+}
+
+
+void TypeRecordingBinaryOpStub::GenerateStringStub(MacroAssembler* masm) {
+  UNIMPLEMENTED();
+}
+
+
+void TypeRecordingBinaryOpStub::GenerateInt32Stub(MacroAssembler* masm) {
+  UNIMPLEMENTED();
+}
+
+
+void TypeRecordingBinaryOpStub::GenerateHeapNumberStub(MacroAssembler* masm) {
+  UNIMPLEMENTED();
+}
+
+
+void TypeRecordingBinaryOpStub::GenerateGeneric(MacroAssembler* masm) {
+  UNIMPLEMENTED();
+}
+
+
+void TypeRecordingBinaryOpStub::GenerateHeapResultAllocation(
+    MacroAssembler* masm,
+    Label* alloc_failure) {
+  UNIMPLEMENTED();
+}
+
+
+void TypeRecordingBinaryOpStub::GenerateRegisterArgsPush(MacroAssembler* masm) {
+  __ pop(rcx);
+  __ push(rdx);
+  __ push(rax);
+  __ push(rcx);
+}
+
+
 void TranscendentalCacheStub::Generate(MacroAssembler* masm) {
   // Input on stack:
   // rsp[8]: argument (should be number).
@@ -1107,6 +1304,7 @@ Runtime::FunctionId TranscendentalCacheStub::RuntimeFunction() {
     // Add more cases when necessary.
     case TranscendentalCache::SIN: return Runtime::kMath_sin;
     case TranscendentalCache::COS: return Runtime::kMath_cos;
+    case TranscendentalCache::LOG: return Runtime::kMath_log;
     default:
       UNIMPLEMENTED();
       return Runtime::kAbort;
@@ -1121,73 +1319,76 @@ void TranscendentalCacheStub::GenerateOperation(MacroAssembler* masm,
   // rcx: Pointer to cache entry. Must be preserved.
   // st(0): Input double
   Label done;
-  ASSERT(type_ == TranscendentalCache::SIN ||
-         type_ == TranscendentalCache::COS);
-  // More transcendental types can be added later.
+  if (type_ == TranscendentalCache::SIN || type_ == TranscendentalCache::COS) {
+    // Both fsin and fcos require arguments in the range +/-2^63 and
+    // return NaN for infinities and NaN. They can share all code except
+    // the actual fsin/fcos operation.
+    Label in_range;
+    // If argument is outside the range -2^63..2^63, fsin/cos doesn't
+    // work. We must reduce it to the appropriate range.
+    __ movq(rdi, rbx);
+    // Move exponent and sign bits to low bits.
+    __ shr(rdi, Immediate(HeapNumber::kMantissaBits));
+    // Remove sign bit.
+    __ andl(rdi, Immediate((1 << HeapNumber::kExponentBits) - 1));
+    int supported_exponent_limit = (63 + HeapNumber::kExponentBias);
+    __ cmpl(rdi, Immediate(supported_exponent_limit));
+    __ j(below, &in_range);
+    // Check for infinity and NaN. Both return NaN for sin.
+    __ cmpl(rdi, Immediate(0x7ff));
+    __ j(equal, on_nan_result);
 
-  // Both fsin and fcos require arguments in the range +/-2^63 and
-  // return NaN for infinities and NaN. They can share all code except
-  // the actual fsin/fcos operation.
-  Label in_range;
-  // If argument is outside the range -2^63..2^63, fsin/cos doesn't
-  // work. We must reduce it to the appropriate range.
-  __ movq(rdi, rbx);
-  // Move exponent and sign bits to low bits.
-  __ shr(rdi, Immediate(HeapNumber::kMantissaBits));
-  // Remove sign bit.
-  __ andl(rdi, Immediate((1 << HeapNumber::kExponentBits) - 1));
-  int supported_exponent_limit = (63 + HeapNumber::kExponentBias);
-  __ cmpl(rdi, Immediate(supported_exponent_limit));
-  __ j(below, &in_range);
-  // Check for infinity and NaN. Both return NaN for sin.
-  __ cmpl(rdi, Immediate(0x7ff));
-  __ j(equal, on_nan_result);
+    // Use fpmod to restrict argument to the range +/-2*PI.
+    __ fldpi();
+    __ fadd(0);
+    __ fld(1);
+    // FPU Stack: input, 2*pi, input.
+    {
+      Label no_exceptions;
+      __ fwait();
+      __ fnstsw_ax();
+      // Clear if Illegal Operand or Zero Division exceptions are set.
+      __ testl(rax, Immediate(5));  // #IO and #ZD flags of FPU status word.
+      __ j(zero, &no_exceptions);
+      __ fnclex();
+      __ bind(&no_exceptions);
+    }
 
-  // Use fpmod to restrict argument to the range +/-2*PI.
-  __ fldpi();
-  __ fadd(0);
-  __ fld(1);
-  // FPU Stack: input, 2*pi, input.
-  {
-    Label no_exceptions;
-    __ fwait();
-    __ fnstsw_ax();
-    // Clear if Illegal Operand or Zero Division exceptions are set.
-    __ testl(rax, Immediate(5));  // #IO and #ZD flags of FPU status word.
-    __ j(zero, &no_exceptions);
-    __ fnclex();
-    __ bind(&no_exceptions);
+    // Compute st(0) % st(1)
+    {
+      NearLabel partial_remainder_loop;
+      __ bind(&partial_remainder_loop);
+      __ fprem1();
+      __ fwait();
+      __ fnstsw_ax();
+      __ testl(rax, Immediate(0x400));  // Check C2 bit of FPU status word.
+      // If C2 is set, computation only has partial result. Loop to
+      // continue computation.
+      __ j(not_zero, &partial_remainder_loop);
   }
-
-  // Compute st(0) % st(1)
-  {
-    NearLabel partial_remainder_loop;
-    __ bind(&partial_remainder_loop);
-    __ fprem1();
-    __ fwait();
-    __ fnstsw_ax();
-    __ testl(rax, Immediate(0x400));  // Check C2 bit of FPU status word.
-    // If C2 is set, computation only has partial result. Loop to
-    // continue computation.
-    __ j(not_zero, &partial_remainder_loop);
+    // FPU Stack: input, 2*pi, input % 2*pi
+    __ fstp(2);
+    // FPU Stack: input % 2*pi, 2*pi,
+    __ fstp(0);
+    // FPU Stack: input % 2*pi
+    __ bind(&in_range);
+    switch (type_) {
+      case TranscendentalCache::SIN:
+        __ fsin();
+        break;
+      case TranscendentalCache::COS:
+        __ fcos();
+        break;
+      default:
+        UNREACHABLE();
+    }
+    __ bind(&done);
+  } else {
+    ASSERT(type_ == TranscendentalCache::LOG);
+    __ fldln2();
+    __ fxch();
+    __ fyl2x();
   }
-  // FPU Stack: input, 2*pi, input % 2*pi
-  __ fstp(2);
-  // FPU Stack: input % 2*pi, 2*pi,
-  __ fstp(0);
-  // FPU Stack: input % 2*pi
-  __ bind(&in_range);
-  switch (type_) {
-    case TranscendentalCache::SIN:
-      __ fsin();
-      break;
-    case TranscendentalCache::COS:
-      __ fcos();
-      break;
-    default:
-      UNREACHABLE();
-  }
-  __ bind(&done);
 }
 
 
@@ -1999,6 +2200,90 @@ void RegExpExecStub::Generate(MacroAssembler* masm) {
 }
 
 
+void RegExpConstructResultStub::Generate(MacroAssembler* masm) {
+  const int kMaxInlineLength = 100;
+  Label slowcase;
+  Label done;
+  __ movq(r8, Operand(rsp, kPointerSize * 3));
+  __ JumpIfNotSmi(r8, &slowcase);
+  __ SmiToInteger32(rbx, r8);
+  __ cmpl(rbx, Immediate(kMaxInlineLength));
+  __ j(above, &slowcase);
+  // Smi-tagging is equivalent to multiplying by 2.
+  STATIC_ASSERT(kSmiTag == 0);
+  STATIC_ASSERT(kSmiTagSize == 1);
+  // Allocate RegExpResult followed by FixedArray with size in ebx.
+  // JSArray:   [Map][empty properties][Elements][Length-smi][index][input]
+  // Elements:  [Map][Length][..elements..]
+  __ AllocateInNewSpace(JSRegExpResult::kSize + FixedArray::kHeaderSize,
+                        times_pointer_size,
+                        rbx,  // In: Number of elements.
+                        rax,  // Out: Start of allocation (tagged).
+                        rcx,  // Out: End of allocation.
+                        rdx,  // Scratch register
+                        &slowcase,
+                        TAG_OBJECT);
+  // rax: Start of allocated area, object-tagged.
+  // rbx: Number of array elements as int32.
+  // r8: Number of array elements as smi.
+
+  // Set JSArray map to global.regexp_result_map().
+  __ movq(rdx, ContextOperand(rsi, Context::GLOBAL_INDEX));
+  __ movq(rdx, FieldOperand(rdx, GlobalObject::kGlobalContextOffset));
+  __ movq(rdx, ContextOperand(rdx, Context::REGEXP_RESULT_MAP_INDEX));
+  __ movq(FieldOperand(rax, HeapObject::kMapOffset), rdx);
+
+  // Set empty properties FixedArray.
+  __ Move(FieldOperand(rax, JSObject::kPropertiesOffset),
+          Factory::empty_fixed_array());
+
+  // Set elements to point to FixedArray allocated right after the JSArray.
+  __ lea(rcx, Operand(rax, JSRegExpResult::kSize));
+  __ movq(FieldOperand(rax, JSObject::kElementsOffset), rcx);
+
+  // Set input, index and length fields from arguments.
+  __ movq(r8, Operand(rsp, kPointerSize * 1));
+  __ movq(FieldOperand(rax, JSRegExpResult::kInputOffset), r8);
+  __ movq(r8, Operand(rsp, kPointerSize * 2));
+  __ movq(FieldOperand(rax, JSRegExpResult::kIndexOffset), r8);
+  __ movq(r8, Operand(rsp, kPointerSize * 3));
+  __ movq(FieldOperand(rax, JSArray::kLengthOffset), r8);
+
+  // Fill out the elements FixedArray.
+  // rax: JSArray.
+  // rcx: FixedArray.
+  // rbx: Number of elements in array as int32.
+
+  // Set map.
+  __ Move(FieldOperand(rcx, HeapObject::kMapOffset),
+          Factory::fixed_array_map());
+  // Set length.
+  __ Integer32ToSmi(rdx, rbx);
+  __ movq(FieldOperand(rcx, FixedArray::kLengthOffset), rdx);
+  // Fill contents of fixed-array with the-hole.
+  __ Move(rdx, Factory::the_hole_value());
+  __ lea(rcx, FieldOperand(rcx, FixedArray::kHeaderSize));
+  // Fill fixed array elements with hole.
+  // rax: JSArray.
+  // rbx: Number of elements in array that remains to be filled, as int32.
+  // rcx: Start of elements in FixedArray.
+  // rdx: the hole.
+  Label loop;
+  __ testl(rbx, rbx);
+  __ bind(&loop);
+  __ j(less_equal, &done);  // Jump if ecx is negative or zero.
+  __ subl(rbx, Immediate(1));
+  __ movq(Operand(rcx, rbx, times_pointer_size, 0), rdx);
+  __ jmp(&loop);
+
+  __ bind(&done);
+  __ ret(3 * kPointerSize);
+
+  __ bind(&slowcase);
+  __ TailCallRuntime(Runtime::kRegExpConstructResult, 3, 1);
+}
+
+
 void NumberToStringStub::GenerateLookupNumberStringCache(MacroAssembler* masm,
                                                          Register object,
                                                          Register result,
@@ -2474,7 +2759,7 @@ void CEntryStub::GenerateThrowTOS(MacroAssembler* masm) {
 
   // Before returning we restore the context from the frame pointer if not NULL.
   // The frame pointer is NULL in the exception handler of a JS entry frame.
-  __ xor_(rsi, rsi);  // tentatively set context pointer to NULL
+  __ Set(rsi, 0);  // Tentatively set context pointer to NULL
   NearLabel skip;
   __ cmpq(rbp, Immediate(0));
   __ j(equal, &skip);
@@ -2489,8 +2774,7 @@ void CEntryStub::GenerateCore(MacroAssembler* masm,
                               Label* throw_termination_exception,
                               Label* throw_out_of_memory_exception,
                               bool do_gc,
-                              bool always_allocate_scope,
-                              int /* alignment_skew */) {
+                              bool always_allocate_scope) {
   // rax: result parameter for PerformGC, if any.
   // rbx: pointer to C function  (C callee-saved).
   // rbp: frame pointer  (restored after C call).
@@ -2583,7 +2867,7 @@ void CEntryStub::GenerateCore(MacroAssembler* masm,
   __ j(zero, &failure_returned);
 
   // Exit the JavaScript to C++ exit frame.
-  __ LeaveExitFrame();
+  __ LeaveExitFrame(save_doubles_);
   __ ret(0);
 
   // Handling of failure.
@@ -2658,7 +2942,7 @@ void CEntryStub::GenerateThrowUncatchable(MacroAssembler* masm,
   }
 
   // Clear the context pointer.
-  __ xor_(rsi, rsi);
+  __ Set(rsi, 0);
 
   // Restore registers from handler.
   STATIC_ASSERT(StackHandlerConstants::kNextOffset + kPointerSize ==
@@ -2692,7 +2976,7 @@ void CEntryStub::Generate(MacroAssembler* masm) {
 #else
   int arg_stack_space = 0;
 #endif
-  __ EnterExitFrame(arg_stack_space);
+  __ EnterExitFrame(arg_stack_space, save_doubles_);
 
   // rax: Holds the context at this point, but should not be used.
   //      On entry to code generated by GenerateCore, it must hold
@@ -2961,6 +3245,12 @@ void InstanceofStub::Generate(MacroAssembler* masm) {
   __ bind(&slow);
   __ InvokeBuiltin(Builtins::INSTANCE_OF, JUMP_FUNCTION);
 }
+
+
+Register InstanceofStub::left() { return rax; }
+
+
+Register InstanceofStub::right() { return rdx; }
 
 
 int CompareStub::MinorKey() {
@@ -3984,6 +4274,122 @@ void StringCompareStub::Generate(MacroAssembler* masm) {
   // tagged as a small integer.
   __ bind(&runtime);
   __ TailCallRuntime(Runtime::kStringCompare, 2, 1);
+}
+
+void ICCompareStub::GenerateSmis(MacroAssembler* masm) {
+  ASSERT(state_ == CompareIC::SMIS);
+  NearLabel miss;
+  __ JumpIfNotBothSmi(rdx, rax, &miss);
+
+  if (GetCondition() == equal) {
+    // For equality we do not care about the sign of the result.
+    __ SmiSub(rax, rax, rdx);
+  } else {
+    NearLabel done;
+    __ SmiSub(rdx, rdx, rax);
+    __ j(no_overflow, &done);
+    // Correct sign of result in case of overflow.
+    __ SmiNot(rdx, rdx);
+    __ bind(&done);
+    __ movq(rax, rdx);
+  }
+  __ ret(0);
+
+  __ bind(&miss);
+  GenerateMiss(masm);
+}
+
+
+void ICCompareStub::GenerateHeapNumbers(MacroAssembler* masm) {
+  ASSERT(state_ == CompareIC::HEAP_NUMBERS);
+
+  NearLabel generic_stub;
+  NearLabel unordered;
+  NearLabel miss;
+  Condition either_smi = masm->CheckEitherSmi(rax, rdx);
+  __ j(either_smi, &generic_stub);
+
+  __ CmpObjectType(rax, HEAP_NUMBER_TYPE, rcx);
+  __ j(not_equal, &miss);
+  __ CmpObjectType(rdx, HEAP_NUMBER_TYPE, rcx);
+  __ j(not_equal, &miss);
+
+  // Load left and right operand
+  __ movsd(xmm0, FieldOperand(rdx, HeapNumber::kValueOffset));
+  __ movsd(xmm1, FieldOperand(rax, HeapNumber::kValueOffset));
+
+  // Compare operands
+  __ ucomisd(xmm0, xmm1);
+
+  // Don't base result on EFLAGS when a NaN is involved.
+  __ j(parity_even, &unordered);
+
+  // Return a result of -1, 0, or 1, based on EFLAGS.
+  // Performing mov, because xor would destroy the flag register.
+  __ movl(rax, Immediate(0));
+  __ movl(rcx, Immediate(0));
+  __ setcc(above, rax);  // Add one to zero if carry clear and not equal.
+  __ sbbq(rax, rcx);  // Subtract one if below (aka. carry set).
+  __ ret(0);
+
+  __ bind(&unordered);
+
+  CompareStub stub(GetCondition(), strict(), NO_COMPARE_FLAGS);
+  __ bind(&generic_stub);
+  __ jmp(stub.GetCode(), RelocInfo::CODE_TARGET);
+
+  __ bind(&miss);
+  GenerateMiss(masm);
+}
+
+
+void ICCompareStub::GenerateObjects(MacroAssembler* masm) {
+  ASSERT(state_ == CompareIC::OBJECTS);
+  NearLabel miss;
+  Condition either_smi = masm->CheckEitherSmi(rdx, rax);
+  __ j(either_smi, &miss);
+
+  __ CmpObjectType(rax, JS_OBJECT_TYPE, rcx);
+  __ j(not_equal, &miss, not_taken);
+  __ CmpObjectType(rdx, JS_OBJECT_TYPE, rcx);
+  __ j(not_equal, &miss, not_taken);
+
+  ASSERT(GetCondition() == equal);
+  __ subq(rax, rdx);
+  __ ret(0);
+
+  __ bind(&miss);
+  GenerateMiss(masm);
+}
+
+
+void ICCompareStub::GenerateMiss(MacroAssembler* masm) {
+  // Save the registers.
+  __ pop(rcx);
+  __ push(rdx);
+  __ push(rax);
+  __ push(rcx);
+
+  // Call the runtime system in a fresh internal frame.
+  ExternalReference miss = ExternalReference(IC_Utility(IC::kCompareIC_Miss));
+  __ EnterInternalFrame();
+  __ push(rdx);
+  __ push(rax);
+  __ Push(Smi::FromInt(op_));
+  __ CallExternalReference(miss, 3);
+  __ LeaveInternalFrame();
+
+  // Compute the entry point of the rewritten stub.
+  __ lea(rdi, FieldOperand(rax, Code::kHeaderSize));
+
+  // Restore registers.
+  __ pop(rcx);
+  __ pop(rax);
+  __ pop(rdx);
+  __ push(rcx);
+
+  // Do a tail call to the rewritten stub.
+  __ jmp(rdi);
 }
 
 #undef __
