@@ -1,4 +1,4 @@
-// Copyright 2009 the V8 project authors. All rights reserved.
+// Copyright 2010 the V8 project authors. All rights reserved.
 // Redistribution and use in source and binary forms, with or without
 // modification, are permitted provided that the following conditions are
 // met:
@@ -44,10 +44,10 @@ uint64_t CpuFeatures::supported_ = kDefaultCpuFeatures;
 uint64_t CpuFeatures::enabled_ = 0;
 uint64_t CpuFeatures::found_by_runtime_probing_ = 0;
 
-void CpuFeatures::Probe()  {
+void CpuFeatures::Probe(bool portable)  {
   ASSERT(Heap::HasBeenSetup());
-  ASSERT(supported_ == kDefaultCpuFeatures);
-  if (Serializer::enabled()) {
+  supported_ = kDefaultCpuFeatures;
+  if (portable && Serializer::enabled()) {
     supported_ |= OS::CpuFeaturesImpliedByPlatform();
     return;  // No features if we might serialize.
   }
@@ -74,7 +74,7 @@ void CpuFeatures::Probe()  {
   __ xor_(rax, rdx);  // Different if CPUID is supported.
   __ j(not_zero, &cpuid);
 
-  // CPUID not supported. Clear the supported features in edx:eax.
+  // CPUID not supported. Clear the supported features in rax.
   __ xor_(rax, rax);
   __ jmp(&done);
 
@@ -133,7 +133,7 @@ void CpuFeatures::Probe()  {
   found_by_runtime_probing_ &= ~kDefaultCpuFeatures;
   uint64_t os_guarantees = OS::CpuFeaturesImpliedByPlatform();
   supported_ |= os_guarantees;
-  found_by_runtime_probing_ &= ~os_guarantees;
+  found_by_runtime_probing_ &= portable ? ~os_guarantees : 0;
   // SSE2 and CMOV must be available on an X64 CPU.
   ASSERT(IsSupported(CPUID));
   ASSERT(IsSupported(SSE2));
@@ -185,6 +185,20 @@ void RelocInfo::PatchCode(byte* instructions, int instruction_count) {
   // Indicate that code has changed.
   CPU::FlushICache(pc_, instruction_count);
 }
+
+
+// -----------------------------------------------------------------------------
+// Register constants.
+
+const int Register::registerCodeByAllocationIndex[kNumAllocatableRegisters] = {
+    // rax, rbx, rdx, rcx, rdi, r8, r9, r11, r14, r12
+    0, 3, 2, 1, 7, 8, 9, 11, 14, 12
+};
+
+const int Register::allocationIndexByRegisterCode[kNumRegisters] = {
+    0, 3, 2, 1, -1, -1, -1, 4, 5, 6, -1, 7, 9, -1, 8, -1
+};
+
 
 // -----------------------------------------------------------------------------
 // Implementation of Operand
@@ -285,6 +299,34 @@ Operand::Operand(const Operand& operand, int32_t offset) {
     buf_[1] = operand.buf_[1];
   }
 }
+
+
+bool Operand::AddressUsesRegister(Register reg) const {
+  int code = reg.code();
+  ASSERT((buf_[0] & 0xC0) != 0xC0);  // Always a memory operand.
+  // Start with only low three bits of base register. Initial decoding doesn't
+  // distinguish on the REX.B bit.
+  int base_code = buf_[0] & 0x07;
+  if (base_code == rsp.code()) {
+    // SIB byte present in buf_[1].
+    // Check the index register from the SIB byte + REX.X prefix.
+    int index_code = ((buf_[1] >> 3) & 0x07) | ((rex_ & 0x02) << 2);
+    // Index code (including REX.X) of 0x04 (rsp) means no index register.
+    if (index_code != rsp.code() && index_code == code) return true;
+    // Add REX.B to get the full base register code.
+    base_code = (buf_[1] & 0x07) | ((rex_ & 0x01) << 3);
+    // A base register of 0x05 (rbp) with mod = 0 means no base register.
+    if (base_code == rbp.code() && ((buf_[0] & 0xC0) == 0)) return false;
+    return code == base_code;
+  } else {
+    // A base register with low bits of 0x05 (rbp or r13) and mod = 0 means
+    // no base register.
+    if (base_code == rbp.code() && ((buf_[0] & 0xC0) == 0)) return false;
+    base_code |= ((rex_ & 0x01) << 3);
+    return code == base_code;
+  }
+}
+
 
 // -----------------------------------------------------------------------------
 // Implementation of Assembler.
@@ -821,6 +863,7 @@ void Assembler::bts(const Operand& dst, Register src) {
 
 
 void Assembler::call(Label* L) {
+  positions_recorder()->WriteRecordedPositions();
   EnsureSpace ensure_space(this);
   last_pc_ = pc_;
   // 1110 1000 #32-bit disp.
@@ -852,6 +895,7 @@ void Assembler::call(Handle<Code> target, RelocInfo::Mode rmode) {
 
 
 void Assembler::call(Register adr) {
+  positions_recorder()->WriteRecordedPositions();
   EnsureSpace ensure_space(this);
   last_pc_ = pc_;
   // Opcode: FF /2 r64.
@@ -862,6 +906,7 @@ void Assembler::call(Register adr) {
 
 
 void Assembler::call(const Operand& op) {
+  positions_recorder()->WriteRecordedPositions();
   EnsureSpace ensure_space(this);
   last_pc_ = pc_;
   // Opcode: FF /2 m64.
@@ -1932,6 +1977,14 @@ void Assembler::push(Immediate value) {
 }
 
 
+void Assembler::push_imm32(int32_t imm32) {
+  EnsureSpace ensure_space(this);
+  last_pc_ = pc_;
+  emit(0x68);
+  emitl(imm32);
+}
+
+
 void Assembler::pushfq() {
   EnsureSpace ensure_space(this);
   last_pc_ = pc_;
@@ -2217,6 +2270,14 @@ void Assembler::fldpi() {
 }
 
 
+void Assembler::fldln2() {
+  EnsureSpace ensure_space(this);
+  last_pc_ = pc_;
+  emit(0xD9);
+  emit(0xED);
+}
+
+
 void Assembler::fld_s(const Operand& adr) {
   EnsureSpace ensure_space(this);
   last_pc_ = pc_;
@@ -2355,6 +2416,14 @@ void Assembler::fsin() {
   last_pc_ = pc_;
   emit(0xD9);
   emit(0xFE);
+}
+
+
+void Assembler::fyl2x() {
+  EnsureSpace ensure_space(this);
+  last_pc_ = pc_;
+  emit(0xD9);
+  emit(0xF1);
 }
 
 
@@ -2608,6 +2677,30 @@ void Assembler::movq(Register dst, XMMRegister src) {
 }
 
 
+void Assembler::movdqa(const Operand& dst, XMMRegister src) {
+  ASSERT(CpuFeatures::IsEnabled(SSE2));
+  EnsureSpace ensure_space(this);
+  last_pc_ = pc_;
+  emit(0x66);
+  emit_rex_64(src, dst);
+  emit(0x0F);
+  emit(0x7F);
+  emit_sse_operand(src, dst);
+}
+
+
+void Assembler::movdqa(XMMRegister dst, const Operand& src) {
+  ASSERT(CpuFeatures::IsEnabled(SSE2));
+  EnsureSpace ensure_space(this);
+  last_pc_ = pc_;
+  emit(0x66);
+  emit_rex_64(dst, src);
+  emit(0x0F);
+  emit(0x6F);
+  emit_sse_operand(dst, src);
+}
+
+
 void Assembler::extractps(Register dst, XMMRegister src, byte imm8) {
   ASSERT(is_uint2(imm8));
   EnsureSpace ensure_space(this);
@@ -2688,6 +2781,17 @@ void Assembler::cvttss2si(Register dst, const Operand& src) {
 }
 
 
+void Assembler::cvttss2si(Register dst, XMMRegister src) {
+  EnsureSpace ensure_space(this);
+  last_pc_ = pc_;
+  emit(0xF3);
+  emit_optional_rex_32(dst, src);
+  emit(0x0F);
+  emit(0x2C);
+  emit_sse_operand(dst, src);
+}
+
+
 void Assembler::cvttsd2si(Register dst, const Operand& src) {
   EnsureSpace ensure_space(this);
   last_pc_ = pc_;
@@ -2696,6 +2800,17 @@ void Assembler::cvttsd2si(Register dst, const Operand& src) {
   emit(0x0F);
   emit(0x2C);
   emit_operand(dst, src);
+}
+
+
+void Assembler::cvttsd2si(Register dst, XMMRegister src) {
+  EnsureSpace ensure_space(this);
+  last_pc_ = pc_;
+  emit(0xF2);
+  emit_optional_rex_32(dst, src);
+  emit(0x0F);
+  emit(0x2C);
+  emit_sse_operand(dst, src);
 }
 
 
@@ -2917,6 +3032,18 @@ void Assembler::emit_sse_operand(Register dst, XMMRegister src) {
 }
 
 
+void Assembler::db(uint8_t data) {
+  EnsureSpace ensure_space(this);
+  emit(data);
+}
+
+
+void Assembler::dd(uint32_t data) {
+  EnsureSpace ensure_space(this);
+  emitl(data);
+}
+
+
 // Relocation information implementations.
 
 void Assembler::RecordRelocInfo(RelocInfo::Mode rmode, intptr_t data) {
@@ -2946,7 +3073,7 @@ void Assembler::RecordDebugBreakSlot() {
 
 
 void Assembler::RecordComment(const char* msg) {
-  if (FLAG_debug_code) {
+  if (FLAG_code_comments) {
     EnsureSpace ensure_space(this);
     RecordRelocInfo(RelocInfo::COMMENT, reinterpret_cast<intptr_t>(msg));
   }

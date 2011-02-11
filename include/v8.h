@@ -992,18 +992,23 @@ class String : public Primitive {
    * the contents of the string and the NULL terminator into the
    * buffer.
    *
+   * WriteUtf8 will not write partial UTF-8 sequences, preferring to stop
+   * before the end of the buffer.
+   *
    * Copies up to length characters into the output buffer.
    * Only null-terminates if there is enough space in the buffer.
    *
    * \param buffer The buffer into which the string will be copied.
    * \param start The starting position within the string at which
    * copying begins.
-   * \param length The number of bytes to copy from the string.
+   * \param length The number of characters to copy from the string.  For
+   *    WriteUtf8 the number of bytes in the buffer.
    * \param nchars_ref The number of characters written, can be NULL.
    * \param hints Various hints that might affect performance of this or
    *    subsequent operations.
-   * \return The number of bytes copied to the buffer
-   * excluding the NULL terminator.
+   * \return The number of characters copied to the buffer excluding the null
+   *    terminator.  For WriteUtf8: The number of bytes copied to the buffer
+   *    including the null terminator.
    */
   enum WriteHints {
     NO_HINTS = 0,
@@ -1350,6 +1355,21 @@ class Date : public Value {
   V8EXPORT double NumberValue() const;
 
   static inline Date* Cast(v8::Value* obj);
+
+  /**
+   * Notification that the embedder has changed the time zone,
+   * daylight savings time, or other date / time configuration
+   * parameters.  V8 keeps a cache of various values used for
+   * date / time computation.  This notification will reset
+   * those cached values for the current context so that date /
+   * time configuration changes would be reflected in the Date
+   * object.
+   *
+   * This API should not be called more than needed as it will
+   * negatively impact the performance of date operations.
+   */
+  V8EXPORT static void DateTimeConfigurationChangeNotification();
+
  private:
   V8EXPORT static void CheckCast(v8::Value* obj);
 };
@@ -1631,9 +1651,9 @@ class Object : public Value {
    *       the backing store is preserved while V8 has a reference.
    */
   V8EXPORT void SetIndexedPropertiesToPixelData(uint8_t* data, int length);
-  bool HasIndexedPropertiesInPixelData();
-  uint8_t* GetIndexedPropertiesPixelData();
-  int GetIndexedPropertiesPixelDataLength();
+  V8EXPORT bool HasIndexedPropertiesInPixelData();
+  V8EXPORT uint8_t* GetIndexedPropertiesPixelData();
+  V8EXPORT int GetIndexedPropertiesPixelDataLength();
 
   /**
    * Set the backing store of the indexed properties to be managed by the
@@ -1646,10 +1666,10 @@ class Object : public Value {
       void* data,
       ExternalArrayType array_type,
       int number_of_elements);
-  bool HasIndexedPropertiesInExternalArrayData();
-  void* GetIndexedPropertiesExternalArrayData();
-  ExternalArrayType GetIndexedPropertiesExternalArrayDataType();
-  int GetIndexedPropertiesExternalArrayDataLength();
+  V8EXPORT bool HasIndexedPropertiesInExternalArrayData();
+  V8EXPORT void* GetIndexedPropertiesExternalArrayData();
+  V8EXPORT ExternalArrayType GetIndexedPropertiesExternalArrayDataType();
+  V8EXPORT int GetIndexedPropertiesExternalArrayDataLength();
 
   V8EXPORT static Local<Object> New();
   static inline Object* Cast(Value* obj);
@@ -2495,6 +2515,7 @@ class V8EXPORT HeapStatistics {
   size_t total_heap_size() { return total_heap_size_; }
   size_t total_heap_size_executable() { return total_heap_size_executable_; }
   size_t used_heap_size() { return used_heap_size_; }
+  size_t heap_size_limit() { return heap_size_limit_; }
 
  private:
   void set_total_heap_size(size_t size) { total_heap_size_ = size; }
@@ -2502,10 +2523,12 @@ class V8EXPORT HeapStatistics {
     total_heap_size_executable_ = size;
   }
   void set_used_heap_size(size_t size) { used_heap_size_ = size; }
+  void set_heap_size_limit(size_t size) { heap_size_limit_ = size; }
 
   size_t total_heap_size_;
   size_t total_heap_size_executable_;
   size_t used_heap_size_;
+  size_t heap_size_limit_;
 
   friend class V8;
 };
@@ -3056,6 +3079,18 @@ class V8EXPORT Context {
    * Returns a persistent handle to the newly allocated context. This
    * persistent handle has to be disposed when the context is no
    * longer used so the context can be garbage collected.
+   *
+   * \param extensions An optional extension configuration containing
+   * the extensions to be installed in the newly created context.
+   *
+   * \param global_template An optional object template from which the
+   * global object for the newly created context will be created.
+   *
+   * \param global_object An optional global object to be reused for
+   * the newly created context. This global object must have been
+   * created by a previous call to Context::New with the same global
+   * template. The state of the global object will be completely reset
+   * and only object identify will remain.
    */
   static Persistent<Context> New(
       ExtensionConfiguration* extensions = NULL,
@@ -3281,6 +3316,24 @@ class V8EXPORT OutputStream {  // NOLINT
 };
 
 
+/**
+ * An interface for reporting progress and controlling long-running
+ * activities.
+ */
+class V8EXPORT ActivityControl {  // NOLINT
+ public:
+  enum ControlOption {
+    kContinue = 0,
+    kAbort = 1
+  };
+  virtual ~ActivityControl() {}
+  /**
+   * Notify about current progress. The activity can be stopped by
+   * returning kAbort as the callback result.
+   */
+  virtual ControlOption ReportProgressValue(int done, int total) = 0;
+};
+
 
 // --- I m p l e m e n t a t i o n ---
 
@@ -3380,7 +3433,7 @@ class Internals {
   static const int kFullStringRepresentationMask = 0x07;
   static const int kExternalTwoByteRepresentationTag = 0x02;
 
-  static const int kJSObjectType = 0x9f;
+  static const int kJSObjectType = 0xa0;
   static const int kFirstNonstringType = 0x80;
   static const int kProxyType = 0x85;
 

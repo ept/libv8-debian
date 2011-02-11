@@ -29,6 +29,8 @@ prefix es5conform
 def UNIMPLEMENTED = PASS || FAIL
 def FAIL_OK = FAIL, OKAY
 
+
+##############################################################################
 # Non UTF8 characters in test files.
 chapter10/10.4/10.4.2/10.4.2-3-c-2-s: FAIL_OK
 chapter10/10.4/10.4.2/10.4.2-3-c-1-s: FAIL_OK
@@ -38,11 +40,6 @@ chapter10/10.4/10.4.2/10.4.2-2-c-1: FAIL_OK
 # of 11.1.5 (Object initializer).
 # We are compatible with Safari and Firefox.
 chapter11/11.1/11.1.5: UNIMPLEMENTED
-
-# Delete returns true in eval even when it should return false.
-# Please see http://code.google.com/p/v8/issues/detail?id=759
-chapter11/11.4/11.4.1//11.4.1-4.a-5: FAIL
-chapter11/11.4/11.4.1//11.4.1-4.a-7: FAIL
 
 # We do not have a global object called 'global' as required by tests.
 chapter15/15.1: FAIL_OK
@@ -86,7 +83,7 @@ chapter15/15.2/15.2.3/15.2.3.3/15.2.3.3-4-215: UNIMPLEMENTED
 # than those described in the spec - but according to spec they can 
 # have additional properties.
 # All compareArray calls in these tests could be exchanged with a 
-# isSubsetOfArray call (I will upload a path to the es5conform site).
+# isSubsetOfArray call (I will upload a patch to the es5conform site).
 
 # SUBSETFAIL
 chapter15/15.2/15.2.3/15.2.3.4/15.2.3.4-4-1: FAIL_OK
@@ -108,12 +105,6 @@ chapter15/15.2/15.2.3/15.2.3.4/15.2.3.4-4-6: FAIL_OK
 
 # SUBSETFAIL
 chapter15/15.2/15.2.3/15.2.3.4/15.2.3.4-4-7: FAIL_OK
-
-# SUBSETFAIL
-chapter15/15.2/15.2.3/15.2.3.4/15.2.3.4-4-8: FAIL_OK
-
-# SUBSETFAIL
-chapter15/15.2/15.2.3/15.2.3.4/15.2.3.4-4-9: FAIL_OK
 
 # SUBSETFAIL
 chapter15/15.2/15.2.3/15.2.3.4/15.2.3.4-4-11: FAIL_OK

@@ -25,13 +25,37 @@
 // (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
 // OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
-// Test incorrect code generation for alternations on ARM.
+// The test verifies that parameters of the outer function are correctly
+// accessible from the inner closure.
 
-
-// Flags: --nofull-compiler
-
-function foo() {
-  return (0 > ("10"||10) - 1);
+function runner(f, expected) {
+  for (var i = 0; i < 10000; i++) {  // Loop to trigger optimization.
+    assertEquals(expected, f.call(this, 10));
+  }
 }
 
-assertFalse(foo());
+Function.prototype.bind = function(thisObject)
+{
+    var func = this;
+    var args = Array.prototype.slice.call(arguments, 1);
+    function bound()
+    {
+      // Note outer function parameter access (|thisObject|).
+      return func.apply(
+          thisObject,
+          args.concat(Array.prototype.slice.call(arguments, 0)));
+    }
+    return bound;
+}
+
+function sum(x, y) {
+  return x + y;
+}
+
+function test(n) {
+  runner(sum.bind(this, n), n + 10);
+}
+
+test(1);
+test(42);
+test(239);
