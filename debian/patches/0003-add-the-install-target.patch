@@ -6,7 +6,7 @@ Last-Update: 2011-01-20
 
 --- a/SConstruct
 +++ b/SConstruct
-@@ -779,6 +779,7 @@
+@@ -825,6 +825,7 @@
    result.Add('mode', 'compilation mode (debug, release)', 'release')
    result.Add('sample', 'build sample (shell, process, lineprocessor)', '')
    result.Add('cache', 'directory to use for scons build cache', '')
@@ -14,7 +14,7 @@ Last-Update: 2011-01-20
    result.Add('env', 'override environment settings (NAME0:value0,NAME1:value1,...)', '')
    result.Add('importenv', 'import environment settings (NAME0,NAME1,...)', '')
    for (name, option) in SIMPLE_OPTIONS.iteritems():
-@@ -1125,8 +1126,27 @@
+@@ -1180,8 +1181,26 @@
    env.Alias('sample', samples)
    env.Alias('d8', d8s)
  
@@ -27,8 +27,7 @@ Last-Update: 2011-01-20
 +    env.Install(libdir, lib[0])
 +    if dir not in install_dirs:
 +      install_dirs += libdir
-+  for include in [ 'include/v8.h', 'include/v8-debug.h', 'include/v8-profiler.h', 'include/v8stdint.h' ]:
-+    env.Install(incdir, include);
++  env.Install(incdir, [ 'include/v8.h', 'include/v8-debug.h', 'include/v8-profiler.h', 'include/v8-preparser.h', 'include/v8-testing.h', 'include/v8stdint.h' ]);
 +  install_dirs += incdir
 +  env.Alias('install', install_dirs)
 +
