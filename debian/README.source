@@ -29,3 +29,5 @@ with the new version; additionally rename the file with the new version
 
 4) edit debian/control and remove any reference to the old version by updating
 it with the new version
+
+5) if this is a new v8 branch, don't forget to update debian/watch
