@@ -5,4 +5,4 @@ version=3
 # SVN tag but the watch file will still useful to find
 # new versions
 opts="dversionmangle=s/\+dfsg//" \
-http://v8.googlecode.com/svn/tags/ ([^.][\d.]+)/
+http://v8.googlecode.com/svn/tags/ (3\.0\.[\d.]+)/
