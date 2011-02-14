@@ -644,6 +644,90 @@ static void GetOwnPropertyImplementation(JSObject* obj,
 }
 
 
+static bool CheckAccessException(LookupResult* result,
+                                 v8::AccessType access_type) {
+  if (result->type() == CALLBACKS) {
+    Object* callback = result->GetCallbackObject();
+    if (callback->IsAccessorInfo()) {
+      AccessorInfo* info = AccessorInfo::cast(callback);
+      bool can_access =
+          (access_type == v8::ACCESS_HAS &&
+              (info->all_can_read() || info->all_can_write())) ||
+          (access_type == v8::ACCESS_GET && info->all_can_read()) ||
+          (access_type == v8::ACCESS_SET && info->all_can_write());
+      return can_access;
+    }
+  }
+
+  return false;
+}
+
+
+static bool CheckAccess(JSObject* obj,
+                        String* name,
+                        LookupResult* result,
+                        v8::AccessType access_type) {
+  ASSERT(result->IsProperty());
+
+  JSObject* holder = result->holder();
+  JSObject* current = obj;
+  while (true) {
+    if (current->IsAccessCheckNeeded() &&
+        !Top::MayNamedAccess(current, name, access_type)) {
+      // Access check callback denied the access, but some properties
+      // can have a special permissions which override callbacks descision
+      // (currently see v8::AccessControl).
+      break;
+    }
+
+    if (current == holder) {
+      return true;
+    }
+
+    current = JSObject::cast(current->GetPrototype());
+  }
+
+  // API callbacks can have per callback access exceptions.
+  switch (result->type()) {
+    case CALLBACKS: {
+      if (CheckAccessException(result, access_type)) {
+        return true;
+      }
+      break;
+    }
+    case INTERCEPTOR: {
+      // If the object has an interceptor, try real named properties.
+      // Overwrite the result to fetch the correct property later.
+      holder->LookupRealNamedProperty(name, result);
+      if (result->IsProperty()) {
+        if (CheckAccessException(result, access_type)) {
+          return true;
+        }
+      }
+      break;
+    }
+    default:
+      break;
+  }
+
+  Top::ReportFailedAccessCheck(current, access_type);
+  return false;
+}
+
+
+// TODO(1095): we should traverse hidden prototype hierachy as well.
+static bool CheckElementAccess(JSObject* obj,
+                               uint32_t index,
+                               v8::AccessType access_type) {
+  if (obj->IsAccessCheckNeeded() &&
+      !Top::MayIndexedAccess(obj, index, access_type)) {
+    return false;
+  }
+
+  return true;
+}
+
+
 // Enumerator used as indices into the array returned from GetOwnProperty
 enum PropertyDescriptorIndices {
   IS_ACCESSOR_INDEX,
@@ -686,7 +770,7 @@ static MaybeObject* Runtime_GetOwnProperty(Arguments args) {
         // subsequent cases.
         Handle<JSValue> js_value = Handle<JSValue>::cast(obj);
         Handle<String> str(String::cast(js_value->value()));
-        Handle<String> substr = SubString(str, index, index+1, NOT_TENURED);
+        Handle<String> substr = SubString(str, index, index + 1, NOT_TENURED);
 
         elms->set(IS_ACCESSOR_INDEX, Heap::false_value());
         elms->set(VALUE_INDEX, *substr);
@@ -699,8 +783,7 @@ static MaybeObject* Runtime_GetOwnProperty(Arguments args) {
       case JSObject::INTERCEPTED_ELEMENT:
       case JSObject::FAST_ELEMENT: {
         elms->set(IS_ACCESSOR_INDEX, Heap::false_value());
-        Handle<Object> element = GetElement(Handle<Object>(obj), index);
-        elms->set(VALUE_INDEX, *element);
+        elms->set(VALUE_INDEX, *GetElement(obj, index));
         elms->set(WRITABLE_INDEX, Heap::true_value());
         elms->set(ENUMERABLE_INDEX,  Heap::true_value());
         elms->set(CONFIGURABLE_INDEX, Heap::true_value());
@@ -708,7 +791,14 @@ static MaybeObject* Runtime_GetOwnProperty(Arguments args) {
       }
 
       case JSObject::DICTIONARY_ELEMENT: {
-        NumberDictionary* dictionary = obj->element_dictionary();
+        Handle<JSObject> holder = obj;
+        if (obj->IsJSGlobalProxy()) {
+          Object* proto = obj->GetPrototype();
+          if (proto->IsNull()) return Heap::undefined_value();
+          ASSERT(proto->IsJSGlobalObject());
+          holder = Handle<JSObject>(JSObject::cast(proto));
+        }
+        NumberDictionary* dictionary = holder->element_dictionary();
         int entry = dictionary->FindEntry(index);
         ASSERT(entry != NumberDictionary::kNotFound);
         PropertyDetails details = dictionary->DetailsAt(entry);
@@ -718,14 +808,18 @@ static MaybeObject* Runtime_GetOwnProperty(Arguments args) {
             FixedArray* callbacks =
                 FixedArray::cast(dictionary->ValueAt(entry));
             elms->set(IS_ACCESSOR_INDEX, Heap::true_value());
-            elms->set(GETTER_INDEX, callbacks->get(0));
-            elms->set(SETTER_INDEX, callbacks->get(1));
+            if (CheckElementAccess(*obj, index, v8::ACCESS_GET)) {
+              elms->set(GETTER_INDEX, callbacks->get(0));
+            }
+            if (CheckElementAccess(*obj, index, v8::ACCESS_SET)) {
+              elms->set(SETTER_INDEX, callbacks->get(1));
+            }
             break;
           }
           case NORMAL:
             // This is a data property.
             elms->set(IS_ACCESSOR_INDEX, Heap::false_value());
-            elms->set(VALUE_INDEX, dictionary->ValueAt(entry));
+            elms->set(VALUE_INDEX, *GetElement(obj, index));
             elms->set(WRITABLE_INDEX, Heap::ToBoolean(!details.IsReadOnly()));
             break;
           default:
@@ -746,6 +840,10 @@ static MaybeObject* Runtime_GetOwnProperty(Arguments args) {
     return Heap::undefined_value();
   }
 
+  if (!CheckAccess(*obj, *name, &result, v8::ACCESS_HAS)) {
+    return Heap::false_value();
+  }
+
   elms->set(ENUMERABLE_INDEX, Heap::ToBoolean(!result.IsDontEnum()));
   elms->set(CONFIGURABLE_INDEX, Heap::ToBoolean(!result.IsDontDelete()));
 
@@ -754,16 +852,22 @@ static MaybeObject* Runtime_GetOwnProperty(Arguments args) {
 
   if (is_js_accessor) {
     // __defineGetter__/__defineSetter__ callback.
-    FixedArray* structure = FixedArray::cast(result.GetCallbackObject());
     elms->set(IS_ACCESSOR_INDEX, Heap::true_value());
-    elms->set(GETTER_INDEX, structure->get(0));
-    elms->set(SETTER_INDEX, structure->get(1));
+
+    FixedArray* structure = FixedArray::cast(result.GetCallbackObject());
+    if (CheckAccess(*obj, *name, &result, v8::ACCESS_GET)) {
+      elms->set(GETTER_INDEX, structure->get(0));
+    }
+    if (CheckAccess(*obj, *name, &result, v8::ACCESS_SET)) {
+      elms->set(SETTER_INDEX, structure->get(1));
+    }
   } else {
     elms->set(IS_ACCESSOR_INDEX, Heap::false_value());
     elms->set(WRITABLE_INDEX, Heap::ToBoolean(!result.IsReadOnly()));
 
     PropertyAttributes attrs;
     Object* value;
+    // GetProperty will check access and report any violations.
     { MaybeObject* maybe_value = obj->GetProperty(*obj, &result, *name, &attrs);
       if (!maybe_value->ToObject(&value)) return maybe_value;
     }
@@ -780,10 +884,17 @@ static MaybeObject* Runtime_PreventExtensions(Arguments args) {
   return obj->PreventExtensions();
 }
 
+
 static MaybeObject* Runtime_IsExtensible(Arguments args) {
   ASSERT(args.length() == 1);
   CONVERT_CHECKED(JSObject, obj, args[0]);
-  return obj->map()->is_extensible() ?  Heap::true_value()
+  if (obj->IsJSGlobalProxy()) {
+    Object* proto = obj->GetPrototype();
+    if (proto->IsNull()) return Heap::false_value();
+    ASSERT(proto->IsJSGlobalObject());
+    obj = JSObject::cast(proto);
+  }
+  return obj->map()->is_extensible() ? Heap::true_value()
                                      : Heap::false_value();
 }
 
@@ -978,7 +1089,11 @@ static MaybeObject* Runtime_DeclareGlobals(Arguments args) {
         const char* type = (lookup.IsReadOnly()) ? "const" : "var";
         return ThrowRedeclarationError(type, name);
       }
-      SetProperty(global, name, value, attributes);
+      Handle<Object> result = SetProperty(global, name, value, attributes);
+      if (result.is_null()) {
+        ASSERT(Top::has_pending_exception());
+        return Failure::Exception();
+      }
     } else {
       // If a property with this name does not already exist on the
       // global object add the property locally.  We take special
@@ -986,10 +1101,16 @@ static MaybeObject* Runtime_DeclareGlobals(Arguments args) {
       // of callbacks in the prototype chain (this rules out using
       // SetProperty).  Also, we must use the handle-based version to
       // avoid GC issues.
-      SetLocalPropertyIgnoreAttributes(global, name, value, attributes);
+      Handle<Object> result =
+          SetLocalPropertyIgnoreAttributes(global, name, value, attributes);
+      if (result.is_null()) {
+        ASSERT(Top::has_pending_exception());
+        return Failure::Exception();
+      }
     }
   }
 
+  ASSERT(!Top::has_pending_exception());
   return Heap::undefined_value();
 }
 
@@ -1039,12 +1160,15 @@ static MaybeObject* Runtime_DeclareContextSlot(Arguments args) {
         } else {
           // The holder is an arguments object.
           Handle<JSObject> arguments(Handle<JSObject>::cast(holder));
-          SetElement(arguments, index, initial_value);
+          Handle<Object> result = SetElement(arguments, index, initial_value);
+          if (result.is_null()) return Failure::Exception();
         }
       } else {
         // Slow case: The property is not in the FixedArray part of the context.
         Handle<JSObject> context_ext = Handle<JSObject>::cast(holder);
-        SetProperty(context_ext, name, initial_value, mode);
+        Handle<Object> result =
+            SetProperty(context_ext, name, initial_value, mode);
+        if (result.is_null()) return Failure::Exception();
       }
     }
 
@@ -1071,8 +1195,8 @@ static MaybeObject* Runtime_DeclareContextSlot(Arguments args) {
     ASSERT(!context_ext->HasLocalProperty(*name));
     Handle<Object> value(Heap::undefined_value());
     if (*initial_value != NULL) value = initial_value;
-    SetProperty(context_ext, name, value, mode);
-    ASSERT(context_ext->GetLocalPropertyAttribute(*name) == mode);
+    Handle<Object> result = SetProperty(context_ext, name, value, mode);
+    if (result.is_null()) return Failure::Exception();
   }
 
   return Heap::undefined_value();
@@ -3496,7 +3620,12 @@ static MaybeObject* Runtime_KeyedGetProperty(Arguments args) {
                                     args.at<Object>(1));
 }
 
-
+// Implements part of 8.12.9 DefineOwnProperty.
+// There are 3 cases that lead here:
+// Step 4b - define a new accessor property.
+// Steps 9c & 12 - replace an existing data property with an accessor property.
+// Step 12 - update an existing accessor property with an accessor or generic
+//           descriptor.
 static MaybeObject* Runtime_DefineOrRedefineAccessorProperty(Arguments args) {
   ASSERT(args.length() == 5);
   HandleScope scope;
@@ -3528,6 +3657,12 @@ static MaybeObject* Runtime_DefineOrRedefineAccessorProperty(Arguments args) {
   return obj->DefineAccessor(name, flag_setter->value() == 0, fun, attr);
 }
 
+// Implements part of 8.12.9 DefineOwnProperty.
+// There are 3 cases that lead here:
+// Step 4a - define a new data property.
+// Steps 9b & 12 - replace an existing accessor property with a data property.
+// Step 12 - update an existing data property with a data or generic
+//           descriptor.
 static MaybeObject* Runtime_DefineOrRedefineDataProperty(Arguments args) {
   ASSERT(args.length() == 4);
   HandleScope scope;
@@ -3551,12 +3686,20 @@ static MaybeObject* Runtime_DefineOrRedefineDataProperty(Arguments args) {
   if (((unchecked & (DONT_DELETE | DONT_ENUM | READ_ONLY)) != 0) &&
       is_element) {
     // Normalize the elements to enable attributes on the property.
+    if (js_object->IsJSGlobalProxy()) {
+      Handle<Object> proto(js_object->GetPrototype());
+      // If proxy is detached, ignore the assignment. Alternatively,
+      // we could throw an exception.
+      if (proto->IsNull()) return *obj_value;
+      js_object = Handle<JSObject>::cast(proto);
+    }
     NormalizeElements(js_object);
     Handle<NumberDictionary> dictionary(js_object->element_dictionary());
     // Make sure that we never go back to fast case.
     dictionary->set_requires_slow_elements();
     PropertyDetails details = PropertyDetails(attr, NORMAL);
     NumberDictionarySet(dictionary, index, obj_value, details);
+    return *obj_value;
   }
 
   LookupResult result;
@@ -3571,6 +3714,11 @@ static MaybeObject* Runtime_DefineOrRedefineDataProperty(Arguments args) {
   if (result.IsProperty() &&
       (attr != result.GetAttributes() || result.type() == CALLBACKS)) {
     // New attributes - normalize to avoid writing to instance descriptor
+    if (js_object->IsJSGlobalProxy()) {
+      // Since the result is a property, the prototype will exist so
+      // we don't have to check for null.
+      js_object = Handle<JSObject>(JSObject::cast(js_object->GetPrototype()));
+    }
     NormalizeProperties(js_object, CLEAR_INOBJECT_PROPERTIES, 0);
     // Use IgnoreAttributes version since a readonly property may be
     // overridden and SetProperty does not allow this.
@@ -4167,7 +4315,7 @@ static MaybeObject* Runtime_ToSlowProperties(Arguments args) {
 
   ASSERT(args.length() == 1);
   Handle<Object> object = args.at<Object>(0);
-  if (object->IsJSObject()) {
+  if (object->IsJSObject() && !object->IsJSGlobalProxy()) {
     Handle<JSObject> js_object = Handle<JSObject>::cast(object);
     NormalizeProperties(js_object, CLEAR_INOBJECT_PROPERTIES, 0);
   }
@@ -7219,12 +7367,17 @@ static MaybeObject* Runtime_StoreContextSlot(Arguments args) {
     if (holder->IsContext()) {
       // Ignore if read_only variable.
       if ((attributes & READ_ONLY) == 0) {
-        Handle<Context>::cast(holder)->set(index, *value);
+        // Context is a fixed array and set cannot fail.
+        Context::cast(*holder)->set(index, *value);
       }
     } else {
       ASSERT((attributes & READ_ONLY) == 0);
-      Handle<JSObject>::cast(holder)->SetElement(index, *value)->
-          ToObjectUnchecked();
+      Handle<Object> result =
+          SetElement(Handle<JSObject>::cast(holder), index, value);
+      if (result.is_null()) {
+        ASSERT(Top::has_pending_exception());
+        return Failure::Exception();
+      }
     }
     return *value;
   }
@@ -7247,8 +7400,8 @@ static MaybeObject* Runtime_StoreContextSlot(Arguments args) {
   // extension object itself.
   if ((attributes & READ_ONLY) == 0 ||
       (context_ext->GetLocalPropertyAttribute(*name) == ABSENT)) {
-    Handle<Object> set = SetProperty(context_ext, name, value, NONE);
-    if (set.is_null()) {
+    Handle<Object> result = SetProperty(context_ext, name, value, NONE);
+    if (result.is_null()) {
       // Failure::Exception is converted to a null handle in the
       // handle-based methods such as SetProperty.  We therefore need
       // to convert null handles back to exceptions.

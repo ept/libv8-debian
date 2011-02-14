@@ -1213,6 +1213,8 @@ MaybeObject* JSObject::AddFastPropertyUsingMap(Map* new_map,
 MaybeObject* JSObject::AddFastProperty(String* name,
                                        Object* value,
                                        PropertyAttributes attributes) {
+  ASSERT(!IsJSGlobalProxy());
+
   // Normalize the object if the name is an actual string (not the
   // hidden symbols) and is not a real identifier.
   StringInputBuffer buffer(name);
@@ -1705,8 +1707,9 @@ void JSObject::LookupCallbackSetterInPrototypes(String* name,
 }
 
 
-bool JSObject::SetElementWithCallbackSetterInPrototypes(uint32_t index,
-                                                        Object* value) {
+MaybeObject* JSObject::SetElementWithCallbackSetterInPrototypes(uint32_t index,
+                                                                Object* value,
+                                                                bool* found) {
   for (Object* pt = GetPrototype();
        pt != Heap::null_value();
        pt = pt->GetPrototype()) {
@@ -1716,15 +1719,16 @@ bool JSObject::SetElementWithCallbackSetterInPrototypes(uint32_t index,
     NumberDictionary* dictionary = JSObject::cast(pt)->element_dictionary();
     int entry = dictionary->FindEntry(index);
     if (entry != NumberDictionary::kNotFound) {
-      Object* element = dictionary->ValueAt(entry);
       PropertyDetails details = dictionary->DetailsAt(entry);
       if (details.type() == CALLBACKS) {
-        SetElementWithCallback(element, index, value, JSObject::cast(pt));
-        return true;
+        *found = true;
+        return SetElementWithCallback(
+            dictionary->ValueAt(entry), index, value, JSObject::cast(pt));
       }
     }
   }
-  return false;
+  *found = false;
+  return Heap::the_hole_value();
 }
 
 
@@ -2288,6 +2292,9 @@ MaybeObject* JSObject::NormalizeProperties(PropertyNormalizationMode mode,
   // The global object is always normalized.
   ASSERT(!IsGlobalObject());
 
+  // JSGlobalProxy must never be normalized
+  ASSERT(!IsJSGlobalProxy());
+
   // Allocate new content.
   int property_count = map()->NumberOfDescribedProperties();
   if (expected_additional_properties > 0) {
@@ -2774,6 +2781,13 @@ bool JSObject::ReferencesObject(Object* obj) {
 
 
 MaybeObject* JSObject::PreventExtensions() {
+  if (IsJSGlobalProxy()) {
+    Object* proto = GetPrototype();
+    if (proto->IsNull()) return this;
+    ASSERT(proto->IsJSGlobalObject());
+    return JSObject::cast(proto)->PreventExtensions();
+  }
+
   // If there are fast elements we normalize.
   if (HasFastElements()) {
     Object* ok;
@@ -6679,6 +6693,13 @@ JSObject::LocalElementType JSObject::HasLocalElement(uint32_t index) {
     return UNDEFINED_ELEMENT;
   }
 
+  if (IsJSGlobalProxy()) {
+    Object* proto = GetPrototype();
+    if (proto->IsNull()) return UNDEFINED_ELEMENT;
+    ASSERT(proto->IsJSGlobalObject());
+    return JSObject::cast(proto)->HasLocalElement(index);
+  }
+
   // Check for lookup interceptor
   if (HasIndexedInterceptor()) {
     return HasElementWithInterceptor(this, index) ? INTERCEPTED_ELEMENT
@@ -6950,9 +6971,11 @@ MaybeObject* JSObject::SetFastElement(uint32_t index,
   uint32_t elms_length = static_cast<uint32_t>(elms->length());
 
   if (check_prototype &&
-      (index >= elms_length || elms->get(index)->IsTheHole()) &&
-      SetElementWithCallbackSetterInPrototypes(index, value)) {
-    return value;
+      (index >= elms_length || elms->get(index)->IsTheHole())) {
+    bool found;
+    MaybeObject* result =
+        SetElementWithCallbackSetterInPrototypes(index, value, &found);
+    if (found) return result;
   }
 
 
@@ -7084,9 +7107,11 @@ MaybeObject* JSObject::SetElementWithoutInterceptor(uint32_t index,
         }
       } else {
         // Index not already used. Look for an accessor in the prototype chain.
-        if (check_prototype &&
-            SetElementWithCallbackSetterInPrototypes(index, value)) {
-          return value;
+        if (check_prototype) {
+          bool found;
+          MaybeObject* result =
+              SetElementWithCallbackSetterInPrototypes(index, value, &found);
+          if (found) return result;
         }
         // When we set the is_extensible flag to false we always force
         // the element into dictionary mode (and force them to stay there).

@@ -1,4 +1,4 @@
-// Copyright 2009 the V8 project authors. All rights reserved.
+// Copyright 2011 the V8 project authors. All rights reserved.
 // Redistribution and use in source and binary forms, with or without
 // modification, are permitted provided that the following conditions are
 // met:
@@ -25,34 +25,19 @@
 // (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
 // OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
-// Test that exceptions are thrown when setting properties on object
-// that have only a getter in a prototype object.
+// Object.defineProperty with generic desc on existing property
+// should just update enumerable/configurable flags.
 
-var o = {};
-var p = {};
-p.__defineGetter__('x', function(){});
-p.__defineGetter__(0, function(){});
-o.__proto__ = p;
+var obj =  { get p() { return 42; }  };
+var desc = Object.getOwnPropertyDescriptor(obj, 'p');
+var getter = desc.get;
 
-assertThrows("o.x = 42");
-assertThrows("o[0] = 42");
-
-function f() {
-  with(o) {
-    x = 42;
-  }
-}
-assertThrows("f()");
-
-__proto__ = p;
-function g() {
-  eval('1');
-  x = 42;
-}
-assertThrows("g()");
-
-__proto__ = p;
-function g2() {
-  this[0] = 42;
-}
-assertThrows("g2()");
+Object.defineProperty(obj, 'p', {enumerable: false });
+assertEquals(obj.p, 42);
+desc = Object.getOwnPropertyDescriptor(obj, 'p');
+assertFalse(desc.enumerable);
+assertTrue(desc.configurable);
+assertEquals(desc.get, getter);
+assertEquals(desc.set, undefined);
+assertFalse(desc.hasOwnProperty('value'));
+assertFalse(desc.hasOwnProperty('writable'));
