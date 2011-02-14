@@ -1,3 +1,9 @@
+libv8 (2.5.9.15-3) UNRELEASED; urgency=low
+
+  * Adds architecture : armhf. (Closes: #596997) 
+
+ -- Jérémy Lal <kapouer@melix.org>  Mon, 14 Feb 2011 16:29:13 +0100
+
 libv8 (2.5.9.15-2) unstable; urgency=low
 
   * Builds with snapshot=on. (Closes: #612781) 
