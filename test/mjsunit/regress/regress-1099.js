@@ -1,4 +1,4 @@
-// Copyright 2009 the V8 project authors. All rights reserved.
+// Copyright 2011 the V8 project authors. All rights reserved.
 // Redistribution and use in source and binary forms, with or without
 // modification, are permitted provided that the following conditions are
 // met:
@@ -25,34 +25,22 @@
 // (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
 // OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
-// Test that exceptions are thrown when setting properties on object
-// that have only a getter in a prototype object.
+// Test that LApplyArguments lithium instruction restores context after the call.
 
-var o = {};
-var p = {};
-p.__defineGetter__('x', function(){});
-p.__defineGetter__(0, function(){});
-o.__proto__ = p;
-
-assertThrows("o.x = 42");
-assertThrows("o[0] = 42");
-
-function f() {
-  with(o) {
-    x = 42;
-  }
+function X() {
+  var slot = "foo"; return function (a) { return slot === a; }
 }
-assertThrows("f()");
 
-__proto__ = p;
-function g() {
-  eval('1');
-  x = 42;
+function Y(x) {
+  var slot = "bar";
+  return function (a) {
+    x.apply(this, arguments);
+    return slot === 'bar';
+  };
 }
-assertThrows("g()");
 
-__proto__ = p;
-function g2() {
-  this[0] = 42;
+var y = Y(X());
+
+for (var i = 0; i < 1000000; i++) {
+  assertTrue(y("foo"));
 }
-assertThrows("g2()");

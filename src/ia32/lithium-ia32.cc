@@ -1123,12 +1123,14 @@ LInstruction* LChunkBuilder::DoInstanceOfKnownGlobal(
 LInstruction* LChunkBuilder::DoApplyArguments(HApplyArguments* instr) {
   LOperand* function = UseFixed(instr->function(), edi);
   LOperand* receiver = UseFixed(instr->receiver(), eax);
-  LOperand* length = UseRegisterAtStart(instr->length());
-  LOperand* elements = UseRegisterAtStart(instr->elements());
+  LOperand* length = UseFixed(instr->length(), ebx);
+  LOperand* elements = UseFixed(instr->elements(), ecx);
+  LOperand* temp = FixedTemp(edx);
   LApplyArguments* result = new LApplyArguments(function,
                                                 receiver,
                                                 length,
-                                                elements);
+                                                elements,
+                                                temp);
   return MarkAsCall(DefineFixed(result, eax), instr, CAN_DEOPTIMIZE_EAGERLY);
 }
 

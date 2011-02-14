@@ -245,19 +245,22 @@ void FullCodeGenerator::EmitReturnSequence() {
     // patch with the code required by the debugger.
     __ movq(rsp, rbp);
     __ pop(rbp);
-    __ ret((scope()->num_parameters() + 1) * kPointerSize);
+
+    int arguments_bytes = (scope()->num_parameters() + 1) * kPointerSize;
+    __ Ret(arguments_bytes, rcx);
+
 #ifdef ENABLE_DEBUGGER_SUPPORT
     // Add padding that will be overwritten by a debugger breakpoint.  We
-    // have just generated "movq rsp, rbp; pop rbp; ret k" with length 7
+    // have just generated at least 7 bytes: "movq rsp, rbp; pop rbp; ret k"
     // (3 + 1 + 3).
     const int kPadding = Assembler::kJSReturnSequenceLength - 7;
     for (int i = 0; i < kPadding; ++i) {
       masm_->int3();
     }
-    // Check that the size of the code used for returning matches what is
-    // expected by the debugger.
-    ASSERT_EQ(Assembler::kJSReturnSequenceLength,
-            masm_->SizeOfCodeGeneratedSince(&check_exit_codesize));
+    // Check that the size of the code used for returning is large enough
+    // for the debugger's requirements.
+    ASSERT(Assembler::kJSReturnSequenceLength <=
+           masm_->SizeOfCodeGeneratedSince(&check_exit_codesize));
 #endif
   }
 }
@@ -3002,24 +3005,28 @@ void FullCodeGenerator::VisitUnaryOperation(UnaryOperation* expr) {
         // Result of deleting non-global, non-dynamic variables is false.
         // The subexpression does not have side effects.
         context()->Plug(false);
-      } else {
-        // Property or variable reference.  Call the delete builtin with
-        // object and property name as arguments.
-        if (prop != NULL) {
+      } else if (prop != NULL) {
+        if (prop->is_synthetic()) {
+          // Result of deleting parameters is false, even when they rewrite
+          // to accesses on the arguments object.
+          context()->Plug(false);
+        } else {
           VisitForStackValue(prop->obj());
           VisitForStackValue(prop->key());
           __ InvokeBuiltin(Builtins::DELETE, CALL_FUNCTION);
-        } else if (var->is_global()) {
-          __ push(GlobalObjectOperand());
-          __ Push(var->name());
-          __ InvokeBuiltin(Builtins::DELETE, CALL_FUNCTION);
-        } else {
-          // Non-global variable.  Call the runtime to delete from the
-          // context where the variable was introduced.
-          __ push(context_register());
-          __ Push(var->name());
-          __ CallRuntime(Runtime::kDeleteContextSlot, 2);
+          context()->Plug(rax);
         }
+      } else if (var->is_global()) {
+        __ push(GlobalObjectOperand());
+        __ Push(var->name());
+        __ InvokeBuiltin(Builtins::DELETE, CALL_FUNCTION);
+        context()->Plug(rax);
+      } else {
+        // Non-global variable.  Call the runtime to try to delete from the
+        // context where the variable was introduced.
+        __ push(context_register());
+        __ Push(var->name());
+        __ CallRuntime(Runtime::kDeleteContextSlot, 2);
         context()->Plug(rax);
       }
       break;

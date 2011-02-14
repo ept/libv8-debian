@@ -870,13 +870,11 @@ void HGraph::EliminateRedundantPhis() {
       }
       uses_to_replace.Rewind(0);
       block->RemovePhi(phi);
-    } else if (phi->HasNoUses() &&
-               !phi->HasReceiverOperand() &&
-               FLAG_eliminate_dead_phis) {
-      // We can't eliminate phis that have the receiver as an operand
-      // because in case of throwing an error we need the correct
-      // receiver value in the environment to construct a corrent
-      // stack trace.
+    } else if (FLAG_eliminate_dead_phis && phi->HasNoUses() &&
+               !phi->IsReceiver()) {
+      // We can't eliminate phis in the receiver position in the environment
+      // because in case of throwing an error we need this value to
+      // construct a stack trace.
       block->RemovePhi(phi);
       block->RecordDeletedPhi(phi->merged_index());
     }
@@ -1815,16 +1813,14 @@ void HGraph::InsertRepresentationChangeForUse(HValue* value,
                                               bool is_truncating) {
   // Insert the representation change right before its use. For phi-uses we
   // insert at the end of the corresponding predecessor.
-  HBasicBlock* insert_block = use->block();
+  HInstruction* next = NULL;
   if (use->IsPhi()) {
     int index = 0;
     while (use->OperandAt(index) != value) ++index;
-    insert_block = insert_block->predecessors()->at(index);
+    next = use->block()->predecessors()->at(index)->end();
+  } else {
+    next = HInstruction::cast(use);
   }
-
-  HInstruction* next = (insert_block == use->block())
-      ? HInstruction::cast(use)
-      : insert_block->end();
 
   // For constants we try to make the representation change at compile
   // time. When a representation change is not possible without loss of
@@ -2951,6 +2947,9 @@ void HGraphBuilder::LookupGlobalPropertyCell(Variable* var,
   }
   if (is_store && lookup->IsReadOnly()) {
     BAILOUT("read-only global variable");
+  }
+  if (lookup->holder() != *global) {
+    BAILOUT("global property on prototype of global object");
   }
 }
 
@@ -4572,12 +4571,18 @@ void HGraphBuilder::VisitUnaryOperation(UnaryOperation* expr) {
       // The subexpression does not have side effects.
       ast_context()->ReturnValue(graph()->GetConstantFalse());
     } else if (prop != NULL) {
-      VISIT_FOR_VALUE(prop->obj());
-      VISIT_FOR_VALUE(prop->key());
-      HValue* key = Pop();
-      HValue* obj = Pop();
-      ast_context()->ReturnInstruction(new HDeleteProperty(obj, key),
-                                       expr->id());
+      if (prop->is_synthetic()) {
+        // Result of deleting parameters is false, even when they rewrite
+        // to accesses on the arguments object.
+        ast_context()->ReturnValue(graph()->GetConstantFalse());
+      } else {
+        VISIT_FOR_VALUE(prop->obj());
+        VISIT_FOR_VALUE(prop->key());
+        HValue* key = Pop();
+        HValue* obj = Pop();
+        HDeleteProperty* instr = new HDeleteProperty(obj, key);
+        ast_context()->ReturnInstruction(instr, expr->id());
+      }
     } else if (var->is_global()) {
       BAILOUT("delete with global variable");
     } else {

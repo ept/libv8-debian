@@ -307,12 +307,14 @@ void FullCodeGenerator::EmitReturnSequence() {
     // patch with the code required by the debugger.
     __ mov(esp, ebp);
     __ pop(ebp);
-    __ ret((scope()->num_parameters() + 1) * kPointerSize);
+
+    int arguments_bytes = (scope()->num_parameters() + 1) * kPointerSize;
+    __ Ret(arguments_bytes, ecx);
 #ifdef ENABLE_DEBUGGER_SUPPORT
-    // Check that the size of the code used for returning matches what is
-    // expected by the debugger.
-    ASSERT_EQ(Assembler::kJSReturnSequenceLength,
-              masm_->SizeOfCodeGeneratedSince(&check_exit_codesize));
+    // Check that the size of the code used for returning is large enough
+    // for the debugger's requirements.
+    ASSERT(Assembler::kJSReturnSequenceLength <=
+           masm_->SizeOfCodeGeneratedSince(&check_exit_codesize));
 #endif
   }
 }
@@ -713,18 +715,25 @@ void FullCodeGenerator::EmitDeclaration(Variable* variable,
   } else if (prop != NULL) {
     if (function != NULL || mode == Variable::CONST) {
       // We are declaring a function or constant that rewrites to a
-      // property.  Use (keyed) IC to set the initial value.
-      VisitForStackValue(prop->obj());
-      if (function != NULL) {
-        VisitForStackValue(prop->key());
-        VisitForAccumulatorValue(function);
-        __ pop(ecx);
-      } else {
-        VisitForAccumulatorValue(prop->key());
-        __ mov(ecx, result_register());
-        __ mov(result_register(), Factory::the_hole_value());
+      // property.  Use (keyed) IC to set the initial value.  We cannot
+      // visit the rewrite because it's shared and we risk recording
+      // duplicate AST IDs for bailouts from optimized code.
+      ASSERT(prop->obj()->AsVariableProxy() != NULL);
+      { AccumulatorValueContext for_object(this);
+        EmitVariableLoad(prop->obj()->AsVariableProxy()->var());
       }
-      __ pop(edx);
+
+      if (function != NULL) {
+        __ push(eax);
+        VisitForAccumulatorValue(function);
+        __ pop(edx);
+      } else {
+        __ mov(edx, eax);
+        __ mov(eax, Factory::the_hole_value());
+      }
+      ASSERT(prop->key()->AsLiteral() != NULL &&
+             prop->key()->AsLiteral()->handle()->IsSmi());
+      __ Set(ecx, Immediate(prop->key()->AsLiteral()->handle()));
 
       Handle<Code> ic(Builtins::builtin(Builtins::KeyedStoreIC_Initialize));
       EmitCallIC(ic, RelocInfo::CODE_TARGET);
@@ -3685,24 +3694,28 @@ void FullCodeGenerator::VisitUnaryOperation(UnaryOperation* expr) {
         // Result of deleting non-global, non-dynamic variables is false.
         // The subexpression does not have side effects.
         context()->Plug(false);
-      } else {
-        // Property or variable reference.  Call the delete builtin with
-        // object and property name as arguments.
-        if (prop != NULL) {
+      } else if (prop != NULL) {
+        if (prop->is_synthetic()) {
+          // Result of deleting parameters is false, even when they rewrite
+          // to accesses on the arguments object.
+          context()->Plug(false);
+        } else {
           VisitForStackValue(prop->obj());
           VisitForStackValue(prop->key());
           __ InvokeBuiltin(Builtins::DELETE, CALL_FUNCTION);
-        } else if (var->is_global()) {
-          __ push(GlobalObjectOperand());
-          __ push(Immediate(var->name()));
-          __ InvokeBuiltin(Builtins::DELETE, CALL_FUNCTION);
-        } else {
-          // Non-global variable.  Call the runtime to delete from the
-          // context where the variable was introduced.
-          __ push(context_register());
-          __ push(Immediate(var->name()));
-          __ CallRuntime(Runtime::kDeleteContextSlot, 2);
+          context()->Plug(eax);
         }
+      } else if (var->is_global()) {
+        __ push(GlobalObjectOperand());
+        __ push(Immediate(var->name()));
+        __ InvokeBuiltin(Builtins::DELETE, CALL_FUNCTION);
+        context()->Plug(eax);
+      } else {
+        // Non-global variable.  Call the runtime to try to delete from the
+        // context where the variable was introduced.
+        __ push(context_register());
+        __ push(Immediate(var->name()));
+        __ CallRuntime(Runtime::kDeleteContextSlot, 2);
         context()->Plug(eax);
       }
       break;
