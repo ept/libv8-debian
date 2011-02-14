@@ -4,7 +4,7 @@ include /usr/share/cdbs/1/rules/utils.mk
 include /usr/share/cdbs/1/class/scons.mk
 include /usr/share/cdbs/1/rules/debhelper.mk
 
-SONAME = 3.0.12.9
+SONAME = 3.0.12.18
 
 DEB_DH_MAKESHLIBS_ARGS = -- -c4
 

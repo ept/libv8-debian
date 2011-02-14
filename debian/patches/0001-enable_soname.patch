@@ -9,7 +9,7 @@ Last-Update: 2011-01-24
  // shared library instead the generic SONAME generated from the V8 version
  // number. This define is mainly used by the SCons build script.
 -#define SONAME            ""
-+#define SONAME            "libv8.so.3.0.12.9"
++#define SONAME            "libv8.so.3.0.12.18"
  
  namespace v8 {
  namespace internal {
