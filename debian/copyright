@@ -5,7 +5,7 @@ Upstream-Source: http://code.google.com/p/v8
 Upstream-Name: v8
 
 Files: *
-Copyright: 2006-2009 the V8 Project Authors
+Copyright: 2006-2011 the V8 Project Authors
 License: BSD
 
 Files: benchmarks/crypto.js
