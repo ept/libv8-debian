@@ -1,4 +1,4 @@
-libv8 (3.0.12.19-1) UNRELEASED; urgency=low
+libv8 (3.0.12.22-1) UNRELEASED; urgency=low
 
   * New upstream release.
   * Include new headers in libv8-dev.
