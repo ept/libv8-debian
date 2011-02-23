@@ -1,6 +1,7 @@
-libv8 (3.0.12.22-1) UNRELEASED; urgency=low
+libv8 (3.0.12.23-1) UNRELEASED; urgency=low
 
   * New upstream release.
+  * Adds architecture : armhf. (Closes: #596997)
   * Include new headers in libv8-dev.
 
  -- Jérémy Lal <kapouer@melix.org>  Sat, 12 Feb 2011 11:07:34 +0100
