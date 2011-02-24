@@ -42,9 +42,10 @@ clean::
 	rm -f shell
 
 # actually run regression tests
-# *temporary* : failing tests does not stop building package (- added at the beginning of the line)
+#  * relax regression tests when targeted experimental suite
+exp-relax-check := $(if $(shell dpkg-parsechangelog | grep -Fx 'Distribution: experimental'),-)
 common-post-build-impl::
-	- $(if $(filter nocheck,$(DEB_BUILD_OPTIONS)),,LD_PRELOAD=$(CURDIR)/libv8-$(SONAME).so $(CURDIR)/tools/test.py --snapshot --no-build cctest mjsunit message arch=$(v8arch))
+	$(exp-relax-check)$(if $(filter nocheck,$(DEB_BUILD_OPTIONS)),,LD_PRELOAD=$(CURDIR)/libv8-$(SONAME).so $(CURDIR)/tools/test.py --snapshot --no-build cctest mjsunit message arch=$(v8arch))
 
 common-install-impl::
 	cd debian/tmp/usr/lib/ ; \
