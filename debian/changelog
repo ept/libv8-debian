@@ -1,9 +1,17 @@
-libv8 (2.5.9.16-1) UNRELEASED; urgency=low
+libv8 (2.5.9.16-1) unstable; urgency=low
 
   * New upstream release.
-  * Adds architecture : armhf. (Closes: #596997) 
 
- -- Jérémy Lal <kapouer@melix.org>  Mon, 14 Feb 2011 16:29:13 +0100
+  [ Jérémy Lal ]
+  * Add architecture armhf.
+    Closes: #596997
+
+  [ Jonas Smedegaard ]
+  * Rewrite copyright file using draft svn166 of DEP5 format.
+  * Supress copyright-checking a few binary files, to not upset
+    dpkg-source.
+
+ -- Jonas Smedegaard <dr@jones.dk>  Thu, 24 Feb 2011 16:51:54 +0100
 
 libv8 (2.5.9.15-2) unstable; urgency=low
 
