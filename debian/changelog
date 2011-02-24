@@ -1,10 +1,18 @@
-libv8 (3.0.12.23-1) UNRELEASED; urgency=low
+libv8 (3.0.12.23-1) experimental; urgency=low
 
+  [ Jérémy Lal ]
   * New upstream release.
   * Adds architecture : armhf. (Closes: #596997)
   * Include new headers in libv8-dev.
+  * Relax regression checking to not cause build to fail.
 
- -- Jérémy Lal <kapouer@melix.org>  Sat, 12 Feb 2011 11:07:34 +0100
+  [ Jonas Smedegaard ]
+  * Rewrite copyright file using draft svn166 of DEP5 format.
+  * Suppress copyright-checking a few binary files, to not upset
+    dpkg-source.
+  * Only relax regression checking when targeted experimental.
+
+ -- Jonas Smedegaard <dr@jones.dk>  Thu, 24 Feb 2011 14:51:27 +0100
 
 libv8 (2.5.9.15-2) unstable; urgency=low
 
