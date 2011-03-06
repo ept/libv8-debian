@@ -418,9 +418,11 @@ class VirtualFrame: public ZoneObject {
   void EmitPush(Immediate immediate,
                 TypeInfo info = TypeInfo::Unknown());
 
+  inline bool ConstantPoolOverflowed();
+
   // Push an element on the virtual frame.
+  void Push(Handle<Object> value);
   inline void Push(Register reg, TypeInfo info = TypeInfo::Unknown());
-  inline void Push(Handle<Object> value);
   inline void Push(Smi* value);
 
   void PushUntaggedElement(Handle<Object> value);

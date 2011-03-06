@@ -1298,6 +1298,7 @@ void VirtualFrame::EmitPush(Immediate immediate, TypeInfo info) {
 
 
 void VirtualFrame::PushUntaggedElement(Handle<Object> value) {
+  ASSERT(!ConstantPoolOverflowed());
   elements_.Add(FrameElement::ConstantElement(value, FrameElement::NOT_SYNCED));
   elements_[element_count() - 1].set_untagged_int32(true);
 }
@@ -1325,6 +1326,20 @@ void VirtualFrame::Push(Expression* expr) {
     }
   }
   UNREACHABLE();
+}
+
+
+void VirtualFrame::Push(Handle<Object> value) {
+  if (ConstantPoolOverflowed()) {
+    Result temp = cgen()->allocator()->Allocate();
+    ASSERT(temp.is_valid());
+    __ Set(temp.reg(), Immediate(value));
+    Push(&temp);
+  } else {
+    FrameElement element =
+        FrameElement::ConstantElement(value, FrameElement::NOT_SYNCED);
+    elements_.Add(element);
+  }
 }
 
 
