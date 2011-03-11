@@ -1,0 +1,44 @@
+Source: libv8
+Priority: optional
+Maintainer: Debian Javascript Maintainers <pkg-javascript-devel@lists.alioth.debian.org>
+Uploaders: Jérémy Lal <kapouer@melix.org>,
+ Jonas Smedegaard <dr@jones.dk>
+Build-Depends: debhelper (>= 7), pkg-config, scons, cdbs (>= 0.4.73)
+Standards-Version: 3.9.1
+Section: libs
+Homepage: http://code.google.com/p/v8/
+DM-Upload-Allowed: yes
+Vcs-Browser: http://git.debian.org/?p=collab-maint/libv8.git
+Vcs-Git: git://git.debian.org/git/collab-maint/libv8.git
+
+Package: libv8-dev
+Section: libdevel
+Architecture: i386 amd64 armel armhf
+Depends: __LIBPKGNAME__ (= ${binary:Version}), ${misc:Depends}
+Description: Development files for the V8 JavaScript Engine
+ V8 is Google's open source, high performance JavaScript engine. It is written
+ in C++ and is used in Google Chrome, Google's open source browser.
+ .
+ Install this package if you wish to develop your own programs using the
+ V8 JavaScript Engine
+
+Package: __LIBPKGNAME__
+Architecture: i386 amd64 armel armhf
+Depends: ${shlibs:Depends}, ${misc:Depends}
+Description: V8 JavaScript Engine
+ V8 is Google's open source, high performance JavaScript engine. It is written
+ in C++ and is used in Google Chrome, Google's open source browser.
+ .
+ This package includes the dynamic library against which you can link your
+ program.
+
+Package: libv8-dbg
+Priority: extra
+Section: debug
+Architecture: i386 amd64 armel armhf
+Depends: __LIBPKGNAME__ (= ${binary:Version}), ${misc:Depends}
+Description: Debugging symbols for the V8 JavaScript Engine
+ V8 is Google's open source, high performance JavaScript engine. It is written
+ in C++ and is used in Google Chrome, Google's open source browser.
+ .
+ This package provides the debugging symbols for the library.
