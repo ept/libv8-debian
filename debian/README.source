@@ -20,24 +20,23 @@ git-import-orig --pristine-tar ../import/libv8-$VERSION.tar.gz
 To update to a new version:
 =====
 
-1) edit debian/libv8-$VERSION.install and replace any occurrence of $VERSION
-with the new version; additionally rename the file with the new version
+1) edit debian/patches/0001-enable_soname.patch and define the correct SONAME
 
-2) edit debian/rules and replace the SONAME variables with the new version
-
-3) edit debian/patches/0001-enable_soname.patch and define the correct SONAME
-
-4) edit debian/control and remove any reference to the old version by updating
-it with the new version
-
-5) if this is a new v8 branch, don't forget to update debian/watch
+2) generate debian/control.in and debian/control :
+   DEB_MAINTAINER_MODE=1 ./debian/rules debian/control
+   
+3) if this is a new v8 branch, don't forget to update debian/watch
 
 
 gbp.conf and branched versions
 =====
 
-v8 stable versions (upstream /branches/), are maintained in git-buildpackage :
-debian-branch : x.y/master
-upstream-branch : x.y/upstream
-For each of these versions, a debian/gbp.conf file is setup to make sure
-gbp uses the right git branches.
+v8 stable versions (upstream /branches/), are maintained in git-buildpackage,
+and are mapped to :
+
+* (master, upstream) for unstable releases, passing all tests on all archs;
+* (master-experimental, upstream-experimental) for latest upstream branch releases,
+  tests are disabled because some might fail.
+* (master-stable, upstream-stable) for libv8 in debian/stable.
+
+debian/gbp.conf is configured for each debian branch.
