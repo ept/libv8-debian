@@ -20,12 +20,10 @@ git-import-orig --pristine-tar ../import/libv8-$VERSION.tar.gz
 To update to a new version:
 =====
 
-1) edit debian/patches/0001-enable_soname.patch and define the correct SONAME
-
-2) generate debian/control.in and debian/control :
+1) generate debian/control.in and debian/control :
    DEB_MAINTAINER_MODE=1 ./debian/rules debian/control
    
-3) if this is a new v8 branch, don't forget to update debian/watch
+2) if this is a new v8 branch, don't forget to update debian/watch
 
 
 gbp.conf and branched versions
