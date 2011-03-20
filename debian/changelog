@@ -5,7 +5,11 @@ libv8 (3.0.12.35-1) UNRELEASED; urgency=low
   [ Jonas Smedegaard ]
   * Let CDBS auto-resolve build-dependencies and library package name.
 
- -- Jonas Smedegaard <dr@jones.dk>  Fri, 11 Mar 2011 19:12:38 +0100
+  [ Jérémy Lal ]
+  * Use DEB_SCONS_ENVVARS to define SONAME, removing the need for the
+    soname patch, and allowing builds with gold linker. 
+
+ -- Jérémy Lal <kapouer@melix.org>  Sun, 20 Mar 2011 16:28:55 +0100
 
 libv8 (3.0.12.23-1) experimental; urgency=low
 
