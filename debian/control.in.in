@@ -3,7 +3,7 @@ Priority: optional
 Maintainer: Debian Javascript Maintainers <pkg-javascript-devel@lists.alioth.debian.org>
 Uploaders: Jérémy Lal <kapouer@melix.org>,
  Jonas Smedegaard <dr@jones.dk>
-Build-Depends: debhelper (>= 7), pkg-config, scons, cdbs (>= 0.4.73)
+Build-Depends: @cdbs@
 Standards-Version: 3.9.1
 Section: libs
 Homepage: http://code.google.com/p/v8/
