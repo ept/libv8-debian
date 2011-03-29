@@ -1,3 +1,20 @@
+libv8 (2.5.9.21-1) unstable; urgency=low
+
+  * New upstream release.
+
+  [ Jérémy Lal ]
+  * Relax regression checking to not cause build to fail.
+  * Use DEB_SCONS_ENVVARS to define SONAME, removing the need for the
+    soname patch, and allowing builds with gold linker. 
+
+  [ Jonas Smedegaard ]
+  * Only relax regression checking when targeted experimental.
+  * Let CDBS auto-resolve build-dependencies and library package name.
+  * Fix tighten build-dependencies on cdbs and debhelper.
+  * Build-depend on dh-buildinfo.
+
+ -- Jonas Smedegaard <dr@jones.dk>  Tue, 29 Mar 2011 12:41:52 +0200
+
 libv8 (2.5.9.16-1) unstable; urgency=low
 
   * New upstream release.

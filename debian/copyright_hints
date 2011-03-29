@@ -1097,6 +1097,8 @@ Files: AUTHORS
  debian/README.source
  debian/compat
  debian/control
+ debian/control.in
+ debian/control.in.in
  debian/gbp.conf
  debian/libv8-2.5.9.16.install
  debian/libv8-dev.dirs
