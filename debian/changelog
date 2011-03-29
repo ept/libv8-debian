@@ -1,4 +1,4 @@
-libv8 (3.0.12.35-1) UNRELEASED; urgency=low
+libv8 (3.0.12.35-1) experimental; urgency=low
 
   * New upstream release.
 
@@ -9,7 +9,7 @@ libv8 (3.0.12.35-1) UNRELEASED; urgency=low
   * Use DEB_SCONS_ENVVARS to define SONAME, removing the need for the
     soname patch, and allowing builds with gold linker. 
 
- -- Jérémy Lal <kapouer@melix.org>  Sun, 20 Mar 2011 16:28:55 +0100
+ -- Jonas Smedegaard <dr@jones.dk>  Tue, 29 Mar 2011 10:58:36 +0200
 
 libv8 (3.0.12.23-1) experimental; urgency=low
 
