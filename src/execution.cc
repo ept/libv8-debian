@@ -33,8 +33,10 @@
 #include "bootstrapper.h"
 #include "codegen-inl.h"
 #include "debug.h"
+#include "runtime-profiler.h"
 #include "simulator.h"
 #include "v8threads.h"
+#include "vm-state-inl.h"
 
 namespace v8 {
 namespace internal {
@@ -104,6 +106,11 @@ static Handle<Object> Invoke(bool construct,
   ASSERT(*has_pending_exception == Top::has_pending_exception());
   if (*has_pending_exception) {
     Top::ReportPendingMessages();
+    if (Top::pending_exception() == Failure::OutOfMemoryException()) {
+      if (!HandleScopeImplementer::instance()->ignore_out_of_memory()) {
+        V8::FatalProcessOutOfMemory("JS", true);
+      }
+    }
     return Handle<Object>();
   } else {
     Top::clear_pending_message();
@@ -295,6 +302,25 @@ void StackGuard::TerminateExecution() {
 }
 
 
+bool StackGuard::IsRuntimeProfilerTick() {
+  ExecutionAccess access;
+  return thread_local_.interrupt_flags_ & RUNTIME_PROFILER_TICK;
+}
+
+
+void StackGuard::RequestRuntimeProfilerTick() {
+  // Ignore calls if we're not optimizing or if we can't get the lock.
+  if (FLAG_opt && ExecutionAccess::TryLock()) {
+    thread_local_.interrupt_flags_ |= RUNTIME_PROFILER_TICK;
+    if (thread_local_.postpone_interrupts_nesting_ == 0) {
+      thread_local_.jslimit_ = thread_local_.climit_ = kInterruptLimit;
+      Heap::SetStackLimits();
+    }
+    ExecutionAccess::Unlock();
+  }
+}
+
+
 #ifdef ENABLE_DEBUGGER_SUPPORT
 bool StackGuard::IsDebugBreak() {
   ExecutionAccess access;
@@ -382,6 +408,7 @@ void StackGuard::ThreadLocal::Initialize() {
   if (real_climit_ == kIllegalLimit) {
     // Takes the address of the limit variable in order to find out where
     // the top of stack is right now.
+    const uintptr_t kLimitSize = FLAG_stack_size * KB;
     uintptr_t limit = reinterpret_cast<uintptr_t>(&limit) - kLimitSize;
     ASSERT(reinterpret_cast<uintptr_t>(&limit) > kLimitSize);
     real_jslimit_ = SimulatorStack::JsLimitFromCLimit(limit);
@@ -682,6 +709,12 @@ void Execution::ProcessDebugMesssages(bool debug_command_only) {
 #endif
 
 MaybeObject* Execution::HandleStackGuardInterrupt() {
+  Counters::stack_interrupts.Increment();
+  if (StackGuard::IsRuntimeProfilerTick()) {
+    Counters::runtime_profiler_ticks.Increment();
+    StackGuard::Continue(RUNTIME_PROFILER_TICK);
+    RuntimeProfiler::OptimizeNow();
+  }
 #ifdef ENABLE_DEBUGGER_SUPPORT
   if (StackGuard::IsDebugBreak() || StackGuard::IsDebugCommand()) {
     DebugBreakHelper();
@@ -693,7 +726,6 @@ MaybeObject* Execution::HandleStackGuardInterrupt() {
     return Top::TerminateExecution();
   }
   if (StackGuard::IsInterrupted()) {
-    // interrupt
     StackGuard::Continue(INTERRUPT);
     return Top::StackOverflow();
   }

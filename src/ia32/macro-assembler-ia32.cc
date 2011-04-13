@@ -1,4 +1,4 @@
-// Copyright 2006-2009 the V8 project authors. All rights reserved.
+// Copyright 2011 the V8 project authors. All rights reserved.
 // Redistribution and use in source and binary forms, with or without
 // modification, are permitted provided that the following conditions are
 // met:
@@ -74,42 +74,13 @@ void MacroAssembler::RecordWriteHelper(Register object,
 }
 
 
-void MacroAssembler::InNewSpace(Register object,
-                                Register scratch,
-                                Condition cc,
-                                Label* branch) {
-  ASSERT(cc == equal || cc == not_equal);
-  if (Serializer::enabled()) {
-    // Can't do arithmetic on external references if it might get serialized.
-    mov(scratch, Operand(object));
-    // The mask isn't really an address.  We load it as an external reference in
-    // case the size of the new space is different between the snapshot maker
-    // and the running system.
-    and_(Operand(scratch), Immediate(ExternalReference::new_space_mask()));
-    cmp(Operand(scratch), Immediate(ExternalReference::new_space_start()));
-    j(cc, branch);
-  } else {
-    int32_t new_space_start = reinterpret_cast<int32_t>(
-        ExternalReference::new_space_start().address());
-    lea(scratch, Operand(object, -new_space_start));
-    and_(scratch, Heap::NewSpaceMask());
-    j(cc, branch);
-  }
-}
-
-
 void MacroAssembler::RecordWrite(Register object,
                                  int offset,
                                  Register value,
                                  Register scratch) {
-  // The compiled code assumes that record write doesn't change the
-  // context register, so we check that none of the clobbered
-  // registers are esi.
-  ASSERT(!object.is(esi) && !value.is(esi) && !scratch.is(esi));
-
   // First, check if a write barrier is even needed. The tests below
   // catch stores of Smis and stores into young gen.
-  Label done;
+  NearLabel done;
 
   // Skip barrier if writing a smi.
   ASSERT_EQ(0, kSmiTag);
@@ -153,11 +124,6 @@ void MacroAssembler::RecordWrite(Register object,
 void MacroAssembler::RecordWrite(Register object,
                                  Register address,
                                  Register value) {
-  // The compiled code assumes that record write doesn't change the
-  // context register, so we check that none of the clobbered
-  // registers are esi.
-  ASSERT(!object.is(esi) && !value.is(esi) && !address.is(esi));
-
   // First, check if a write barrier is even needed. The tests below
   // catch stores of Smis and stores into young gen.
   Label done;
@@ -180,13 +146,6 @@ void MacroAssembler::RecordWrite(Register object,
     mov(address, Immediate(BitCast<int32_t>(kZapValue)));
     mov(value, Immediate(BitCast<int32_t>(kZapValue)));
   }
-}
-
-
-void MacroAssembler::StackLimitCheck(Label* on_stack_overflow) {
-  cmp(esp,
-      Operand::StaticVariable(ExternalReference::address_of_stack_limit()));
-  j(below, on_stack_overflow);
 }
 
 
@@ -364,9 +323,20 @@ void MacroAssembler::EnterExitFramePrologue() {
 }
 
 
-void MacroAssembler::EnterExitFrameEpilogue(int argc) {
-  // Reserve space for arguments.
-  sub(Operand(esp), Immediate(argc * kPointerSize));
+void MacroAssembler::EnterExitFrameEpilogue(int argc, bool save_doubles) {
+  // Optionally save all XMM registers.
+  if (save_doubles) {
+    CpuFeatures::Scope scope(SSE2);
+    int space = XMMRegister::kNumRegisters * kDoubleSize + argc * kPointerSize;
+    sub(Operand(esp), Immediate(space));
+    const int offset = -2 * kPointerSize;
+    for (int i = 0; i < XMMRegister::kNumRegisters; i++) {
+      XMMRegister reg = XMMRegister::from_code(i);
+      movdbl(Operand(ebp, offset - ((i + 1) * kDoubleSize)), reg);
+    }
+  } else {
+    sub(Operand(esp), Immediate(argc * kPointerSize));
+  }
 
   // Get the required frame alignment for the OS.
   static const int kFrameAlignment = OS::ActivationFrameAlignment();
@@ -380,7 +350,7 @@ void MacroAssembler::EnterExitFrameEpilogue(int argc) {
 }
 
 
-void MacroAssembler::EnterExitFrame() {
+void MacroAssembler::EnterExitFrame(bool save_doubles) {
   EnterExitFramePrologue();
 
   // Setup argc and argv in callee-saved registers.
@@ -388,17 +358,27 @@ void MacroAssembler::EnterExitFrame() {
   mov(edi, Operand(eax));
   lea(esi, Operand(ebp, eax, times_4, offset));
 
-  EnterExitFrameEpilogue(2);
+  EnterExitFrameEpilogue(2, save_doubles);
 }
 
 
 void MacroAssembler::EnterApiExitFrame(int argc) {
   EnterExitFramePrologue();
-  EnterExitFrameEpilogue(argc);
+  EnterExitFrameEpilogue(argc, false);
 }
 
 
-void MacroAssembler::LeaveExitFrame() {
+void MacroAssembler::LeaveExitFrame(bool save_doubles) {
+  // Optionally restore all XMM registers.
+  if (save_doubles) {
+    CpuFeatures::Scope scope(SSE2);
+    const int offset = -2 * kPointerSize;
+    for (int i = 0; i < XMMRegister::kNumRegisters; i++) {
+      XMMRegister reg = XMMRegister::from_code(i);
+      movdbl(reg, Operand(ebp, offset - ((i + 1) * kDoubleSize)));
+    }
+  }
+
   // Get the return address from the stack and restore the frame pointer.
   mov(ecx, Operand(ebp, 1 * kPointerSize));
   mov(ebp, Operand(ebp, 0 * kPointerSize));
@@ -465,6 +445,97 @@ void MacroAssembler::PopTryHandler() {
   ASSERT_EQ(0, StackHandlerConstants::kNextOffset);
   pop(Operand::StaticVariable(ExternalReference(Top::k_handler_address)));
   add(Operand(esp), Immediate(StackHandlerConstants::kSize - kPointerSize));
+}
+
+
+void MacroAssembler::Throw(Register value) {
+  // Adjust this code if not the case.
+  STATIC_ASSERT(StackHandlerConstants::kSize == 4 * kPointerSize);
+
+  // eax must hold the exception.
+  if (!value.is(eax)) {
+    mov(eax, value);
+  }
+
+  // Drop the sp to the top of the handler.
+  ExternalReference handler_address(Top::k_handler_address);
+  mov(esp, Operand::StaticVariable(handler_address));
+
+  // Restore next handler and frame pointer, discard handler state.
+  STATIC_ASSERT(StackHandlerConstants::kNextOffset == 0);
+  pop(Operand::StaticVariable(handler_address));
+  STATIC_ASSERT(StackHandlerConstants::kFPOffset == 1 * kPointerSize);
+  pop(ebp);
+  pop(edx);  // Remove state.
+
+  // Before returning we restore the context from the frame pointer if
+  // not NULL.  The frame pointer is NULL in the exception handler of
+  // a JS entry frame.
+  Set(esi, Immediate(0));  // Tentatively set context pointer to NULL.
+  NearLabel skip;
+  cmp(ebp, 0);
+  j(equal, &skip, not_taken);
+  mov(esi, Operand(ebp, StandardFrameConstants::kContextOffset));
+  bind(&skip);
+
+  STATIC_ASSERT(StackHandlerConstants::kPCOffset == 3 * kPointerSize);
+  ret(0);
+}
+
+
+void MacroAssembler::ThrowUncatchable(UncatchableExceptionType type,
+                                      Register value) {
+  // Adjust this code if not the case.
+  STATIC_ASSERT(StackHandlerConstants::kSize == 4 * kPointerSize);
+
+  // eax must hold the exception.
+  if (!value.is(eax)) {
+    mov(eax, value);
+  }
+
+  // Drop sp to the top stack handler.
+  ExternalReference handler_address(Top::k_handler_address);
+  mov(esp, Operand::StaticVariable(handler_address));
+
+  // Unwind the handlers until the ENTRY handler is found.
+  NearLabel loop, done;
+  bind(&loop);
+  // Load the type of the current stack handler.
+  const int kStateOffset = StackHandlerConstants::kStateOffset;
+  cmp(Operand(esp, kStateOffset), Immediate(StackHandler::ENTRY));
+  j(equal, &done);
+  // Fetch the next handler in the list.
+  const int kNextOffset = StackHandlerConstants::kNextOffset;
+  mov(esp, Operand(esp, kNextOffset));
+  jmp(&loop);
+  bind(&done);
+
+  // Set the top handler address to next handler past the current ENTRY handler.
+  STATIC_ASSERT(StackHandlerConstants::kNextOffset == 0);
+  pop(Operand::StaticVariable(handler_address));
+
+  if (type == OUT_OF_MEMORY) {
+    // Set external caught exception to false.
+    ExternalReference external_caught(Top::k_external_caught_exception_address);
+    mov(eax, false);
+    mov(Operand::StaticVariable(external_caught), eax);
+
+    // Set pending exception and eax to out of memory exception.
+    ExternalReference pending_exception(Top::k_pending_exception_address);
+    mov(eax, reinterpret_cast<int32_t>(Failure::OutOfMemoryException()));
+    mov(Operand::StaticVariable(pending_exception), eax);
+  }
+
+  // Clear the context pointer.
+  Set(esi, Immediate(0));
+
+  // Restore fp from handler and discard handler state.
+  STATIC_ASSERT(StackHandlerConstants::kFPOffset == 1 * kPointerSize);
+  pop(ebp);
+  pop(edx);  // State.
+
+  STATIC_ASSERT(StackHandlerConstants::kPCOffset == 3 * kPointerSize);
+  ret(0);
 }
 
 
@@ -614,11 +685,11 @@ void MacroAssembler::AllocateInNewSpace(int object_size,
   ExternalReference new_space_allocation_limit =
       ExternalReference::new_space_allocation_limit_address();
 
-  if (top_reg.is(result)) {
-    add(Operand(top_reg), Immediate(object_size));
-  } else {
-    lea(top_reg, Operand(result, object_size));
+  if (!top_reg.is(result)) {
+    mov(top_reg, result);
   }
+  add(Operand(top_reg), Immediate(object_size));
+  j(carry, gc_required, not_taken);
   cmp(top_reg, Operand::StaticVariable(new_space_allocation_limit));
   j(above, gc_required, not_taken);
 
@@ -667,7 +738,12 @@ void MacroAssembler::AllocateInNewSpace(int header_size,
   // Calculate new top and bail out if new space is exhausted.
   ExternalReference new_space_allocation_limit =
       ExternalReference::new_space_allocation_limit_address();
-  lea(result_end, Operand(result, element_count, element_size, header_size));
+
+  // We assume that element_count*element_size + header_size does not
+  // overflow.
+  lea(result_end, Operand(element_count, element_size, header_size));
+  add(result_end, Operand(result));
+  j(carry, gc_required);
   cmp(result_end, Operand::StaticVariable(new_space_allocation_limit));
   j(above, gc_required);
 
@@ -712,6 +788,7 @@ void MacroAssembler::AllocateInNewSpace(Register object_size,
     mov(result_end, object_size);
   }
   add(result_end, Operand(result));
+  j(carry, gc_required, not_taken);
   cmp(result_end, Operand::StaticVariable(new_space_allocation_limit));
   j(above, gc_required, not_taken);
 
@@ -887,55 +964,53 @@ void MacroAssembler::AllocateAsciiConsString(Register result,
       Immediate(Factory::cons_ascii_string_map()));
 }
 
-// All registers must be distinct.  Only current_string needs valid contents
-// on entry.  All registers may be invalid on exit.  result_operand is
-// unchanged, padding_chars is updated correctly.
-void MacroAssembler::AppendStringToTopOfNewSpace(
-    Register current_string,  // Tagged pointer to string to copy.
-    Register current_string_length,
-    Register result_pos,
-    Register scratch,
-    Register new_padding_chars,
-    Operand operand_result,
-    Operand operand_padding_chars,
-    Label* bailout) {
-  mov(current_string_length,
-      FieldOperand(current_string, String::kLengthOffset));
-  shr(current_string_length, 1);
-  sub(current_string_length, operand_padding_chars);
-  mov(new_padding_chars, current_string_length);
-  add(Operand(current_string_length), Immediate(kObjectAlignmentMask));
-  and_(Operand(current_string_length), Immediate(~kObjectAlignmentMask));
-  sub(new_padding_chars, Operand(current_string_length));
-  neg(new_padding_chars);
-  // We need an allocation even if current_string_length is 0, to fetch
-  // result_pos.  Consider using a faster fetch of result_pos in that case.
-  AllocateInNewSpace(current_string_length, result_pos, scratch, no_reg,
-                     bailout, NO_ALLOCATION_FLAGS);
-  sub(result_pos, operand_padding_chars);
-  mov(operand_padding_chars, new_padding_chars);
 
-  Register scratch_2 = new_padding_chars;  // Used to compute total length.
-  // Copy string to the end of result.
-  mov(current_string_length,
-      FieldOperand(current_string, String::kLengthOffset));
-  mov(scratch, operand_result);
-  mov(scratch_2, current_string_length);
-  add(scratch_2, FieldOperand(scratch, String::kLengthOffset));
-  mov(FieldOperand(scratch, String::kLengthOffset), scratch_2);
-  shr(current_string_length, 1);
-  lea(current_string,
-      FieldOperand(current_string, SeqAsciiString::kHeaderSize));
-  // Loop condition: while (--current_string_length >= 0).
-  Label copy_loop;
-  Label copy_loop_entry;
-  jmp(&copy_loop_entry);
-  bind(&copy_loop);
-  mov_b(scratch, Operand(current_string, current_string_length, times_1, 0));
-  mov_b(Operand(result_pos, current_string_length, times_1, 0), scratch);
-  bind(&copy_loop_entry);
-  sub(Operand(current_string_length), Immediate(1));
-  j(greater_equal, &copy_loop);
+// Copy memory, byte-by-byte, from source to destination.  Not optimized for
+// long or aligned copies.  The contents of scratch and length are destroyed.
+// Source and destination are incremented by length.
+// Many variants of movsb, loop unrolling, word moves, and indexed operands
+// have been tried here already, and this is fastest.
+// A simpler loop is faster on small copies, but 30% slower on large ones.
+// The cld() instruction must have been emitted, to set the direction flag(),
+// before calling this function.
+void MacroAssembler::CopyBytes(Register source,
+                               Register destination,
+                               Register length,
+                               Register scratch) {
+  Label loop, done, short_string, short_loop;
+  // Experimentation shows that the short string loop is faster if length < 10.
+  cmp(Operand(length), Immediate(10));
+  j(less_equal, &short_string);
+
+  ASSERT(source.is(esi));
+  ASSERT(destination.is(edi));
+  ASSERT(length.is(ecx));
+
+  // Because source is 4-byte aligned in our uses of this function,
+  // we keep source aligned for the rep_movs call by copying the odd bytes
+  // at the end of the ranges.
+  mov(scratch, Operand(source, length, times_1, -4));
+  mov(Operand(destination, length, times_1, -4), scratch);
+  mov(scratch, ecx);
+  shr(ecx, 2);
+  rep_movs();
+  and_(Operand(scratch), Immediate(0x3));
+  add(destination, Operand(scratch));
+  jmp(&done);
+
+  bind(&short_string);
+  test(length, Operand(length));
+  j(zero, &done);
+
+  bind(&short_loop);
+  mov_b(scratch, Operand(source, 0));
+  mov_b(Operand(destination, 0), scratch);
+  inc(source);
+  inc(destination);
+  dec(length);
+  j(not_zero, &short_loop);
+
+  bind(&done);
 }
 
 
@@ -1098,6 +1173,16 @@ void MacroAssembler::CallRuntime(Runtime::FunctionId id, int num_arguments) {
 }
 
 
+void MacroAssembler::CallRuntimeSaveDoubles(Runtime::FunctionId id) {
+  Runtime::Function* function = Runtime::FunctionForId(id);
+  Set(eax, Immediate(function->nargs));
+  mov(ebx, Immediate(ExternalReference(function)));
+  CEntryStub ces(1);
+  ces.SaveDoubles();
+  CallStub(&ces);
+}
+
+
 MaybeObject* MacroAssembler::TryCallRuntime(Runtime::FunctionId id,
                                             int num_arguments) {
   return TryCallRuntime(Runtime::FunctionForId(id), num_arguments);
@@ -1192,25 +1277,29 @@ MaybeObject* MacroAssembler::TryTailCallRuntime(Runtime::FunctionId fid,
 }
 
 
-// If true, a Handle<T> passed by value is passed and returned by
-// using the location_ field directly.  If false, it is passed and
-// returned as a pointer to a handle.
-#ifdef USING_BSD_ABI
-static const bool kPassHandlesDirectly = true;
+// If true, a Handle<T> returned by value from a function with cdecl calling
+// convention will be returned directly as a value of location_ field in a
+// register eax.
+// If false, it is returned as a pointer to a preallocated by caller memory
+// region. Pointer to this region should be passed to a function as an
+// implicit first argument.
+#if defined(USING_BSD_ABI) || defined(__MINGW32__) || defined(__CYGWIN__)
+static const bool kReturnHandlesDirectly = true;
 #else
-static const bool kPassHandlesDirectly = false;
+static const bool kReturnHandlesDirectly = false;
 #endif
 
 
 Operand ApiParameterOperand(int index) {
-  return Operand(esp, (index + (kPassHandlesDirectly ? 0 : 1)) * kPointerSize);
+  return Operand(
+      esp, (index + (kReturnHandlesDirectly ? 0 : 1)) * kPointerSize);
 }
 
 
 void MacroAssembler::PrepareCallApiFunction(int argc, Register scratch) {
-  if (kPassHandlesDirectly) {
+  if (kReturnHandlesDirectly) {
     EnterApiExitFrame(argc);
-    // When handles as passed directly we don't have to allocate extra
+    // When handles are returned directly we don't have to allocate extra
     // space for and pass an out parameter.
   } else {
     // We allocate two additional slots: return value and pointer to it.
@@ -1255,7 +1344,7 @@ MaybeObject* MacroAssembler::TryCallApiFunctionAndReturn(ApiFunction* function,
   // Call the api function!
   call(function->address(), RelocInfo::RUNTIME_ENTRY);
 
-  if (!kPassHandlesDirectly) {
+  if (!kReturnHandlesDirectly) {
     // The returned value is a pointer to the handle holding the result.
     // Dereference this to get to the location.
     mov(eax, Operand(eax, 0));
@@ -1286,7 +1375,7 @@ MaybeObject* MacroAssembler::TryCallApiFunctionAndReturn(ApiFunction* function,
   ExternalReference scheduled_exception_address =
       ExternalReference::scheduled_exception_address();
   cmp(Operand::StaticVariable(scheduled_exception_address),
-         Immediate(Factory::the_hole_value()));
+      Immediate(Factory::the_hole_value()));
   j(not_equal, &promote_scheduled_exception, not_taken);
   LeaveApiExitFrame();
   ret(stack_space * kPointerSize);
@@ -1336,7 +1425,8 @@ void MacroAssembler::InvokePrologue(const ParameterCount& expected,
                                     Handle<Code> code_constant,
                                     const Operand& code_operand,
                                     Label* done,
-                                    InvokeFlag flag) {
+                                    InvokeFlag flag,
+                                    PostCallGenerator* post_call_generator) {
   bool definitely_matches = false;
   Label invoke;
   if (expected.is_immediate()) {
@@ -1387,6 +1477,7 @@ void MacroAssembler::InvokePrologue(const ParameterCount& expected,
 
     if (flag == CALL_FUNCTION) {
       call(adaptor, RelocInfo::CODE_TARGET);
+      if (post_call_generator != NULL) post_call_generator->Generate();
       jmp(done);
     } else {
       jmp(adaptor, RelocInfo::CODE_TARGET);
@@ -1399,11 +1490,14 @@ void MacroAssembler::InvokePrologue(const ParameterCount& expected,
 void MacroAssembler::InvokeCode(const Operand& code,
                                 const ParameterCount& expected,
                                 const ParameterCount& actual,
-                                InvokeFlag flag) {
+                                InvokeFlag flag,
+                                PostCallGenerator* post_call_generator) {
   Label done;
-  InvokePrologue(expected, actual, Handle<Code>::null(), code, &done, flag);
+  InvokePrologue(expected, actual, Handle<Code>::null(), code,
+                 &done, flag, post_call_generator);
   if (flag == CALL_FUNCTION) {
     call(code);
+    if (post_call_generator != NULL) post_call_generator->Generate();
   } else {
     ASSERT(flag == JUMP_FUNCTION);
     jmp(code);
@@ -1416,12 +1510,15 @@ void MacroAssembler::InvokeCode(Handle<Code> code,
                                 const ParameterCount& expected,
                                 const ParameterCount& actual,
                                 RelocInfo::Mode rmode,
-                                InvokeFlag flag) {
+                                InvokeFlag flag,
+                                PostCallGenerator* post_call_generator) {
   Label done;
   Operand dummy(eax);
-  InvokePrologue(expected, actual, code, dummy, &done, flag);
+  InvokePrologue(expected, actual, code, dummy, &done,
+                 flag, post_call_generator);
   if (flag == CALL_FUNCTION) {
     call(code, rmode);
+    if (post_call_generator != NULL) post_call_generator->Generate();
   } else {
     ASSERT(flag == JUMP_FUNCTION);
     jmp(code, rmode);
@@ -1432,7 +1529,8 @@ void MacroAssembler::InvokeCode(Handle<Code> code,
 
 void MacroAssembler::InvokeFunction(Register fun,
                                     const ParameterCount& actual,
-                                    InvokeFlag flag) {
+                                    InvokeFlag flag,
+                                    PostCallGenerator* post_call_generator) {
   ASSERT(fun.is(edi));
   mov(edx, FieldOperand(edi, JSFunction::kSharedFunctionInfoOffset));
   mov(esi, FieldOperand(edi, JSFunction::kContextOffset));
@@ -1441,25 +1539,37 @@ void MacroAssembler::InvokeFunction(Register fun,
 
   ParameterCount expected(ebx);
   InvokeCode(FieldOperand(edi, JSFunction::kCodeEntryOffset),
-             expected, actual, flag);
+             expected, actual, flag, post_call_generator);
 }
 
 
 void MacroAssembler::InvokeFunction(JSFunction* function,
                                     const ParameterCount& actual,
-                                    InvokeFlag flag) {
+                                    InvokeFlag flag,
+                                    PostCallGenerator* post_call_generator) {
   ASSERT(function->is_compiled());
   // Get the function and setup the context.
   mov(edi, Immediate(Handle<JSFunction>(function)));
   mov(esi, FieldOperand(edi, JSFunction::kContextOffset));
-  // Invoke the cached code.
-  Handle<Code> code(function->code());
+
   ParameterCount expected(function->shared()->formal_parameter_count());
-  InvokeCode(code, expected, actual, RelocInfo::CODE_TARGET, flag);
+  if (V8::UseCrankshaft()) {
+    // TODO(kasperl): For now, we always call indirectly through the
+    // code field in the function to allow recompilation to take effect
+    // without changing any of the call sites.
+    InvokeCode(FieldOperand(edi, JSFunction::kCodeEntryOffset),
+               expected, actual, flag, post_call_generator);
+  } else {
+    Handle<Code> code(function->code());
+    InvokeCode(code, expected, actual, RelocInfo::CODE_TARGET,
+               flag, post_call_generator);
+  }
 }
 
 
-void MacroAssembler::InvokeBuiltin(Builtins::JavaScript id, InvokeFlag flag) {
+void MacroAssembler::InvokeBuiltin(Builtins::JavaScript id,
+                                   InvokeFlag flag,
+                                   PostCallGenerator* post_call_generator) {
   // Calls are not allowed in some stubs.
   ASSERT(flag == JUMP_FUNCTION || allow_stub_calls());
 
@@ -1469,7 +1579,7 @@ void MacroAssembler::InvokeBuiltin(Builtins::JavaScript id, InvokeFlag flag) {
   ParameterCount expected(0);
   GetBuiltinFunction(edi, id);
   InvokeCode(FieldOperand(edi, JSFunction::kCodeEntryOffset),
-           expected, expected, flag);
+             expected, expected, flag, post_call_generator);
 }
 
 void MacroAssembler::GetBuiltinFunction(Register target,
@@ -1500,11 +1610,21 @@ void MacroAssembler::LoadContext(Register dst, int context_chain_length) {
       mov(dst, Operand(dst, Context::SlotOffset(Context::CLOSURE_INDEX)));
       mov(dst, FieldOperand(dst, JSFunction::kContextOffset));
     }
-    // The context may be an intermediate context, not a function context.
-    mov(dst, Operand(dst, Context::SlotOffset(Context::FCONTEXT_INDEX)));
-  } else {  // Slot is in the current function context.
-    // The context may be an intermediate context, not a function context.
-    mov(dst, Operand(esi, Context::SlotOffset(Context::FCONTEXT_INDEX)));
+  } else {
+    // Slot is in the current function context.  Move it into the
+    // destination register in case we store into it (the write barrier
+    // cannot be allowed to destroy the context in esi).
+    mov(dst, esi);
+  }
+
+  // We should not have found a 'with' context by walking the context chain
+  // (i.e., the static scope chain and runtime context chain do not agree).
+  // A variable occurring in such a scope should have slot type LOOKUP and
+  // not CONTEXT.
+  if (FLAG_debug_code) {
+    cmp(dst, Operand(dst, Context::SlotOffset(Context::FCONTEXT_INDEX)));
+    Check(equal, "Yo dawg, I heard you liked function contexts "
+                 "so I put function contexts in all your contexts");
   }
 }
 
@@ -1534,9 +1654,54 @@ void MacroAssembler::LoadGlobalFunctionInitialMap(Register function,
 }
 
 
+// Store the value in register src in the safepoint register stack
+// slot for register dst.
+void MacroAssembler::StoreToSafepointRegisterSlot(Register dst, Register src) {
+  mov(SafepointRegisterSlot(dst), src);
+}
+
+
+void MacroAssembler::StoreToSafepointRegisterSlot(Register dst, Immediate src) {
+  mov(SafepointRegisterSlot(dst), src);
+}
+
+
+void MacroAssembler::LoadFromSafepointRegisterSlot(Register dst, Register src) {
+  mov(dst, SafepointRegisterSlot(src));
+}
+
+
+Operand MacroAssembler::SafepointRegisterSlot(Register reg) {
+  return Operand(esp, SafepointRegisterStackIndex(reg.code()) * kPointerSize);
+}
+
+
+int MacroAssembler::SafepointRegisterStackIndex(int reg_code) {
+  // The registers are pushed starting with the lowest encoding,
+  // which means that lowest encodings are furthest away from
+  // the stack pointer.
+  ASSERT(reg_code >= 0 && reg_code < kNumSafepointRegisters);
+  return kNumSafepointRegisters - reg_code - 1;
+}
+
+
 void MacroAssembler::Ret() {
   ret(0);
 }
+
+
+void MacroAssembler::Ret(int bytes_dropped, Register scratch) {
+  if (is_uint16(bytes_dropped)) {
+    ret(bytes_dropped);
+  } else {
+    pop(scratch);
+    add(Operand(esp), Immediate(bytes_dropped));
+    push(scratch);
+    ret(0);
+  }
+}
+
+
 
 
 void MacroAssembler::Drop(int stack_elements) {
@@ -1681,7 +1846,7 @@ void MacroAssembler::Abort(const char* msg) {
   }
 #endif
   // Disable stub call restrictions to always allow calls to abort.
-  set_allow_stub_calls(true);
+  AllowStubCallsScope allow_scope(this, true);
 
   push(eax);
   push(Immediate(p0));
