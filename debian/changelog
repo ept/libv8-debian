@@ -1,3 +1,9 @@
+libv8 (3.1.8.10-1) unstable; urgency=low
+
+  * New upstream release. 
+
+ -- Jérémy Lal <kapouer@melix.org>  Wed, 13 Apr 2011 10:06:23 +0200
+
 libv8 (2.5.9.21-1) unstable; urgency=low
 
   * New upstream release.
