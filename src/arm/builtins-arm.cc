@@ -1,4 +1,4 @@
-// Copyright 2006-2009 the V8 project authors. All rights reserved.
+// Copyright 2010 the V8 project authors. All rights reserved.
 // Redistribution and use in source and binary forms, with or without
 // modification, are permitted provided that the following conditions are
 // met:
@@ -31,6 +31,8 @@
 
 #include "codegen-inl.h"
 #include "debug.h"
+#include "deoptimizer.h"
+#include "full-codegen.h"
 #include "runtime.h"
 
 namespace v8 {
@@ -188,7 +190,7 @@ static void AllocateJSArray(MacroAssembler* masm,
 
   // Check whether an empty sized array is requested.
   __ tst(array_size, array_size);
-  __ b(nz, &not_empty);
+  __ b(ne, &not_empty);
 
   // If an empty array is requested allocate a small elements array anyway. This
   // keeps the code below free of special casing for the empty array.
@@ -500,7 +502,7 @@ void Builtins::Generate_StringConstructCode(MacroAssembler* masm) {
 
   // Load the first arguments in r0 and get rid of the rest.
   Label no_arguments;
-  __ cmp(r0, Operand(0));
+  __ cmp(r0, Operand(0, RelocInfo::NONE));
   __ b(eq, &no_arguments);
   // First args = sp[(argc - 1) * 4].
   __ sub(r0, r0, Operand(1));
@@ -544,7 +546,7 @@ void Builtins::Generate_StringConstructCode(MacroAssembler* masm) {
     __ cmp(r4, Operand(JSValue::kSize >> kPointerSizeLog2));
     __ Assert(eq, "Unexpected string wrapper instance size");
     __ ldrb(r4, FieldMemOperand(map, Map::kUnusedPropertyFieldsOffset));
-    __ cmp(r4, Operand(0));
+    __ cmp(r4, Operand(0, RelocInfo::NONE));
     __ Assert(eq, "Unexpected unused properties of string wrapper");
   }
   __ str(map, FieldMemOperand(r0, HeapObject::kMapOffset));
@@ -564,7 +566,7 @@ void Builtins::Generate_StringConstructCode(MacroAssembler* masm) {
   // if it's a string already before calling the conversion builtin.
   Label convert_argument;
   __ bind(&not_cached);
-  __ BranchOnSmi(r0, &convert_argument);
+  __ JumpIfSmi(r0, &convert_argument);
 
   // Is it a String?
   __ ldr(r2, FieldMemOperand(r0, HeapObject::kMapOffset));
@@ -664,7 +666,7 @@ static void Generate_JSConstructStubHelper(MacroAssembler* masm,
     __ mov(r2, Operand(debug_step_in_fp));
     __ ldr(r2, MemOperand(r2));
     __ tst(r2, r2);
-    __ b(nz, &rt_call);
+    __ b(ne, &rt_call);
 #endif
 
     // Load the initial map and verify that it is in fact a map.
@@ -1089,6 +1091,116 @@ void Builtins::Generate_LazyCompile(MacroAssembler* masm) {
 }
 
 
+void Builtins::Generate_LazyRecompile(MacroAssembler* masm) {
+  // Enter an internal frame.
+  __ EnterInternalFrame();
+
+  // Preserve the function.
+  __ push(r1);
+
+  // Push the function on the stack as the argument to the runtime function.
+  __ push(r1);
+  __ CallRuntime(Runtime::kLazyRecompile, 1);
+  // Calculate the entry point.
+  __ add(r2, r0, Operand(Code::kHeaderSize - kHeapObjectTag));
+  // Restore saved function.
+  __ pop(r1);
+
+  // Tear down temporary frame.
+  __ LeaveInternalFrame();
+
+  // Do a tail-call of the compiled function.
+  __ Jump(r2);
+}
+
+
+static void Generate_NotifyDeoptimizedHelper(MacroAssembler* masm,
+                                             Deoptimizer::BailoutType type) {
+  __ EnterInternalFrame();
+  // Pass the function and deoptimization type to the runtime system.
+  __ mov(r0, Operand(Smi::FromInt(static_cast<int>(type))));
+  __ push(r0);
+  __ CallRuntime(Runtime::kNotifyDeoptimized, 1);
+  __ LeaveInternalFrame();
+
+  // Get the full codegen state from the stack and untag it -> r6.
+  __ ldr(r6, MemOperand(sp, 0 * kPointerSize));
+  __ SmiUntag(r6);
+  // Switch on the state.
+  Label with_tos_register, unknown_state;
+  __ cmp(r6, Operand(FullCodeGenerator::NO_REGISTERS));
+  __ b(ne, &with_tos_register);
+  __ add(sp, sp, Operand(1 * kPointerSize));  // Remove state.
+  __ Ret();
+
+  __ bind(&with_tos_register);
+  __ ldr(r0, MemOperand(sp, 1 * kPointerSize));
+  __ cmp(r6, Operand(FullCodeGenerator::TOS_REG));
+  __ b(ne, &unknown_state);
+  __ add(sp, sp, Operand(2 * kPointerSize));  // Remove state.
+  __ Ret();
+
+  __ bind(&unknown_state);
+  __ stop("no cases left");
+}
+
+
+void Builtins::Generate_NotifyDeoptimized(MacroAssembler* masm) {
+  Generate_NotifyDeoptimizedHelper(masm, Deoptimizer::EAGER);
+}
+
+
+void Builtins::Generate_NotifyLazyDeoptimized(MacroAssembler* masm) {
+  Generate_NotifyDeoptimizedHelper(masm, Deoptimizer::LAZY);
+}
+
+
+void Builtins::Generate_NotifyOSR(MacroAssembler* masm) {
+  // For now, we are relying on the fact that Runtime::NotifyOSR
+  // doesn't do any garbage collection which allows us to save/restore
+  // the registers without worrying about which of them contain
+  // pointers. This seems a bit fragile.
+  __ stm(db_w, sp, kJSCallerSaved | kCalleeSaved | lr.bit() | fp.bit());
+  __ EnterInternalFrame();
+  __ CallRuntime(Runtime::kNotifyOSR, 0);
+  __ LeaveInternalFrame();
+  __ ldm(ia_w, sp, kJSCallerSaved | kCalleeSaved | lr.bit() | fp.bit());
+  __ Ret();
+}
+
+
+void Builtins::Generate_OnStackReplacement(MacroAssembler* masm) {
+  // Probe the CPU to set the supported features, because this builtin
+  // may be called before the initialization performs CPU setup.
+  CpuFeatures::Probe(false);
+
+  // Lookup the function in the JavaScript frame and push it as an
+  // argument to the on-stack replacement function.
+  __ ldr(r0, MemOperand(fp, JavaScriptFrameConstants::kFunctionOffset));
+  __ EnterInternalFrame();
+  __ push(r0);
+  __ CallRuntime(Runtime::kCompileForOnStackReplacement, 1);
+  __ LeaveInternalFrame();
+
+  // If the result was -1 it means that we couldn't optimize the
+  // function. Just return and continue in the unoptimized version.
+  Label skip;
+  __ cmp(r0, Operand(Smi::FromInt(-1)));
+  __ b(ne, &skip);
+  __ Ret();
+
+  __ bind(&skip);
+  // Untag the AST id and push it on the stack.
+  __ SmiUntag(r0);
+  __ push(r0);
+
+  // Generate the code for doing the frame-to-frame translation using
+  // the deoptimizer infrastructure.
+  Deoptimizer::EntryGenerator generator(masm, Deoptimizer::OSR);
+  generator.Generate();
+}
+
+
 void Builtins::Generate_FunctionCall(MacroAssembler* masm) {
   // 1. Make sure we have at least one argument.
   // r0: actual number of arguments
@@ -1119,6 +1231,14 @@ void Builtins::Generate_FunctionCall(MacroAssembler* masm) {
     // Change context eagerly in case we need the global receiver.
     __ ldr(cp, FieldMemOperand(r1, JSFunction::kContextOffset));
 
+    // Do not transform the receiver for strict mode functions.
+    __ ldr(r2, FieldMemOperand(r1, JSFunction::kSharedFunctionInfoOffset));
+    __ ldr(r2, FieldMemOperand(r2, SharedFunctionInfo::kCompilerHintsOffset));
+    __ tst(r2, Operand(1 << (SharedFunctionInfo::kStrictModeFunction +
+                             kSmiTagSize)));
+    __ b(ne, &shift_arguments);
+
+    // Compute the receiver in non-strict mode.
     __ add(r2, sp, Operand(r0, LSL, kPointerSizeLog2));
     __ ldr(r2, MemOperand(r2, -kPointerSize));
     // r0: actual number of arguments
@@ -1282,10 +1402,20 @@ void Builtins::Generate_FunctionApply(MacroAssembler* masm) {
   // Change context eagerly to get the right global object if necessary.
   __ ldr(r0, MemOperand(fp, kFunctionOffset));
   __ ldr(cp, FieldMemOperand(r0, JSFunction::kContextOffset));
+  // Load the shared function info while the function is still in r0.
+  __ ldr(r1, FieldMemOperand(r0, JSFunction::kSharedFunctionInfoOffset));
 
   // Compute the receiver.
   Label call_to_object, use_global_receiver, push_receiver;
   __ ldr(r0, MemOperand(fp, kRecvOffset));
+
+  // Do not transform the receiver for strict mode functions.
+  __ ldr(r1, FieldMemOperand(r1, SharedFunctionInfo::kCompilerHintsOffset));
+  __ tst(r1, Operand(1 << (SharedFunctionInfo::kStrictModeFunction +
+                           kSmiTagSize)));
+  __ b(ne, &push_receiver);
+
+  // Compute the receiver in non-strict mode.
   __ tst(r0, Operand(kSmiTagMask));
   __ b(eq, &call_to_object);
   __ LoadRoot(r1, Heap::kNullValueRootIndex);

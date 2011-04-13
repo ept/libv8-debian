@@ -35,13 +35,16 @@
 #include "debug.h"
 #include "heap-profiler.h"
 #include "global-handles.h"
+#include "liveobjectlist-inl.h"
 #include "mark-compact.h"
 #include "natives.h"
 #include "objects-visiting.h"
+#include "runtime-profiler.h"
 #include "scanner-base.h"
 #include "scopeinfo.h"
 #include "snapshot.h"
 #include "v8threads.h"
+#include "vm-state-inl.h"
 #if V8_TARGET_ARCH_ARM && !V8_INTERPRETED_REGEXP
 #include "regexp-macro-assembler.h"
 #include "arm/regexp-macro-assembler-arm.h"
@@ -131,7 +134,7 @@ Heap::HeapState Heap::gc_state_ = NOT_IN_GC;
 
 int Heap::mc_count_ = 0;
 int Heap::ms_count_ = 0;
-int Heap::gc_count_ = 0;
+unsigned int Heap::gc_count_ = 0;
 
 GCTracer* Heap::tracer_ = NULL;
 
@@ -398,6 +401,8 @@ void Heap::GarbageCollectionPrologue() {
 #if defined(DEBUG) || defined(ENABLE_LOGGING_AND_PROFILING)
   ReportStatisticsBeforeGC();
 #endif
+
+  LiveObjectList::GCPrologue();
 }
 
 intptr_t Heap::SizeOfObjects() {
@@ -410,6 +415,7 @@ intptr_t Heap::SizeOfObjects() {
 }
 
 void Heap::GarbageCollectionEpilogue() {
+  LiveObjectList::GCEpilogue();
 #ifdef DEBUG
   allow_allocation(true);
   ZapFromSpace();
@@ -509,7 +515,6 @@ bool Heap::CollectGarbage(AllocationSpace space, GarbageCollector collector) {
 
 #ifdef ENABLE_LOGGING_AND_PROFILING
   if (FLAG_log_gc) HeapProfiler::WriteSample();
-  if (CpuProfiler::is_profiling()) CpuProfiler::ProcessMovedFunctions();
 #endif
 
   return next_gc_likely_to_collect_more;
@@ -1054,6 +1059,9 @@ void Heap::Scavenge() {
   UpdateNewSpaceReferencesInExternalStringTable(
       &UpdateNewSpaceReferenceInExternalStringTableEntry);
 
+  LiveObjectList::UpdateReferencesForScavengeGC();
+  RuntimeProfiler::UpdateSamplesAfterScavenge();
+
   ASSERT(new_space_front == new_space_.top());
 
   // Set age mark.
@@ -1116,6 +1124,40 @@ void Heap::UpdateNewSpaceReferencesInExternalStringTable(
 }
 
 
+static Object* ProcessFunctionWeakReferences(Object* function,
+                                             WeakObjectRetainer* retainer) {
+  Object* head = Heap::undefined_value();
+  JSFunction* tail = NULL;
+  Object* candidate = function;
+  while (!candidate->IsUndefined()) {
+    // Check whether to keep the candidate in the list.
+    JSFunction* candidate_function = reinterpret_cast<JSFunction*>(candidate);
+    Object* retain = retainer->RetainAs(candidate);
+    if (retain != NULL) {
+      if (head->IsUndefined()) {
+        // First element in the list.
+        head = candidate_function;
+      } else {
+        // Subsequent elements in the list.
+        ASSERT(tail != NULL);
+        tail->set_next_function_link(candidate_function);
+      }
+      // Retained function is new tail.
+      tail = candidate_function;
+    }
+    // Move to next element in the list.
+    candidate = candidate_function->next_function_link();
+  }
+
+  // Terminate the list if there is one or more elements.
+  if (tail != NULL) {
+    tail->set_next_function_link(Heap::undefined_value());
+  }
+
+  return head;
+}
+
+
 void Heap::ProcessWeakReferences(WeakObjectRetainer* retainer) {
   Object* head = undefined_value();
   Context* tail = NULL;
@@ -1137,6 +1179,15 @@ void Heap::ProcessWeakReferences(WeakObjectRetainer* retainer) {
       }
       // Retained context is new tail.
       tail = candidate_context;
+
+      // Process the weak list of optimized functions for the context.
+      Object* function_list_head =
+          ProcessFunctionWeakReferences(
+              candidate_context->get(Context::OPTIMIZED_FUNCTIONS_LIST),
+              retainer);
+      candidate_context->set_unchecked(Context::OPTIMIZED_FUNCTIONS_LIST,
+                                       function_list_head,
+                                       UPDATE_WRITE_BARRIER);
     }
     // Move to next element in the list.
     candidate = candidate_context->get(Context::NEXT_CONTEXT_LINK);
@@ -1289,9 +1340,8 @@ class ScavengingVisitor : public StaticVisitorBase {
     HEAP_PROFILE(ObjectMoveEvent(source->address(), target->address()));
 #if defined(ENABLE_LOGGING_AND_PROFILING)
     if (Logger::is_logging() || CpuProfiler::is_profiling()) {
-      if (target->IsJSFunction()) {
-        PROFILE(FunctionMoveEvent(source->address(), target->address()));
-        PROFILE(FunctionCreateEventFromMove(JSFunction::cast(target)));
+      if (target->IsSharedFunctionInfo()) {
+        PROFILE(SFIMoveEvent(source->address(), target->address()));
       }
     }
 #endif
@@ -1651,6 +1701,11 @@ bool Heap::CreateInitialMaps() {
   }
   set_byte_array_map(Map::cast(obj));
 
+  { MaybeObject* maybe_obj = AllocateByteArray(0, TENURED);
+    if (!maybe_obj->ToObject(&obj)) return false;
+  }
+  set_empty_byte_array(ByteArray::cast(obj));
+
   { MaybeObject* maybe_obj =
         AllocateMap(PIXEL_ARRAY_TYPE, PixelArray::kAlignedSize);
     if (!maybe_obj->ToObject(&obj)) return false;
@@ -1759,6 +1814,12 @@ bool Heap::CreateInitialMaps() {
     if (!maybe_obj->ToObject(&obj)) return false;
   }
   set_shared_function_info_map(Map::cast(obj));
+
+  { MaybeObject* maybe_obj = AllocateMap(JS_MESSAGE_OBJECT_TYPE,
+                                         JSMessageObject::kSize);
+    if (!maybe_obj->ToObject(&obj)) return false;
+  }
+  set_message_object_map(Map::cast(obj));
 
   ASSERT(!Heap::InNewSpace(Heap::empty_fixed_array()));
   return true;
@@ -1871,6 +1932,14 @@ void Heap::CreateJSConstructEntryStub() {
 }
 
 
+#if V8_TARGET_ARCH_ARM
+void Heap::CreateDirectCEntryStub() {
+  DirectCEntryStub stub;
+  set_direct_c_entry_code(*stub.GetCode());
+}
+#endif
+
+
 void Heap::CreateFixedStubs() {
   // Here we create roots for fixed stubs. They are needed at GC
   // for cooking and uncooking (check out frames.cc).
@@ -1890,6 +1959,9 @@ void Heap::CreateFixedStubs() {
   Heap::CreateJSConstructEntryStub();
 #if V8_TARGET_ARCH_ARM && !V8_INTERPRETED_REGEXP
   Heap::CreateRegExpCEntryStub();
+#endif
+#if V8_TARGET_ARCH_ARM
+  Heap::CreateDirectCEntryStub();
 #endif
 }
 
@@ -1950,6 +2022,12 @@ bool Heap::CreateInitialObjects() {
     if (!maybe_obj->ToObject(&obj)) return false;
   }
   set_the_hole_value(obj);
+
+  { MaybeObject* maybe_obj = CreateOddball("arguments_marker",
+                                           Smi::FromInt(-4));
+    if (!maybe_obj->ToObject(&obj)) return false;
+  }
+  set_arguments_marker(obj);
 
   { MaybeObject* maybe_obj =
         CreateOddball("no_interceptor_result_sentinel", Smi::FromInt(-2));
@@ -2245,14 +2323,42 @@ MaybeObject* Heap::AllocateSharedFunctionInfo(Object* name) {
   share->set_debug_info(undefined_value());
   share->set_inferred_name(empty_string());
   share->set_compiler_hints(0);
+  share->set_deopt_counter(Smi::FromInt(FLAG_deopt_every_n_times));
   share->set_initial_map(undefined_value());
   share->set_this_property_assignments_count(0);
   share->set_this_property_assignments(undefined_value());
+  share->set_opt_count(0);
   share->set_num_literals(0);
   share->set_end_position(0);
   share->set_function_token_position(0);
   return result;
 }
+
+
+MaybeObject* Heap::AllocateJSMessageObject(String* type,
+                                           JSArray* arguments,
+                                           int start_position,
+                                           int end_position,
+                                           Object* script,
+                                           Object* stack_trace,
+                                           Object* stack_frames) {
+  Object* result;
+  { MaybeObject* maybe_result = Allocate(message_object_map(), NEW_SPACE);
+    if (!maybe_result->ToObject(&result)) return maybe_result;
+  }
+  JSMessageObject* message = JSMessageObject::cast(result);
+  message->set_properties(Heap::empty_fixed_array());
+  message->set_elements(Heap::empty_fixed_array());
+  message->set_type(type);
+  message->set_arguments(arguments);
+  message->set_start_position(start_position);
+  message->set_end_position(end_position);
+  message->set_script(script);
+  message->set_stack_trace(stack_trace);
+  message->set_stack_frames(stack_frames);
+  return result;
+}
+
 
 
 // Returns true for a character in a range.  Both limits are inclusive.
@@ -2487,20 +2593,10 @@ MaybeObject* Heap::AllocateExternalStringFromTwoByte(
   }
 
   // For small strings we check whether the resource contains only
-  // ascii characters.  If yes, we use a different string map.
-  bool is_ascii = true;
-  if (length >= static_cast<size_t>(String::kMinNonFlatLength)) {
-    is_ascii = false;
-  } else {
-    const uc16* data = resource->data();
-    for (size_t i = 0; i < length; i++) {
-      if (data[i] > String::kMaxAsciiCharCode) {
-        is_ascii = false;
-        break;
-      }
-    }
-  }
-
+  // ASCII characters.  If yes, we use a different string map.
+  static const size_t kAsciiCheckLengthLimit = 32;
+  bool is_ascii = length <= kAsciiCheckLengthLimit &&
+      String::IsAscii(resource->data(), static_cast<int>(length));
   Map* map = is_ascii ?
       Heap::external_string_with_ascii_data_map() : Heap::external_string_map();
   Object* result;
@@ -2666,6 +2762,10 @@ MaybeObject* Heap::CreateCode(const CodeDesc& desc,
   code->set_instruction_size(desc.instr_size);
   code->set_relocation_info(ByteArray::cast(reloc_info));
   code->set_flags(flags);
+  if (code->is_call_stub() || code->is_keyed_call_stub()) {
+    code->set_check_type(RECEIVER_MAP_CHECK);
+  }
+  code->set_deoptimization_data(empty_fixed_array());
   // Allow self references to created code object by patching the handle to
   // point to the newly allocated Code object.
   if (!self_reference.is_null()) {
@@ -2794,6 +2894,7 @@ MaybeObject* Heap::InitializeFunction(JSFunction* function,
   function->set_prototype_or_initial_map(prototype);
   function->set_context(undefined_value());
   function->set_literals(empty_fixed_array());
+  function->set_next_function_link(undefined_value());
   return function;
 }
 
@@ -2812,9 +2913,8 @@ MaybeObject* Heap::AllocateFunctionPrototype(JSFunction* function) {
   // constructor to the function.
   Object* result;
   { MaybeObject* maybe_result =
-        JSObject::cast(prototype)->SetProperty(constructor_symbol(),
-                                               function,
-                                               DONT_ENUM);
+        JSObject::cast(prototype)->SetLocalPropertyIgnoreAttributes(
+            constructor_symbol(), function, DONT_ENUM);
     if (!maybe_result->ToObject(&result)) return maybe_result;
   }
   return prototype;
@@ -3243,8 +3343,8 @@ MaybeObject* Heap::AllocateStringFromAscii(Vector<const char> string,
 }
 
 
-MaybeObject* Heap::AllocateStringFromUtf8(Vector<const char> string,
-                                          PretenureFlag pretenure) {
+MaybeObject* Heap::AllocateStringFromUtf8Slow(Vector<const char> string,
+                                              PretenureFlag pretenure) {
   // V8 only supports characters in the Basic Multilingual Plane.
   const uc32 kMaxSupportedChar = 0xFFFF;
   // Count the number of characters in the UTF-8 string and check if
@@ -3253,16 +3353,10 @@ MaybeObject* Heap::AllocateStringFromUtf8(Vector<const char> string,
       decoder(ScannerConstants::utf8_decoder());
   decoder->Reset(string.start(), string.length());
   int chars = 0;
-  bool is_ascii = true;
   while (decoder->has_more()) {
-    uc32 r = decoder->GetNext();
-    if (r > String::kMaxAsciiCharCode) is_ascii = false;
+    decoder->GetNext();
     chars++;
   }
-
-  // If the string is ascii, we do not need to convert the characters
-  // since UTF8 is backwards compatible with ascii.
-  if (is_ascii) return AllocateStringFromAscii(string, pretenure);
 
   Object* result;
   { MaybeObject* maybe_result = AllocateRawTwoByteString(chars, pretenure);
@@ -3284,11 +3378,8 @@ MaybeObject* Heap::AllocateStringFromUtf8(Vector<const char> string,
 MaybeObject* Heap::AllocateStringFromTwoByte(Vector<const uc16> string,
                                              PretenureFlag pretenure) {
   // Check if the string is an ASCII string.
-  int i = 0;
-  while (i < string.length() && string[i] <= String::kMaxAsciiCharCode) i++;
-
   MaybeObject* maybe_result;
-  if (i == string.length()) {  // It's an ASCII string.
+  if (String::IsAscii(string.start(), string.length())) {
     maybe_result = AllocateRawAsciiString(string.length(), pretenure);
   } else {  // It's not an ASCII string.
     maybe_result = AllocateRawTwoByteString(string.length(), pretenure);
@@ -3694,9 +3785,9 @@ bool Heap::IdleNotification() {
   static const int kIdlesBeforeMarkSweep = 7;
   static const int kIdlesBeforeMarkCompact = 8;
   static const int kMaxIdleCount = kIdlesBeforeMarkCompact + 1;
-  static const int kGCsBetweenCleanup = 4;
+  static const unsigned int kGCsBetweenCleanup = 4;
   static int number_idle_notifications = 0;
-  static int last_gc_count = gc_count_;
+  static unsigned int last_gc_count = gc_count_;
 
   bool uncommit = true;
   bool finished = false;
@@ -3705,7 +3796,7 @@ bool Heap::IdleNotification() {
   // GCs have taken place. This allows another round of cleanup based
   // on idle notifications if enough work has been carried out to
   // provoke a number of garbage collections.
-  if (gc_count_ < last_gc_count + kGCsBetweenCleanup) {
+  if (gc_count_ - last_gc_count < kGCsBetweenCleanup) {
     number_idle_notifications =
         Min(number_idle_notifications + 1, kMaxIdleCount);
   } else {
@@ -3968,6 +4059,36 @@ MaybeObject* Heap::LookupSymbol(Vector<const char> string) {
 }
 
 
+MaybeObject* Heap::LookupAsciiSymbol(Vector<const char> string) {
+  Object* symbol = NULL;
+  Object* new_table;
+  { MaybeObject* maybe_new_table =
+        symbol_table()->LookupAsciiSymbol(string, &symbol);
+    if (!maybe_new_table->ToObject(&new_table)) return maybe_new_table;
+  }
+  // Can't use set_symbol_table because SymbolTable::cast knows that
+  // SymbolTable is a singleton and checks for identity.
+  roots_[kSymbolTableRootIndex] = new_table;
+  ASSERT(symbol != NULL);
+  return symbol;
+}
+
+
+MaybeObject* Heap::LookupTwoByteSymbol(Vector<const uc16> string) {
+  Object* symbol = NULL;
+  Object* new_table;
+  { MaybeObject* maybe_new_table =
+        symbol_table()->LookupTwoByteSymbol(string, &symbol);
+    if (!maybe_new_table->ToObject(&new_table)) return maybe_new_table;
+  }
+  // Can't use set_symbol_table because SymbolTable::cast knows that
+  // SymbolTable is a singleton and checks for identity.
+  roots_[kSymbolTableRootIndex] = new_table;
+  ASSERT(symbol != NULL);
+  return symbol;
+}
+
+
 MaybeObject* Heap::LookupSymbol(String* string) {
   if (string->IsSymbol()) return string;
   Object* symbol = NULL;
@@ -3995,7 +4116,7 @@ bool Heap::LookupSymbolIfExists(String* string, String** symbol) {
 
 #ifdef DEBUG
 void Heap::ZapFromSpace() {
-  ASSERT(reinterpret_cast<Object*>(kFromSpaceZapValue)->IsHeapObject());
+  ASSERT(reinterpret_cast<Object*>(kFromSpaceZapValue)->IsFailure());
   for (Address a = new_space_.FromSpaceLow();
        a < new_space_.FromSpaceHigh();
        a += kPointerSize) {
@@ -4419,7 +4540,7 @@ void Heap::RecordStats(HeapStats* stats, bool take_snapshot) {
       MemoryAllocator::Size() + MemoryAllocator::Available();
   *stats->os_error = OS::GetLastError();
   if (take_snapshot) {
-    HeapIterator iterator(HeapIterator::kPreciseFiltering);
+    HeapIterator iterator(HeapIterator::kFilterFreeListNodes);
     for (HeapObject* obj = iterator.next();
          obj != NULL;
          obj = iterator.next()) {
@@ -4853,13 +4974,20 @@ ObjectIterator* SpaceIterator::CreateIterator() {
 }
 
 
-class FreeListNodesFilter {
+class HeapObjectsFilter {
+ public:
+  virtual ~HeapObjectsFilter() {}
+  virtual bool SkipObject(HeapObject* object) = 0;
+};
+
+
+class FreeListNodesFilter : public HeapObjectsFilter {
  public:
   FreeListNodesFilter() {
     MarkFreeListNodes();
   }
 
-  inline bool IsFreeListNode(HeapObject* object) {
+  bool SkipObject(HeapObject* object) {
     if (object->IsMarked()) {
       object->ClearMark();
       return true;
@@ -4891,6 +5019,65 @@ class FreeListNodesFilter {
 };
 
 
+class UnreachableObjectsFilter : public HeapObjectsFilter {
+ public:
+  UnreachableObjectsFilter() {
+    MarkUnreachableObjects();
+  }
+
+  bool SkipObject(HeapObject* object) {
+    if (object->IsMarked()) {
+      object->ClearMark();
+      return true;
+    } else {
+      return false;
+    }
+  }
+
+ private:
+  class UnmarkingVisitor : public ObjectVisitor {
+   public:
+    UnmarkingVisitor() : list_(10) {}
+
+    void VisitPointers(Object** start, Object** end) {
+      for (Object** p = start; p < end; p++) {
+        if (!(*p)->IsHeapObject()) continue;
+        HeapObject* obj = HeapObject::cast(*p);
+        if (obj->IsMarked()) {
+          obj->ClearMark();
+          list_.Add(obj);
+        }
+      }
+    }
+
+    bool can_process() { return !list_.is_empty(); }
+
+    void ProcessNext() {
+      HeapObject* obj = list_.RemoveLast();
+      obj->Iterate(this);
+    }
+
+   private:
+    List<HeapObject*> list_;
+  };
+
+  void MarkUnreachableObjects() {
+    HeapIterator iterator;
+    for (HeapObject* obj = iterator.next();
+         obj != NULL;
+         obj = iterator.next()) {
+      obj->SetMark();
+    }
+    UnmarkingVisitor visitor;
+    Heap::IterateRoots(&visitor, VISIT_ALL);
+    while (visitor.can_process())
+      visitor.ProcessNext();
+  }
+
+  AssertNoAllocation no_alloc;
+};
+
+
 HeapIterator::HeapIterator()
     : filtering_(HeapIterator::kNoFiltering),
       filter_(NULL) {
@@ -4898,7 +5085,7 @@ HeapIterator::HeapIterator()
 }
 
 
-HeapIterator::HeapIterator(HeapIterator::FreeListNodesFiltering filtering)
+HeapIterator::HeapIterator(HeapIterator::HeapObjectsFiltering filtering)
     : filtering_(filtering),
       filter_(NULL) {
   Init();
@@ -4912,12 +5099,17 @@ HeapIterator::~HeapIterator() {
 
 void HeapIterator::Init() {
   // Start the iteration.
-  if (filtering_ == kPreciseFiltering) {
-    filter_ = new FreeListNodesFilter;
-    space_iterator_ =
-        new SpaceIterator(MarkCompactCollector::SizeOfMarkedObject);
-  } else {
-    space_iterator_ = new SpaceIterator;
+  space_iterator_ = filtering_ == kNoFiltering ? new SpaceIterator :
+      new SpaceIterator(MarkCompactCollector::SizeOfMarkedObject);
+  switch (filtering_) {
+    case kFilterFreeListNodes:
+      filter_ = new FreeListNodesFilter;
+      break;
+    case kFilterUnreachable:
+      filter_ = new UnreachableObjectsFilter;
+      break;
+    default:
+      break;
   }
   object_iterator_ = space_iterator_->next();
 }
@@ -4925,9 +5117,9 @@ void HeapIterator::Init() {
 
 void HeapIterator::Shutdown() {
 #ifdef DEBUG
-  // Assert that in precise mode we have iterated through all
+  // Assert that in filtering mode we have iterated through all
   // objects. Otherwise, heap will be left in an inconsistent state.
-  if (filtering_ == kPreciseFiltering) {
+  if (filtering_ != kNoFiltering) {
     ASSERT(object_iterator_ == NULL);
   }
 #endif
@@ -4944,7 +5136,7 @@ HeapObject* HeapIterator::next() {
   if (filter_ == NULL) return NextObject();
 
   HeapObject* obj = NextObject();
-  while (obj != NULL && filter_->IsFreeListNode(obj)) obj = NextObject();
+  while (obj != NULL && filter_->SkipObject(obj)) obj = NextObject();
   return obj;
 }
 
@@ -4978,32 +5170,77 @@ void HeapIterator::reset() {
 }
 
 
-#ifdef DEBUG
+#if defined(DEBUG) || defined(LIVE_OBJECT_LIST)
 
-static bool search_for_any_global;
-static Object* search_target;
-static bool found_target;
-static List<Object*> object_stack(20);
+Object* const PathTracer::kAnyGlobalObject = reinterpret_cast<Object*>(NULL);
 
-
-// Tags 0, 1, and 3 are used. Use 2 for marking visited HeapObject.
-static const int kMarkTag = 2;
-
-static void MarkObjectRecursively(Object** p);
-class MarkObjectVisitor : public ObjectVisitor {
+class PathTracer::MarkVisitor: public ObjectVisitor {
  public:
+  explicit MarkVisitor(PathTracer* tracer) : tracer_(tracer) {}
   void VisitPointers(Object** start, Object** end) {
-    // Copy all HeapObject pointers in [start, end)
-    for (Object** p = start; p < end; p++) {
+    // Scan all HeapObject pointers in [start, end)
+    for (Object** p = start; !tracer_->found() && (p < end); p++) {
       if ((*p)->IsHeapObject())
-        MarkObjectRecursively(p);
+        tracer_->MarkRecursively(p, this);
     }
   }
+
+ private:
+  PathTracer* tracer_;
 };
 
-static MarkObjectVisitor mark_visitor;
 
-static void MarkObjectRecursively(Object** p) {
+class PathTracer::UnmarkVisitor: public ObjectVisitor {
+ public:
+  explicit UnmarkVisitor(PathTracer* tracer) : tracer_(tracer) {}
+  void VisitPointers(Object** start, Object** end) {
+    // Scan all HeapObject pointers in [start, end)
+    for (Object** p = start; p < end; p++) {
+      if ((*p)->IsHeapObject())
+        tracer_->UnmarkRecursively(p, this);
+    }
+  }
+
+ private:
+  PathTracer* tracer_;
+};
+
+
+void PathTracer::VisitPointers(Object** start, Object** end) {
+  bool done = ((what_to_find_ == FIND_FIRST) && found_target_);
+  // Visit all HeapObject pointers in [start, end)
+  for (Object** p = start; !done && (p < end); p++) {
+    if ((*p)->IsHeapObject()) {
+      TracePathFrom(p);
+      done = ((what_to_find_ == FIND_FIRST) && found_target_);
+    }
+  }
+}
+
+
+void PathTracer::Reset() {
+  found_target_ = false;
+  object_stack_.Clear();
+}
+
+
+void PathTracer::TracePathFrom(Object** root) {
+  ASSERT((search_target_ == kAnyGlobalObject) ||
+         search_target_->IsHeapObject());
+  found_target_in_trace_ = false;
+  object_stack_.Clear();
+
+  MarkVisitor mark_visitor(this);
+  MarkRecursively(root, &mark_visitor);
+
+  UnmarkVisitor unmark_visitor(this);
+  UnmarkRecursively(root, &unmark_visitor);
+
+  ProcessResults();
+}
+
+
+void PathTracer::MarkRecursively(Object** p, MarkVisitor* mark_visitor) {
   if (!(*p)->IsHeapObject()) return;
 
   HeapObject* obj = HeapObject::cast(*p);
@@ -5012,13 +5249,16 @@ static void MarkObjectRecursively(Object** p) {
 
   if (!map->IsHeapObject()) return;  // visited before
 
-  if (found_target) return;  // stop if target found
-  object_stack.Add(obj);
-  if ((search_for_any_global && obj->IsJSGlobalObject()) ||
-      (!search_for_any_global && (obj == search_target))) {
-    found_target = true;
+  if (found_target_in_trace_) return;  // stop if target found
+  object_stack_.Add(obj);
+  if (((search_target_ == kAnyGlobalObject) && obj->IsJSGlobalObject()) ||
+      (obj == search_target_)) {
+    found_target_in_trace_ = true;
+    found_target_ = true;
     return;
   }
+
+  bool is_global_context = obj->IsGlobalContext();
 
   // not visited yet
   Map* map_p = reinterpret_cast<Map*>(HeapObject::cast(map));
@@ -5027,31 +5267,30 @@ static void MarkObjectRecursively(Object** p) {
 
   obj->set_map(reinterpret_cast<Map*>(map_addr + kMarkTag));
 
-  MarkObjectRecursively(&map);
+  // Scan the object body.
+  if (is_global_context && (visit_mode_ == VISIT_ONLY_STRONG)) {
+    // This is specialized to scan Context's properly.
+    Object** start = reinterpret_cast<Object**>(obj->address() +
+                                                Context::kHeaderSize);
+    Object** end = reinterpret_cast<Object**>(obj->address() +
+        Context::kHeaderSize + Context::FIRST_WEAK_SLOT * kPointerSize);
+    mark_visitor->VisitPointers(start, end);
+  } else {
+    obj->IterateBody(map_p->instance_type(),
+                     obj->SizeFromMap(map_p),
+                     mark_visitor);
+  }
 
-  obj->IterateBody(map_p->instance_type(), obj->SizeFromMap(map_p),
-                   &mark_visitor);
+  // Scan the map after the body because the body is a lot more interesting
+  // when doing leak detection.
+  MarkRecursively(&map, mark_visitor);
 
-  if (!found_target)  // don't pop if found the target
-    object_stack.RemoveLast();
+  if (!found_target_in_trace_)  // don't pop if found the target
+    object_stack_.RemoveLast();
 }
 
 
-static void UnmarkObjectRecursively(Object** p);
-class UnmarkObjectVisitor : public ObjectVisitor {
- public:
-  void VisitPointers(Object** start, Object** end) {
-    // Copy all HeapObject pointers in [start, end)
-    for (Object** p = start; p < end; p++) {
-      if ((*p)->IsHeapObject())
-        UnmarkObjectRecursively(p);
-    }
-  }
-};
-
-static UnmarkObjectVisitor unmark_visitor;
-
-static void UnmarkObjectRecursively(Object** p) {
+void PathTracer::UnmarkRecursively(Object** p, UnmarkVisitor* unmark_visitor) {
   if (!(*p)->IsHeapObject()) return;
 
   HeapObject* obj = HeapObject::cast(*p);
@@ -5070,63 +5309,42 @@ static void UnmarkObjectRecursively(Object** p) {
 
   obj->set_map(reinterpret_cast<Map*>(map_p));
 
-  UnmarkObjectRecursively(reinterpret_cast<Object**>(&map_p));
+  UnmarkRecursively(reinterpret_cast<Object**>(&map_p), unmark_visitor);
 
   obj->IterateBody(Map::cast(map_p)->instance_type(),
                    obj->SizeFromMap(Map::cast(map_p)),
-                   &unmark_visitor);
+                   unmark_visitor);
 }
 
 
-static void MarkRootObjectRecursively(Object** root) {
-  if (search_for_any_global) {
-    ASSERT(search_target == NULL);
-  } else {
-    ASSERT(search_target->IsHeapObject());
-  }
-  found_target = false;
-  object_stack.Clear();
-
-  MarkObjectRecursively(root);
-  UnmarkObjectRecursively(root);
-
-  if (found_target) {
+void PathTracer::ProcessResults() {
+  if (found_target_) {
     PrintF("=====================================\n");
     PrintF("====        Path to object       ====\n");
     PrintF("=====================================\n\n");
 
-    ASSERT(!object_stack.is_empty());
-    for (int i = 0; i < object_stack.length(); i++) {
+    ASSERT(!object_stack_.is_empty());
+    for (int i = 0; i < object_stack_.length(); i++) {
       if (i > 0) PrintF("\n     |\n     |\n     V\n\n");
-      Object* obj = object_stack[i];
+      Object* obj = object_stack_[i];
+#ifdef OBJECT_PRINT
       obj->Print();
+#else
+      obj->ShortPrint();
+#endif
     }
     PrintF("=====================================\n");
   }
 }
+#endif  // DEBUG || LIVE_OBJECT_LIST
 
 
-// Helper class for visiting HeapObjects recursively.
-class MarkRootVisitor: public ObjectVisitor {
- public:
-  void VisitPointers(Object** start, Object** end) {
-    // Visit all HeapObject pointers in [start, end)
-    for (Object** p = start; p < end; p++) {
-      if ((*p)->IsHeapObject())
-        MarkRootObjectRecursively(p);
-    }
-  }
-};
-
-
+#ifdef DEBUG
 // Triggers a depth-first traversal of reachable objects from roots
 // and finds a path to a specific heap object and prints it.
 void Heap::TracePathToObject(Object* target) {
-  search_target = target;
-  search_for_any_global = false;
-
-  MarkRootVisitor root_visitor;
-  IterateRoots(&root_visitor, VISIT_ONLY_STRONG);
+  PathTracer tracer(target, PathTracer::FIND_ALL, VISIT_ALL);
+  IterateRoots(&tracer, VISIT_ONLY_STRONG);
 }
 
 
@@ -5134,11 +5352,10 @@ void Heap::TracePathToObject(Object* target) {
 // and finds a path to any global object and prints it. Useful for
 // determining the source for leaks of global objects.
 void Heap::TracePathToGlobal() {
-  search_target = NULL;
-  search_for_any_global = true;
-
-  MarkRootVisitor root_visitor;
-  IterateRoots(&root_visitor, VISIT_ONLY_STRONG);
+  PathTracer tracer(PathTracer::kAnyGlobalObject,
+                    PathTracer::FIND_ALL,
+                    VISIT_ALL);
+  IterateRoots(&tracer, VISIT_ONLY_STRONG);
 }
 #endif
 

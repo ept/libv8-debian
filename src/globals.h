@@ -28,6 +28,8 @@
 #ifndef V8_GLOBALS_H_
 #define V8_GLOBALS_H_
 
+#include "../include/v8stdint.h"
+
 namespace v8 {
 namespace internal {
 
@@ -147,13 +149,16 @@ typedef byte* Address;
 #ifdef _MSC_VER
 #define V8_UINT64_C(x)  (x ## UI64)
 #define V8_INT64_C(x)   (x ## I64)
+#define V8_INTPTR_C(x)  (x ## I64)
 #define V8_PTR_PREFIX "ll"
 #else  // _MSC_VER
 #define V8_UINT64_C(x)  (x ## UL)
 #define V8_INT64_C(x)   (x ## L)
+#define V8_INTPTR_C(x)  (x ## L)
 #define V8_PTR_PREFIX "l"
 #endif  // _MSC_VER
 #else  // V8_HOST_ARCH_64_BIT
+#define V8_INTPTR_C(x)  (x)
 #define V8_PTR_PREFIX ""
 #endif  // V8_HOST_ARCH_64_BIT
 
@@ -175,10 +180,6 @@ typedef byte* Address;
     defined(__FreeBSD__) || defined(__OpenBSD__)
 #define USING_BSD_ABI
 #endif
-
-// Code-point values in Unicode 4.0 are 21 bits wide.
-typedef uint16_t uc16;
-typedef int32_t uc32;
 
 // -----------------------------------------------------------------------------
 // Constants
@@ -222,6 +223,16 @@ const int kBinary32MaxExponent  = 0xFE;
 const int kBinary32MinExponent  = 0x01;
 const int kBinary32MantissaBits = 23;
 const int kBinary32ExponentShift = 23;
+
+// ASCII/UC16 constants
+// Code-point values in Unicode 4.0 are 21 bits wide.
+typedef uint16_t uc16;
+typedef int32_t uc32;
+const int kASCIISize    = kCharSize;
+const int kUC16Size     = sizeof(uc16);      // NOLINT
+const uc32 kMaxAsciiCharCode = 0x7f;
+const uint32_t kMaxAsciiCharCodeU = 0x7fu;
+
 
 // The expression OFFSET_OF(type, field) computes the byte-offset
 // of the specified field relative to the containing type. This

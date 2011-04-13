@@ -29,12 +29,15 @@
 
 #include "bootstrapper.h"
 #include "debug.h"
+#include "deoptimizer.h"
+#include "heap-profiler.h"
+#include "hydrogen.h"
+#include "lithium-allocator.h"
+#include "log.h"
+#include "runtime-profiler.h"
 #include "serialize.h"
 #include "simulator.h"
 #include "stub-cache.h"
-#include "heap-profiler.h"
-#include "oprofile-agent.h"
-#include "log.h"
 
 namespace v8 {
 namespace internal {
@@ -43,6 +46,7 @@ bool V8::is_running_ = false;
 bool V8::has_been_setup_ = false;
 bool V8::has_been_disposed_ = false;
 bool V8::has_fatal_error_ = false;
+bool V8::use_crankshaft_ = true;
 
 
 bool V8::Initialize(Deserializer* des) {
@@ -50,6 +54,14 @@ bool V8::Initialize(Deserializer* des) {
   if (has_been_disposed_ || has_fatal_error_) return false;
   if (IsRunning()) return true;
 
+#if defined(V8_TARGET_ARCH_ARM) && !defined(USE_ARM_EABI)
+  use_crankshaft_ = false;
+#else
+  use_crankshaft_ = FLAG_crankshaft;
+#endif
+
+  // Peephole optimization might interfere with deoptimization.
+  FLAG_peephole_optimization = !use_crankshaft_;
   is_running_ = true;
   has_been_setup_ = true;
   has_fatal_error_ = false;
@@ -71,7 +83,7 @@ bool V8::Initialize(Deserializer* des) {
   // Initialize other runtime facilities
 #if defined(USE_SIMULATOR)
 #if defined(V8_TARGET_ARCH_ARM)
-  ::assembler::arm::Simulator::Initialize();
+  Simulator::Initialize();
 #elif defined(V8_TARGET_ARCH_MIPS)
   ::assembler::mips::Simulator::Initialize();
 #endif
@@ -121,7 +133,9 @@ bool V8::Initialize(Deserializer* des) {
   // objects in place for creating the code object used for probing.
   CPU::Setup();
 
-  OProfileAgent::Initialize();
+  Deoptimizer::Setup();
+  LAllocator::Setup();
+  RuntimeProfiler::Setup();
 
   // If we are deserializing, log non-function code objects and compiled
   // functions found in the snapshot.
@@ -144,7 +158,12 @@ void V8::SetFatalError() {
 void V8::TearDown() {
   if (!has_been_setup_ || has_been_disposed_) return;
 
-  OProfileAgent::TearDown();
+  if (FLAG_time_hydrogen) HStatistics::Instance()->Print();
+
+  // We must stop the logger before we tear down other components.
+  Logger::EnsureTickerStopped();
+
+  Deoptimizer::TearDown();
 
   if (FLAG_preemption) {
     v8::Locker locker;
@@ -157,12 +176,11 @@ void V8::TearDown() {
   Top::TearDown();
 
   HeapProfiler::TearDown();
-
   CpuProfiler::TearDown();
-
-  Heap::TearDown();
+  RuntimeProfiler::TearDown();
 
   Logger::TearDown();
+  Heap::TearDown();
 
   is_running_ = false;
   has_been_disposed_ = true;
