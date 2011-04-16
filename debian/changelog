@@ -1,8 +1,13 @@
-libv8 (3.1.8.10-1) UNRELEASED; urgency=low
+libv8 (3.1.8.10-1) unstable; urgency=low
 
+  [ Jérémy Lal ]
   * New upstream release. 
 
- -- Jérémy Lal <kapouer@melix.org>  Wed, 13 Apr 2011 10:06:23 +0200
+  [ Jonas Smedegaard ]
+  * Bump policy compliance to standards-version 3.9.2.
+  * Bump copyright file format to draft 174 of DEP-5.
+
+ -- Jonas Smedegaard <dr@jones.dk>  Sat, 16 Apr 2011 12:59:59 +0200
 
 libv8 (2.5.9.21-1) unstable; urgency=low
 
