@@ -1,3 +1,11 @@
+libv8 (3.1.8.10-2) unstable; urgency=low
+
+  * Temporarily allow some tests to fail on armel builds.
+    Closes: bug#623449.
+  * Turn on verbose output when running tests. 
+
+ -- Jérémy Lal <kapouer@melix.org>  Fri, 22 Apr 2011 16:51:10 +0200
+
 libv8 (3.1.8.10-1) unstable; urgency=low
 
   [ Jérémy Lal ]
