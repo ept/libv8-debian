@@ -24,7 +24,6 @@ License: BSD-3-clause
 Files: src/third-party/valgrind/valgrind.h
 Copyright: 2000-2007, Julian Seward
 License: BSD-4-clause
- FIXME
 
 Files: test/mjsunit/third_party/regexp-pcre.js
 Copyright: 1997-2007, University of Cambridge
