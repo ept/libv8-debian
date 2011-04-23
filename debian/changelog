@@ -1,3 +1,10 @@
+libv8 (3.1.8.10-4) UNRELEASED; urgency=low
+
+  * Revert "Temporarily allow some tests to fail on armel builds."
+    This is covered by disabling cctests. 
+
+ -- Jérémy Lal <kapouer@melix.org>  Sat, 23 Apr 2011 18:36:40 +0200
+
 libv8 (3.1.8.10-3) unstable; urgency=low
 
   * Disable cctests : they fail from time to time and are meant
