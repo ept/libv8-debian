@@ -1,3 +1,11 @@
+libv8 (3.1.8.10-3) unstable; urgency=low
+
+  * Disable cctests : they fail from time to time and are meant
+    to be used for upstream development purposes. Only javascript
+    tests are run.
+
+ -- Jérémy Lal <kapouer@melix.org>  Sat, 23 Apr 2011 13:47:42 +0200
+
 libv8 (3.1.8.10-2) unstable; urgency=low
 
   * Temporarily allow some tests to fail on armel builds.
