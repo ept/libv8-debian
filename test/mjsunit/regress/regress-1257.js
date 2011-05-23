@@ -1,4 +1,4 @@
-// Copyright 2008 the V8 project authors. All rights reserved.
+// Copyright 2011 the V8 project authors. All rights reserved.
 // Redistribution and use in source and binary forms, with or without
 // modification, are permitted provided that the following conditions are
 // met:
@@ -25,10 +25,34 @@
 // (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
 // OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
-var x  = 0;
-execScript('x = 1', 'javascript');
-assertEquals(1, x);
+function g(y) { assertEquals(y, 12); }
 
-execScript('x = 2', 'JavaScript');
-assertEquals(2, x);
+var X = 0;
 
+function foo () {
+  var cnt = 0;
+  var l = -1;
+  var x = 0;
+  while (1) switch (l) {
+      case -1:
+        var y = x + 12;
+        l = 0;
+        break;
+      case 0:
+        // Loop for to hit OSR.
+        if (cnt++ < 10000000) {
+          l = 0;
+          break;
+        } else {
+          l = 1;
+          break;
+        }
+      case 1:
+        // This case will contain deoptimization
+        // because it has no type feedback.
+        g(y);
+        return;
+    };
+}
+
+foo();
