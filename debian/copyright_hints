@@ -1,4 +1,4 @@
-Format: http://svn.debian.org/wsvn/dep/web/deps/dep5.mdwn?rev=166
+Format: http://svn.debian.org/wsvn/dep/web/deps/dep5.mdwn?rev=174
 Upstream-Name: FIXME
 Upstream-Contact: FIXME
 Source: FIXME
@@ -781,7 +781,6 @@ Files: LICENSE
  test/mjsunit/eval-enclosing-function-name.js
  test/mjsunit/eval-typeof-non-existing.js
  test/mjsunit/eval.js
- test/mjsunit/execScript-case-insensitive.js
  test/mjsunit/extra-arguments.js
  test/mjsunit/extra-commas.js
  test/mjsunit/for-in-delete.js
@@ -994,10 +993,12 @@ Files: LICENSE
  test/mjsunit/regress/regress-1218.js
  test/mjsunit/regress/regress-124.js
  test/mjsunit/regress/regress-1254366.js
+ test/mjsunit/regress/regress-1257.js
  test/mjsunit/regress/regress-1327557.js
- test/mjsunit/regress/regress-1341167.js
  test/mjsunit/regress/regress-1346700.js
  test/mjsunit/regress/regress-137.js
+ test/mjsunit/regress/regress-1401.js
+ test/mjsunit/regress/regress-1403.js
  test/mjsunit/regress/regress-1439135.js
  test/mjsunit/regress/regress-149.js
  test/mjsunit/regress/regress-1493017.js
@@ -1176,6 +1177,7 @@ Files: LICENSE
  test/mjsunit/regress/regress-r3391.js
  test/mjsunit/regress/regress-r4998.js
  test/mjsunit/regress/regress-swapelements.js
+ test/mjsunit/regress/splice-missing-wb.js
  test/mjsunit/samevalue.js
  test/mjsunit/scanner.js
  test/mjsunit/search-string-multiple.js
