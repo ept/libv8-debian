@@ -3,7 +3,7 @@ Priority: optional
 Maintainer: Debian Javascript Maintainers <pkg-javascript-devel@lists.alioth.debian.org>
 Uploaders: Jérémy Lal <kapouer@melix.org>,
  Jonas Smedegaard <dr@jones.dk>
-Build-Depends: @cdbs@
+Build-Depends: @cdbs@, libicu-dev
 Standards-Version: 3.9.2
 Section: libs
 Homepage: http://code.google.com/p/v8/

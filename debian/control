@@ -7,7 +7,7 @@ Build-Depends: devscripts (>= 2.10.7~),
  scons,
  cdbs (>= 0.4.85~),
  debhelper (>= 7.0.1),
- dh-buildinfo
+ dh-buildinfo, libicu-dev
 Standards-Version: 3.9.2
 Section: libs
 Homepage: http://code.google.com/p/v8/
