@@ -1,0 +1,56 @@
+Description: Enable the i18n extension needed by chromium 11
+Forwarded: not-needed
+Author: Giuseppe Iuculano <iuculano@debian.org>
+Last-Update: 2011-06-19
+Index: libv8-3.1.8.10/src/SConscript
+===================================================================
+--- libv8-3.1.8.10.orig/src/SConscript	2011-05-17 16:30:35.000000000 +0200
++++ libv8-3.1.8.10/src/SConscript	2011-05-17 16:31:59.865182296 +0200
+@@ -135,6 +135,7 @@
+     zone.cc
+     extensions/gc-extension.cc
+     extensions/externalize-string-extension.cc
++    extensions/experimental/i18n-extension.cc
+     """),
+   'arch:arm': Split("""
+     jump-target-light.cc
+Index: libv8-3.1.8.10/SConstruct
+===================================================================
+--- libv8-3.1.8.10.orig/SConstruct	2011-05-17 16:31:28.000000000 +0200
++++ libv8-3.1.8.10/SConstruct	2011-05-17 16:31:59.889183449 +0200
+@@ -161,7 +161,7 @@
+       'CCFLAGS':      ['-ansi'] + GCC_EXTRA_CCFLAGS,
+       'library:shared': {
+         'CPPDEFINES': ['V8_SHARED'],
+-        'LIBS': ['pthread']
++        'LIBS': ['pthread', 'icui18n', 'icuuc', 'icudata']
+       }
+     },
+     'os:macos': {
+@@ -353,7 +353,7 @@
+ MKSNAPSHOT_EXTRA_FLAGS = {
+   'gcc': {
+     'os:linux': {
+-      'LIBS': ['pthread'],
++      'LIBS': ['pthread', 'icui18n', 'icuuc', 'icudata'],
+     },
+     'os:macos': {
+       'LIBS': ['pthread'],
+@@ -469,7 +469,7 @@
+       'CCFLAGS': ['-fno-rtti', '-fno-exceptions']
+     },
+     'os:linux': {
+-      'LIBS':         ['pthread'],
++      'LIBS':         ['pthread', 'icui18n', 'icuuc', 'icudata'],
+     },
+     'os:macos': {
+       'LIBS':         ['pthread'],
+@@ -1181,7 +1181,7 @@
+     env.Install(libdir, lib[0])
+     if dir not in install_dirs:
+       install_dirs += libdir
+-  env.Install(incdir, [ 'include/v8.h', 'include/v8-debug.h', 'include/v8-profiler.h', 'include/v8-preparser.h', 'include/v8-testing.h', 'include/v8stdint.h' ]);
++  env.Install(incdir, [ 'include/v8.h', 'include/v8-debug.h', 'include/v8-profiler.h', 'include/v8-preparser.h', 'include/v8-testing.h', 'include/v8stdint.h', 'src/extensions/experimental/i18n-extension.h' ]);
+   install_dirs += incdir
+   env.Alias('install', install_dirs)
+ 

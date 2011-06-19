@@ -1,3 +1,4 @@
 0002-armel-build.patch
 0003-add-the-install-target.patch
 0004-gcc-opt-level-2.patch
+0005-enable-i18n-extension.patch
