@@ -1325,6 +1325,7 @@ Files: AUTHORS
  debian/patches/0002-armel-build.patch
  debian/patches/0003-add-the-install-target.patch
  debian/patches/0004-gcc-opt-level-2.patch
+ debian/patches/0005-enable-i18n-extension.patch
  debian/patches/series
  debian/rules
  debian/source/format
