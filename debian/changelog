@@ -1,11 +1,15 @@
-libv8 (3.1.8.22-1) UNRELEASED; urgency=low
+libv8 (3.1.8.22-1) unstable; urgency=low
 
+  [ Jérémy Lal ]
   * Enable i18n experimental extension. Build-Depends on libicu-dev.
-    Closes: bug#627066.
-  * Revert "Temporarily allow some tests to fail on armel builds."
-    This is covered by disabling cctests. 
+    Closes: bug#627066. Thanks to Giuseppe Iuculano.
+  * Stop special-casing some regression tests on armel (introduced in
+    3.1.8.10-2): Solved by disabling cctests (since 3.1.8.10-3).
 
- -- Jérémy Lal <kapouer@melix.org>  Sat, 23 Apr 2011 18:36:40 +0200
+  [ Jonas Smedegaard ]
+  * Unfuzz patches.
+
+ -- Jonas Smedegaard <dr@jones.dk>  Mon, 20 Jun 2011 22:24:02 +0200
 
 libv8 (3.1.8.10-3) unstable; urgency=low
 
