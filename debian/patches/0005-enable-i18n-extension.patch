@@ -2,10 +2,8 @@ Description: Enable the i18n extension needed by chromium 11
 Forwarded: not-needed
 Author: Giuseppe Iuculano <iuculano@debian.org>
 Last-Update: 2011-06-19
-Index: libv8-3.1.8.10/src/SConscript
-===================================================================
---- libv8-3.1.8.10.orig/src/SConscript	2011-05-17 16:30:35.000000000 +0200
-+++ libv8-3.1.8.10/src/SConscript	2011-05-17 16:31:59.865182296 +0200
+--- a/src/SConscript
++++ b/src/SConscript
 @@ -135,6 +135,7 @@
      zone.cc
      extensions/gc-extension.cc
@@ -14,10 +12,8 @@ Index: libv8-3.1.8.10/src/SConscript
      """),
    'arch:arm': Split("""
      jump-target-light.cc
-Index: libv8-3.1.8.10/SConstruct
-===================================================================
---- libv8-3.1.8.10.orig/SConstruct	2011-05-17 16:31:28.000000000 +0200
-+++ libv8-3.1.8.10/SConstruct	2011-05-17 16:31:59.889183449 +0200
+--- a/SConstruct
++++ b/SConstruct
 @@ -161,7 +161,7 @@
        'CCFLAGS':      ['-ansi'] + GCC_EXTRA_CCFLAGS,
        'library:shared': {
