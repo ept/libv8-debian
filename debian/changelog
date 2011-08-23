@@ -1,3 +1,13 @@
+libv8 (3.1.8.26-1) UNRELEASED; urgency=low
+
+  New upstream release.
+
+  [ Jonas Smedegaard ]
+  * Bump version in debian/control (and debian/control.in).
+  * Add -Wno-unused-but-set-variable needed with recent GCC.
+
+ -- Jonas Smedegaard <dr@jones.dk>  Wed, 24 Aug 2011 01:59:25 +0200
+
 libv8 (3.1.8.22-1) unstable; urgency=low
 
   [ Jérémy Lal ]
