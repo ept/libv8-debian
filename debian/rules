@@ -18,8 +18,8 @@ DEB_COPYRIGHT_CHECK_IGNORE_REGEX = ^(benchmarks/v8-logo\.png|test/mjsunit/unicod
 
 DEB_DH_MAKESHLIBS_ARGS = -- -c4
 
-CXXFLAGS += -fno-strict-aliasing
-CFLAGS += -fno-strict-aliasing
+CXXFLAGS += -fno-strict-aliasing -Wno-unused-but-set-variable
+CFLAGS += -fno-strict-aliasing -Wno-unused-but-set-variable
 export CFLAGS
 export CXXFLAGS
 
