@@ -43,7 +43,7 @@ DEB_SCONS_ENVVARS = SONAME=libv8.so.$(SONAME)
 # regression tests need to build shell for mjsunit
 DEB_SCONS_CHECK_TARGET = sample sample=shell
 
-DEB_SCONS_INSTALL_OPTIONS += DESTDIR="$(cdbs_curdestdir)"
+DEB_SCONS_INSTALL_OPTIONS += DESTDIR="debian/tmp"
 
 DEB_DH_INSTALL_ARGS_$(LIBPKGNAME) = usr/lib/libv8.so.$(SONAME)
 
