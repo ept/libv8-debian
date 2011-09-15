@@ -5,7 +5,7 @@ Uploaders: Jérémy Lal <kapouer@melix.org>,
  Jonas Smedegaard <dr@jones.dk>
 Build-Depends: devscripts (>= 2.10.7~),
  scons,
- cdbs (>= 0.4.85~),
+ cdbs (>= 0.4.62),
  debhelper (>= 7.0.1),
  dh-buildinfo, libicu-dev
 Standards-Version: 3.9.2

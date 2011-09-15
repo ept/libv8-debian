@@ -1,3 +1,9 @@
+libv8 (3.1.8.26-2~lucid) lucid; urgency=low
+
+  Backported Debian package build to Ubuntu Lucid (10.4).
+
+ -- Martin Kleppmann <martin@rapportive.com>  Thu, 15 Sep 2011 21:22:06 +0000
+
 libv8 (3.1.8.26-1) UNRELEASED; urgency=low
 
   New upstream release.
