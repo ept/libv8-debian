@@ -4,17 +4,17 @@ Author: Giuseppe Iuculano <iuculano@debian.org>
 Last-Update: 2011-06-19
 --- a/src/SConscript
 +++ b/src/SConscript
-@@ -135,6 +135,7 @@
+@@ -136,6 +136,7 @@
      zone.cc
      extensions/gc-extension.cc
      extensions/externalize-string-extension.cc
 +    extensions/experimental/i18n-extension.cc
      """),
    'arch:arm': Split("""
-     jump-target-light.cc
+     arm/builtins-arm.cc
 --- a/SConstruct
 +++ b/SConstruct
-@@ -161,7 +161,7 @@
+@@ -101,7 +101,7 @@
        'CCFLAGS':      ['-ansi'] + GCC_EXTRA_CCFLAGS,
        'library:shared': {
          'CPPDEFINES': ['V8_SHARED'],
@@ -23,7 +23,7 @@ Last-Update: 2011-06-19
        }
      },
      'os:macos': {
-@@ -353,7 +353,7 @@
+@@ -347,7 +347,7 @@
  MKSNAPSHOT_EXTRA_FLAGS = {
    'gcc': {
      'os:linux': {
@@ -32,8 +32,8 @@ Last-Update: 2011-06-19
      },
      'os:macos': {
        'LIBS': ['pthread'],
-@@ -469,7 +469,7 @@
-       'CCFLAGS': ['-fno-rtti', '-fno-exceptions']
+@@ -464,7 +464,7 @@
+       'LINKFLAGS':    ['$CCFLAGS'],
      },
      'os:linux': {
 -      'LIBS':         ['pthread'],
@@ -41,7 +41,7 @@ Last-Update: 2011-06-19
      },
      'os:macos': {
        'LIBS':         ['pthread'],
-@@ -1181,7 +1181,7 @@
+@@ -1540,7 +1540,7 @@
      env.Install(libdir, lib[0])
      if dir not in install_dirs:
        install_dirs += libdir
