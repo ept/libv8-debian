@@ -1,4 +1,13 @@
-libv8 (3.1.8.26-1) UNRELEASED; urgency=low
+libv8 (3.6.4) unstable; urgency=low
+
+  New upstream release.
+
+  [ Martin Kleppmann ]
+  * Remove version number from the package name.
+
+ -- Martin Kleppmann <martin@rapportive.com>  Fri, 16 Sep 2011 05:37:51 +0000
+
+libv8 (3.1.8.26-1) unstable; urgency=low
 
   New upstream release.
 
