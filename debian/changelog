@@ -1,4 +1,10 @@
-libv8 (3.1.8.26-2~lucid) lucid; urgency=low
+libv8 (3.1.8.26-4~lucid) lucid; urgency=low
+
+  Removed version number from the name of the binary package.
+
+ -- Martin Kleppmann <martin@rapportive.com>  Fri, 16 Sep 2011 01:28:10 +0000
+
+libv8 (3.1.8.26-3~lucid) lucid; urgency=low
 
   Backported Debian package build to Ubuntu Lucid (10.4).
 
