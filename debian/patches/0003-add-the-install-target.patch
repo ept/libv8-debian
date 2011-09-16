@@ -6,17 +6,17 @@ Last-Update: 2011-04-13
 
 --- a/SConstruct
 +++ b/SConstruct
-@@ -818,6 +818,7 @@
+@@ -1130,6 +1130,7 @@
    result.Add('mode', 'compilation mode (debug, release)', 'release')
    result.Add('sample', 'build sample (shell, process, lineprocessor)', '')
    result.Add('cache', 'directory to use for scons build cache', '')
 +  result.Add('install', 'install result files', '')
    result.Add('env', 'override environment settings (NAME0:value0,NAME1:value1,...)', '')
    result.Add('importenv', 'import environment settings (NAME0,NAME1,...)', '')
-   for (name, option) in SIMPLE_OPTIONS.iteritems():
-@@ -1171,8 +1172,26 @@
-   env.Alias('sample', samples)
+   AddOptions(PLATFORM_OPTIONS, result)
+@@ -1530,8 +1531,26 @@
    env.Alias('d8', d8s)
+   env.Alias('preparser', preparsers)
  
 +  install_dirs = []
 +  destdir = ARGUMENTS.get('DESTDIR', '')
