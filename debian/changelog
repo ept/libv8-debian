@@ -1,9 +1,11 @@
-libv8 (3.6.4) lucid; urgency=low
+libv8 (3.6.4-1~lucid) lucid; urgency=low
 
   New upstream release.
 
   [ Martin Kleppmann ]
   * Remove version number from the package name.
+  * Remove support for ARM architectures (we don't need them).
+  * Remove i18n extension (not needed for server-side JS).
 
  -- Martin Kleppmann <martin@rapportive.com>  Fri, 16 Sep 2011 05:37:51 +0000
 
