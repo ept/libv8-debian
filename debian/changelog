@@ -1,4 +1,4 @@
-libv8 (3.6.4-1~natty) natty; urgency=low
+libv8 (3.6.4-2~natty) natty; urgency=low
 
   New upstream release.
 
@@ -6,6 +6,7 @@ libv8 (3.6.4-1~natty) natty; urgency=low
   * Remove version number from the package name.
   * Remove support for ARM architectures (we don't need them).
   * Remove i18n extension (not needed for server-side JS).
+  * Fix running of regression tests during build to use d8.
 
  -- Martin Kleppmann <martin@rapportive.com>  Fri, 16 Sep 2011 05:37:51 +0000
 
